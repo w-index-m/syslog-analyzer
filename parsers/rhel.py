@@ -1,5 +1,10 @@
 import re
 
+ICMP_REDIRECT_PATTERN = re.compile(
+    r"ICMP redirect (?:from ([\d\.]+) )?for ([\d\.]+)(?:.*?to ([\d\.]+))?",
+    re.IGNORECASE
+)
+
 # RHEL/Linux syslog formats:
 # RFC3164: <priority>Mon DD HH:MM:SS hostname process[pid]: message
 # RFC5424: <priority>version timestamp hostname app-name procid msgid message
@@ -89,7 +94,16 @@ def _get_tags(process: str, message: str, facility_name: str) -> list:
     if any(k in msg_lower for k in ["segfault", "segmentation fault"]):
         tags.append("クラッシュ"); tags.append("障害候補")
     if any(k in msg_lower for k in ["icmp redirect", "redirect for", "redirected"]):
-        tags.append("ICMP Redirect"); tags.append("障害候補")
+        tags.append("ICMP Redirect")
+        tags.append("障害候補")
+        m = ICMP_REDIRECT_PATTERN.search(message)
+        if m:
+            if m.group(1):
+                tags.append(f"redirect_to:{m.group(1)}")
+            if m.group(2):
+                tags.append(f"redirect_dest:{m.group(2)}")
+            if m.group(3):
+                tags.append(f"redirect_gw:{m.group(3)}")
     if any(k in msg_lower for k in ["started", "stopped", "restarted", "active"]):
         tags.append("サービス状態変化")
     return tags

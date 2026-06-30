@@ -1,5 +1,11 @@
 import re
 
+ICMP_REDIRECT_PATTERN = re.compile(
+    r"ICMP redirect sent to ([\d\.]+).*?(?:for dest|for) ([\d\.]+)"
+    r"(?:.*?use gw ([\d\.]+))?",
+    re.IGNORECASE
+)
+
 # Cisco IOS/IOS-XE syslog format:
 # <priority>timestamp: %FACILITY-SEVERITY-MNEMONIC: message
 # Example: <189>Jun 30 10:00:00 switch01 %SYS-5-CONFIG_I: Configured from console
@@ -46,6 +52,12 @@ def parse(raw: str, source_ip: str) -> dict | None:
     if "REDIRECT" in mnemonic or "ICMPREDIRECT" in mnemonic:
         tags.append("ICMP Redirect")
         tags.append("障害候補")
+        m = ICMP_REDIRECT_PATTERN.search(message)
+        if m:
+            tags.append(f"redirect_to:{m.group(1)}")
+            tags.append(f"redirect_dest:{m.group(2)}")
+            if m.group(3):
+                tags.append(f"redirect_gw:{m.group(3)}")
     return {
         "vendor": "Cisco IOS/IOS-XE",
         "hostname": hostname or source_ip,
