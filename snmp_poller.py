@@ -36,6 +36,15 @@ POLL_OIDS = {
     "ifInDiscards.1": "1.3.6.1.2.1.2.2.1.13.1",
     # BGPピア数 (Cisco)
     "bgpPeerState":   "1.3.6.1.2.1.15.3.1.2",
+    # ICMP統計 (ICMP-MIB) - 累積カウンタ、差分でスパイク検知
+    "icmpInRedirects":  "1.3.6.1.2.1.5.6.0",
+    "icmpOutRedirects": "1.3.6.1.2.1.5.13.0",
+}
+
+# 累積カウンタOID：前回値との差分でアラート判定
+COUNTER_OIDS = {
+    "icmpInRedirects":  {"warning": 10, "critical": 50, "unit": "redirects/poll", "label": "ICMP Redirect受信"},
+    "icmpOutRedirects": {"warning": 10, "critical": 50, "unit": "redirects/poll", "label": "ICMP Redirect送信"},
 }
 
 # 閾値アラート設定
@@ -168,6 +177,24 @@ def poll_device(ip: str, community: str = "public",
                         alert_level = "warning"
                 except ValueError:
                     pass
+            elif oid_name in COUNTER_OIDS:
+                # 累積カウンタ：前回値との差分でスパイク検知
+                th = COUNTER_OIDS[oid_name]
+                unit = th["unit"]
+                prev_row = conn.execute("""
+                    SELECT value FROM snmp_metrics
+                    WHERE source_ip=? AND oid_name=?
+                    ORDER BY recorded_at DESC LIMIT 1
+                """, (ip, oid_name)).fetchone()
+                if prev_row:
+                    try:
+                        diff = max(0, int(value) - int(prev_row[0]))
+                        if diff >= th["critical"]:
+                            alert_level = "critical"
+                        elif diff >= th["warning"]:
+                            alert_level = "warning"
+                    except (ValueError, TypeError):
+                        pass
 
             conn.execute("""
                 INSERT INTO snmp_metrics
@@ -408,6 +435,60 @@ def get_alert_metrics() -> list[dict]:
             AND recorded_at >= datetime('now', '-10 minutes')
             ORDER BY recorded_at DESC
         """).fetchall()]
+
+
+def get_icmp_redirect_latest() -> list[dict]:
+    """各デバイスの最新ICMP redirect累積カウンタと前回差分を返す"""
+    _init_snmp_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT m.source_ip, m.oid_name, m.value, m.alert_level, m.recorded_at
+            FROM snmp_metrics m
+            INNER JOIN (
+                SELECT source_ip, oid_name, MAX(recorded_at) AS max_ts
+                FROM snmp_metrics
+                WHERE oid_name IN ('icmpInRedirects','icmpOutRedirects')
+                GROUP BY source_ip, oid_name
+            ) latest
+            ON m.source_ip=latest.source_ip
+            AND m.oid_name=latest.oid_name
+            AND m.recorded_at=latest.max_ts
+            ORDER BY m.source_ip, m.oid_name
+        """).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            # 前回値を取得して差分計算
+            prev = conn.execute("""
+                SELECT value FROM snmp_metrics
+                WHERE source_ip=? AND oid_name=?
+                ORDER BY recorded_at DESC LIMIT 1 OFFSET 1
+            """, (d["source_ip"], d["oid_name"])).fetchone()
+            if prev:
+                try:
+                    d["diff"] = max(0, int(d["value"]) - int(prev[0]))
+                except (ValueError, TypeError):
+                    d["diff"] = None
+            else:
+                d["diff"] = None
+            result.append(d)
+        return result
+
+
+def get_icmp_redirect_trend(ip: str, hours: int = 1) -> list[dict]:
+    """指定デバイスのICMP redirect時系列データを返す"""
+    _init_snmp_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(r) for r in conn.execute("""
+            SELECT recorded_at, oid_name, value, alert_level
+            FROM snmp_metrics
+            WHERE source_ip=?
+            AND oid_name IN ('icmpInRedirects','icmpOutRedirects')
+            AND recorded_at >= datetime('now', ? || ' hours')
+            ORDER BY recorded_at ASC
+        """, (ip, f"-{hours}")).fetchall()]
 
 
 def get_metric_trend(ip: str, oid_name: str, hours: int = 1) -> list[dict]:

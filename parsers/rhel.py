@@ -88,6 +88,8 @@ def _get_tags(process: str, message: str, facility_name: str) -> list:
         tags.append("メモリ不足"); tags.append("障害候補")
     if any(k in msg_lower for k in ["segfault", "segmentation fault"]):
         tags.append("クラッシュ"); tags.append("障害候補")
+    if any(k in msg_lower for k in ["icmp redirect", "redirect for", "redirected"]):
+        tags.append("ICMP Redirect"); tags.append("障害候補")
     if any(k in msg_lower for k in ["started", "stopped", "restarted", "active"]):
         tags.append("サービス状態変化")
     return tags

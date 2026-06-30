@@ -43,6 +43,9 @@ def parse(raw: str, source_ip: str) -> dict | None:
         tags.append("設定変更")
     if "AUTH" in mnemonic or "LOGIN" in mnemonic:
         tags.append("認証")
+    if "REDIRECT" in mnemonic or "ICMPREDIRECT" in mnemonic:
+        tags.append("ICMP Redirect")
+        tags.append("障害候補")
     return {
         "vendor": "Cisco IOS/IOS-XE",
         "hostname": hostname or source_ip,
