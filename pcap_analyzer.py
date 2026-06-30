@@ -1,6 +1,6 @@
 """
 Wireshark pcap/pcapng ファイルのパーサー。
-ICMP redirect を中心に、RIP / ARP 異常 / TCP 問題なども抽出する。
+ICMP redirect を中心に、RIP / ARP 異常 / TCP 問題 / pcap内syslog も抽出する。
 """
 import io
 import struct
@@ -9,6 +9,9 @@ from datetime import datetime
 
 import dpkt
 
+
+# syslog が流れる可能性のある UDP ポート
+SYSLOG_PORTS = {514, 5140, 5141, 516, 601}
 
 # ICMP type / code 定義
 ICMP_REDIRECT = 5
@@ -76,6 +79,7 @@ def analyze_pcap(data: bytes) -> dict:
         "rip_packets": [],
         "arp_anomalies": [],
         "tcp_issues": [],
+        "syslog_packets": [],   # pcap内に含まれるsyslogメッセージ
         "total_packets": 0,
         "capture_start": "",
         "capture_end": "",
@@ -156,7 +160,7 @@ def analyze_pcap(data: bytes) -> dict:
                         key = (src, dst)
                         tcp_rst_count[key] = tcp_rst_count.get(key, 0) + 1
 
-                # UDP RIP
+                # UDP: RIP / syslog
                 elif isinstance(ip.data, dpkt.udp.UDP):
                     udp = ip.data
                     if udp.dport == RIP_PORT or udp.sport == RIP_PORT:
@@ -172,6 +176,19 @@ def analyze_pcap(data: bytes) -> dict:
                                 "command":   cmd_str,
                                 "size":      len(udp.data),
                             })
+                        except Exception:
+                            pass
+                    elif udp.dport in SYSLOG_PORTS or udp.sport in SYSLOG_PORTS:
+                        try:
+                            raw_msg = udp.data.decode("utf-8", errors="replace").strip()
+                            if raw_msg:
+                                result["syslog_packets"].append({
+                                    "timestamp": _ts_str(ts),
+                                    "src_ip":    src,
+                                    "dst_ip":    dst,
+                                    "port":      udp.dport,
+                                    "raw":       raw_msg,
+                                })
                         except Exception:
                             pass
 
@@ -216,5 +233,15 @@ def analyze_pcap(data: bytes) -> dict:
     if timestamps:
         result["capture_start"] = _ts_str(min(timestamps))
         result["capture_end"]   = _ts_str(max(timestamps))
+
+    # pcap内syslogを既存パーサーで解析
+    if result["syslog_packets"]:
+        try:
+            from parsers import parse_syslog
+            for pkt in result["syslog_packets"]:
+                parsed = parse_syslog(pkt["raw"], pkt["src_ip"])
+                pkt["parsed"] = parsed  # vendor/severity/facility/message/tags など
+        except Exception:
+            pass
 
     return result

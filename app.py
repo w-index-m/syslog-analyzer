@@ -1381,15 +1381,18 @@ with tab_pcap:
             # ── 概要 ───────────────────────────────────
             st.markdown("---")
             st.markdown("### 📊 キャプチャ概要")
-            ov_cols = st.columns(4)
+            ov_cols = st.columns(5)
             with ov_cols[0]:
                 st.metric("総パケット数", f"{res['total_packets']:,}")
             with ov_cols[1]:
                 st.metric("ICMP redirect 検出", len(res["icmp_redirects"]),
                           delta="⚠️ 要確認" if res["icmp_redirects"] else None)
             with ov_cols[2]:
-                st.metric("RIPパケット", len(res["rip_packets"]))
+                st.metric("pcap内syslog", len(res.get("syslog_packets", [])),
+                          delta="📋 解析済" if res.get("syslog_packets") else None)
             with ov_cols[3]:
+                st.metric("RIPパケット", len(res["rip_packets"]))
+            with ov_cols[4]:
                 st.metric("ARP異常", len(res["arp_anomalies"]),
                           delta="⚠️ 要確認" if res["arp_anomalies"] else None)
             st.caption(f"📅 キャプチャ範囲: {res['capture_start']} 〜 {res['capture_end']}")
@@ -1578,6 +1581,63 @@ with tab_pcap:
 
             else:
                 st.success("✅ ICMP redirectパケットは検出されませんでした")
+
+            # ── pcap内 syslog ──────────────────────────
+            syslog_pkts = res.get("syslog_packets", [])
+            if syslog_pkts:
+                st.markdown("---")
+                st.markdown(f"### 📋 pcap内 syslogメッセージ（{len(syslog_pkts)}件）")
+                st.caption("キャプチャ内のUDP 514/5140パケットからsyslogを抽出し、既存パーサーで解析しました。")
+
+                sev_color_map = {
+                    "EMERGENCY": "#dc2626", "ALERT": "#dc2626", "CRITICAL": "#dc2626",
+                    "ERROR": "#ea580c", "WARNING": "#b45309",
+                    "NOTICE": "#2563eb", "INFO": "#16a34a", "DEBUG": "#64748b"
+                }
+
+                # 重要度サマリ
+                from collections import Counter
+                sev_counts = Counter(
+                    p.get("parsed", {}).get("severity", "UNKNOWN")
+                    for p in syslog_pkts
+                )
+                sc_cols = st.columns(len(sev_counts) or 1)
+                for idx, (sev, cnt) in enumerate(sorted(sev_counts.items())):
+                    color = sev_color_map.get(sev, "#64748b")
+                    with sc_cols[idx % len(sc_cols)]:
+                        st.markdown(f"""
+<div class="metric-card">
+  <div style="color:{color};font-size:12px;font-weight:bold;">{sev}</div>
+  <div style="font-size:24px;font-weight:bold;color:{color};">{cnt}</div>
+</div>""", unsafe_allow_html=True)
+
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # ログ一覧
+                for pkt in syslog_pkts:
+                    parsed = pkt.get("parsed") or {}
+                    sev = parsed.get("severity", "INFO")
+                    sev_c = sev_color_map.get(sev, "#64748b")
+                    vendor  = parsed.get("vendor", "Generic")
+                    host    = parsed.get("hostname", pkt["src_ip"])
+                    process = parsed.get("process", "")
+                    message = parsed.get("message", pkt["raw"])
+                    tags    = parsed.get("tags", [])
+                    st.markdown(f"""
+<div class="log-card" style="border-left-color:{sev_c}">
+  <div style="display:flex;justify-content:space-between;align-items:center;">
+    <span style="color:{sev_c};font-weight:bold;">◉ {sev}</span>
+    <span style="color:#6b7280;font-size:11px;">{pkt['timestamp']} | {pkt['src_ip']}:{pkt['port']}</span>
+  </div>
+  <div style="color:#1f2937;margin:4px 0;">
+    <span style="color:#0891b2;">[{vendor}]</span>
+    <span style="color:#92400e;"> {host}</span>
+    <span style="color:#9333ea;"> {process}</span>
+  </div>
+  <div style="color:#1f2937;margin:4px 0;word-break:break-all;">{message[:300]}</div>
+  <div>{"".join(f'<span class="tag-chip">{t}</span>' for t in tags)}</div>
+</div>
+""", unsafe_allow_html=True)
 
             # ── RIP パケット ───────────────────────────
             if res["rip_packets"]:
