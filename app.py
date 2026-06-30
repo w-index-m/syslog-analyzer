@@ -873,6 +873,39 @@ snmp-server trap enable
             st.info("デバイスが登録されていません。上のフォームから追加してください。")
 
         st.markdown("---")
+        st.markdown("### 🔀 ICMP Redirect 監視")
+        st.caption("ICMP redirectが急増するとルーティング設定の問題・ループ・意図しないトポロジ変化の可能性があります。")
+        icmp_rows = snmp_poller.get_icmp_redirect_latest()
+        if icmp_rows:
+            for row in icmp_rows:
+                label = "受信" if "In" in row["oid_name"] else "送信"
+                diff_val = row.get("diff")
+                al = row.get("alert_level", "none")
+                al_color = "#dc2626" if al == "critical" else "#b45309" if al == "warning" else "#16a34a"
+                al_icon  = "🔴" if al == "critical" else "🟡" if al == "warning" else "🟢"
+                diff_str = f"+{diff_val}/poll" if diff_val is not None else "初回取得"
+                st.markdown(f"""
+<div class="log-card" style="border-left-color:{al_color}">
+  <span style="color:{al_color}; font-weight:bold;">{al_icon} ICMP Redirect {label}</span>
+  <span style="color:#0891b2; margin-left:8px;">{row['source_ip']}</span>
+  <span style="color:#6b7280; margin-left:8px; font-size:12px;">累積: {row['value']} | 今回増分: {diff_str}</span>
+  <span style="color:#6b7280; float:right; font-size:11px;">{row['recorded_at'][:19]}</span>
+</div>
+""", unsafe_allow_html=True)
+            # 相関syslogを表示
+            import db as _db
+            redirect_logs = [l for l in _db.get_logs(limit=200)
+                             if "ICMP Redirect" in (l.get("tags") or [])]
+            if redirect_logs:
+                with st.expander(f"📋 関連syslogログ ({len(redirect_logs)}件)"):
+                    for rl in redirect_logs[:20]:
+                        st.markdown(f"- `{rl.get('received_at','')[:19]}` **{rl.get('source_ip','')}** {rl.get('message','')[:120]}")
+            else:
+                st.caption("syslogでのICMP redirect検出なし（機器側のlogging設定確認を推奨）")
+        else:
+            st.info("ICMP redirectデータなし。デバイスを登録してポーリングを開始してください。")
+
+        st.markdown("---")
         st.markdown("### 閾値アラート（直近10分）")
         alerts = snmp_poller.get_alert_metrics()
         if alerts:
