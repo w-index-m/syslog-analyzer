@@ -360,9 +360,10 @@ _process_queue()
 # ─────────────────────────────────────────
 # メインUI
 # ─────────────────────────────────────────
-tab_health, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab_health, tab1, tab2, tab3, tab4, tab5, tab_pcap = st.tabs([
     "📊 品質ルーブリック", "📋 ログビューア", "📊 テレメトリダッシュボード",
-    "📡 SNMPモニター", "🗂️ 機器コンフィグ", "📖 セットアップガイド"
+    "📡 SNMPモニター", "🗂️ 機器コンフィグ", "📖 セットアップガイド",
+    "📦 パケット解析"
 ])
 
 # ═══════════════════════════════════════════
@@ -1353,3 +1354,240 @@ output.logstash:
   # または直接syslog出力プラグインを使用
 ```
     """)
+
+# ═══════════════════════════════════════════
+# TAB: パケット解析（Wireshark pcap/pcapng）
+# ═══════════════════════════════════════════
+with tab_pcap:
+    import pcap_analyzer
+
+    st.markdown("## 📦 パケット解析（Wireshark pcap/pcapng）")
+    st.caption("Wiresharkでキャプチャしたファイルをアップロードすると、ICMP redirect・RIP・ARP異常などを自動解析します。")
+
+    uploaded_pcap = st.file_uploader(
+        "pcap / pcapng ファイルをアップロード",
+        type=["pcap", "pcapng", "cap"],
+        help="Wiresharkの「名前を付けて保存」で .pcapng 形式で保存したファイルをそのままアップロードできます。"
+    )
+
+    if uploaded_pcap is not None:
+        with st.spinner("パケットを解析中..."):
+            raw_bytes = uploaded_pcap.read()
+            res = pcap_analyzer.analyze_pcap(raw_bytes)
+
+        if res["error"]:
+            st.error(f"解析エラー: {res['error']}")
+        else:
+            # ── 概要 ───────────────────────────────────
+            st.markdown("---")
+            st.markdown("### 📊 キャプチャ概要")
+            ov_cols = st.columns(4)
+            with ov_cols[0]:
+                st.metric("総パケット数", f"{res['total_packets']:,}")
+            with ov_cols[1]:
+                st.metric("ICMP redirect 検出", len(res["icmp_redirects"]),
+                          delta="⚠️ 要確認" if res["icmp_redirects"] else None)
+            with ov_cols[2]:
+                st.metric("RIPパケット", len(res["rip_packets"]))
+            with ov_cols[3]:
+                st.metric("ARP異常", len(res["arp_anomalies"]),
+                          delta="⚠️ 要確認" if res["arp_anomalies"] else None)
+            st.caption(f"📅 キャプチャ範囲: {res['capture_start']} 〜 {res['capture_end']}")
+
+            # ── ICMP redirect 詳細 ─────────────────────
+            st.markdown("---")
+            st.markdown("### 🔀 ICMP Redirect パケット詳細")
+            if res["icmp_redirects"]:
+                df_red = pd.DataFrame(res["icmp_redirects"])
+
+                # 統計サマリ
+                st.markdown("**通信ペア別 redirect 発生回数**")
+                pair_count = (
+                    df_red.groupby(["router_ip", "target_ip", "gateway", "orig_dst"])
+                    .size().reset_index(name="回数")
+                    .sort_values("回数", ascending=False)
+                )
+                pair_count.columns = ["Redirectを送ったルーター", "Redirectを受けたホスト",
+                                       "本来のゲートウェイ", "元パケットの宛先", "回数"]
+                st.dataframe(pair_count, use_container_width=True, hide_index=True)
+
+                # syslog との統合表示
+                st.markdown("**syslog検出との照合**")
+                all_syslog_redirect = [
+                    l for l in db.get_logs(limit=500)
+                    if "ICMP Redirect" in (l.get("tags") or "")
+                ]
+                snmp_latest = snmp_poller.get_icmp_redirect_latest()
+
+                col_p, col_s, col_n = st.columns(3)
+                with col_p:
+                    st.markdown(f"""
+<div class="metric-card">
+  <div style="color:#6b7280;font-size:12px;">pcapng検出</div>
+  <div style="font-size:28px;font-weight:bold;color:#dc2626;">{len(res['icmp_redirects'])}</div>
+  <div style="font-size:11px;color:#6b7280;">パケット</div>
+</div>""", unsafe_allow_html=True)
+                with col_s:
+                    st.markdown(f"""
+<div class="metric-card">
+  <div style="color:#6b7280;font-size:12px;">syslog検出</div>
+  <div style="font-size:28px;font-weight:bold;color:#b45309;">{len(all_syslog_redirect)}</div>
+  <div style="font-size:11px;color:#6b7280;">ログエントリ</div>
+</div>""", unsafe_allow_html=True)
+                with col_n:
+                    total_snmp = sum(int(r.get("value", 0)) for r in snmp_latest
+                                     if "In" in r.get("oid_name", ""))
+                    st.markdown(f"""
+<div class="metric-card">
+  <div style="color:#6b7280;font-size:12px;">SNMP累積カウンタ</div>
+  <div style="font-size:28px;font-weight:bold;color:#7c3aed;">{total_snmp:,}</div>
+  <div style="font-size:11px;color:#6b7280;">icmpInRedirects</div>
+</div>""", unsafe_allow_html=True)
+
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # 全パケット一覧
+                with st.expander(f"📋 全 {len(res['icmp_redirects'])} パケット一覧"):
+                    df_show = df_red[["timestamp","router_ip","target_ip",
+                                       "gateway","orig_src","orig_dst","orig_proto","code_desc"]]
+                    df_show.columns = ["時刻","ルーターIP","対象ホスト",
+                                        "正しいGW","元送信元","元宛先","プロトコル","種別"]
+                    st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+                # AI統合診断
+                st.markdown("---")
+                st.markdown("### 🤖 pcap + syslog + SNMP 統合AI診断")
+                st.caption("3つのデータソースを統合してICMP redirect の根本原因をAIが推定します。")
+
+                llm_ok = analyzer.check_claude_available() or analyzer.check_ollama_available()
+                if llm_ok:
+                    if st.button("🔍 統合AI診断を実行", key="pcap_ai_diag"):
+                        # ルーターIPを自動検出
+                        router_ips = df_red["router_ip"].unique().tolist()
+                        sel_router = router_ips[0] if router_ips else ""
+
+                        # routing summary（SNMP or コンフィグ）
+                        routing_summary = ""
+                        snmp_routes = snmp_poller.get_routing_table(sel_router)
+                        if snmp_routes:
+                            routing_summary = "\n".join(
+                                f"{r['dest']}/{r['mask']} via {r['nexthop']} ({r['proto']})"
+                                for r in snmp_routes
+                            )
+                        else:
+                            cfg = db.get_device_config(sel_router)
+                            if cfg:
+                                routing_summary = cfg.get("routing_summary","") or ""
+
+                        # pcap 情報を補足コンテキストとして追加
+                        pcap_ctx = f"""
+【pcapng解析結果】
+- キャプチャ期間: {res['capture_start']} 〜 {res['capture_end']}
+- 総パケット数: {res['total_packets']}
+- ICMP redirect検出: {len(res['icmp_redirects'])}パケット
+- 主なredirect通信ペア:
+"""
+                        for _, row in pair_count.head(5).iterrows():
+                            pcap_ctx += (f"  {row.iloc[0]} → {row.iloc[1]} "
+                                         f"(GW:{row.iloc[2]}, 宛先:{row.iloc[3]}) "
+                                         f"{row.iloc[4]}回\n")
+
+                        dev_logs = [l for l in all_syslog_redirect
+                                    if l.get("source_ip") == sel_router]
+
+                        with st.spinner("AIが pcap + syslog + SNMP を統合分析中..."):
+                            result_ai = analyzer.diagnose_icmp_redirect(
+                                ip=sel_router,
+                                snmp_data=snmp_latest,
+                                redirect_logs=dev_logs,
+                                routing_summary=routing_summary + "\n" + pcap_ctx,
+                                mode=st.session_state.get("llm_mode", "auto")
+                            )
+                        if result_ai:
+                            st.markdown(f"**🎯 根本原因:** {result_ai.get('root_cause','')}")
+                            if result_ai.get("causal_chain"):
+                                st.markdown("**🔗 因果連鎖:** " + " → ".join(result_ai["causal_chain"]))
+                            if result_ai.get("routing_issue"):
+                                st.markdown(f"**⚙️ ルーティング問題:** {result_ai.get('routing_issue','')}")
+                            st.markdown(f"**🚨 最優先対処:** {result_ai.get('priority_action','')}")
+                            if result_ai.get("additional_checks"):
+                                st.markdown("**📋 追加確認事項:**")
+                                for c in result_ai["additional_checks"]:
+                                    st.markdown(f"  - {c}")
+                            st.warning(f"**⚠️ 放置リスク:** {result_ai.get('risk_if_ignored','')}")
+                            st.caption(f"診断モデル: {result_ai.get('diagnosis_model','')} | "
+                                       f"データソース: pcapng + syslog + SNMP")
+                else:
+                    st.caption("AI診断にはClaude APIまたはOllamaの設定が必要です（サイドバー参照）")
+
+            else:
+                st.success("✅ ICMP redirectパケットは検出されませんでした")
+
+            # ── RIP パケット ───────────────────────────
+            if res["rip_packets"]:
+                st.markdown("---")
+                st.markdown("### 🔄 RIPパケット")
+                df_rip = pd.DataFrame(res["rip_packets"])
+                df_rip.columns = ["時刻","送信元","宛先","バージョン","コマンド","サイズ(bytes)"]
+                st.dataframe(df_rip, use_container_width=True, hide_index=True)
+                rip_peers = df_rip["送信元"].unique()
+                st.caption(f"RIPネイバー候補: {', '.join(rip_peers)}")
+
+            # ── ARP 異常 ───────────────────────────────
+            if res["arp_anomalies"]:
+                st.markdown("---")
+                st.markdown("### ⚠️ ARP 異常検出")
+                df_arp = pd.DataFrame(res["arp_anomalies"])
+                df_arp.columns = ["時刻","IPアドレス","旧MACアドレス","新MACアドレス","説明"]
+                st.dataframe(df_arp, use_container_width=True, hide_index=True)
+
+            # ── TCP 問題 ───────────────────────────────
+            if res["tcp_issues"]:
+                st.markdown("---")
+                st.markdown("### 🔌 TCP RST 多発")
+                df_tcp = pd.DataFrame(res["tcp_issues"])
+                df_tcp.columns = ["送信元","宛先","RST回数","説明"]
+                st.dataframe(df_tcp, use_container_width=True, hide_index=True)
+
+            # ── ICMP 分布 ──────────────────────────────
+            if res["icmp_summary"]:
+                st.markdown("---")
+                st.markdown("### 📈 ICMP タイプ別分布")
+                df_icmp = pd.DataFrame(res["icmp_summary"])
+                df_icmp["label"] = df_icmp.apply(lambda r: f"Type{r['type']} {r['name']}", axis=1)
+                st.bar_chart(df_icmp.set_index("label")["count"])
+
+    else:
+        st.markdown("""
+### 使い方
+
+1. **Wiresharkでキャプチャ** → `ファイル` → `名前を付けて保存` → `.pcapng` 形式で保存
+2. **上のアップローダーにドラッグ&ドロップ**
+3. 自動解析結果が表示されます
+
+---
+
+### キャプチャのポイント（ICMP redirect 調査時）
+
+```
+# センターCatalyst に SSHログインし、debug を有効化
+debug ip icmp
+
+# またはWiresharkをセンターに繋がるPCで実行
+# フィルター例（ICMP redirectのみ表示）:
+icmp.type == 5
+
+# RIPも合わせて確認したい場合:
+icmp.type == 5 or udp.port == 520
+```
+
+### このツールで解析できること
+
+| 項目 | 内容 |
+|------|------|
+| 🔀 ICMP redirect | どのルーターが・どのホストに・どのGWへredirectしたか |
+| 🔄 RIP | ネイバー一覧・Request/Response の交換状況 |
+| ⚠️ ARP異常 | MACアドレス変化（ARPスプーフィング検出） |
+| 🔌 TCP RST多発 | 接続拒否・強制切断が多い通信ペア |
+| 🤖 AI統合診断 | pcap + syslog + SNMP を統合してAIが根本原因推定 |
+        """)
