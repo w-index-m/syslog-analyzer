@@ -1399,6 +1399,62 @@ with tab_pcap:
             st.markdown("### 🔀 ICMP Redirect パケット詳細")
             if res["icmp_redirects"]:
                 df_red = pd.DataFrame(res["icmp_redirects"])
+                df_red["ts"] = pd.to_datetime(df_red["timestamp"], format="ISO8601", errors="coerce")
+
+                # ── 時間あたりの発生数タイムライン ──
+                st.markdown("**📈 時間あたりの発生数**")
+                capture_sec = (df_red["ts"].max() - df_red["ts"].min()).total_seconds()
+                if capture_sec <= 120:
+                    freq, freq_label = "5s", "5秒"
+                elif capture_sec <= 600:
+                    freq, freq_label = "1min", "1分"
+                elif capture_sec <= 3600:
+                    freq, freq_label = "5min", "5分"
+                else:
+                    freq, freq_label = "15min", "15分"
+
+                df_timeline = (
+                    df_red.set_index("ts")
+                    .resample(freq)
+                    .size()
+                    .reset_index()
+                )
+                df_timeline.columns = ["時刻", f"redirect数/{freq_label}"]
+                df_timeline["時刻"] = df_timeline["時刻"].dt.strftime("%H:%M:%S")
+                st.line_chart(df_timeline.set_index("時刻"))
+                st.caption(f"集計単位: {freq_label}　最大: {df_timeline.iloc[:,1].max()} パケット/{freq_label}")
+
+                st.markdown("---")
+
+                # ── 送信元ルーター別 ──
+                lc1, lc2 = st.columns(2)
+                with lc1:
+                    st.markdown("**🖥️ Redirectを送ったルーター別 発生数**")
+                    router_count = df_red["router_ip"].value_counts().reset_index()
+                    router_count.columns = ["ルーターIP", "件数"]
+                    st.bar_chart(router_count.set_index("ルーターIP"))
+
+                with lc2:
+                    st.markdown("**📨 Redirectを受けたホスト別 発生数**")
+                    target_count = df_red["target_ip"].value_counts().reset_index()
+                    target_count.columns = ["対象ホストIP", "件数"]
+                    st.bar_chart(target_count.set_index("対象ホストIP"))
+
+                # ── redirect先（元パケット宛先・GW）──
+                st.markdown("---")
+                dc1, dc2 = st.columns(2)
+                with dc1:
+                    st.markdown("**🎯 redirect元パケット宛先（orig_dst）別**")
+                    dest_count = df_red["orig_dst"].value_counts().reset_index()
+                    dest_count.columns = ["元パケット宛先IP", "件数"]
+                    st.dataframe(dest_count, use_container_width=True, hide_index=True)
+                with dc2:
+                    st.markdown("**🔀 正しいゲートウェイ（gateway）別**")
+                    gw_count = df_red["gateway"].value_counts().reset_index()
+                    gw_count.columns = ["ゲートウェイIP", "件数"]
+                    st.dataframe(gw_count, use_container_width=True, hide_index=True)
+
+                st.markdown("---")
 
                 # 統計サマリ
                 st.markdown("**通信ペア別 redirect 発生回数**")
