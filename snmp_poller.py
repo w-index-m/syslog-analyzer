@@ -505,6 +505,165 @@ def get_metric_trend(ip: str, oid_name: str, hours: int = 1) -> list[dict]:
 
 
 # ─────────────────────────────────────────
+# ルーティングテーブル取得（ipRouteTable Walk）
+# ─────────────────────────────────────────
+
+# ipRouteTable (RFC1213-MIB) OID
+_ROUTE_OIDS = {
+    "dest":    "1.3.6.1.2.1.4.21.1.1",   # ipRouteDest
+    "mask":    "1.3.6.1.2.1.4.21.1.11",  # ipRouteMask
+    "nexthop": "1.3.6.1.2.1.4.21.1.7",   # ipRouteNextHop
+    "type":    "1.3.6.1.2.1.4.21.1.8",   # ipRouteType (3=local, 4=remote)
+    "proto":   "1.3.6.1.2.1.4.21.1.9",   # ipRouteProto (1=other,2=local,3=netmgmt,9=ospf,13=bgp...)
+}
+_ROUTE_TYPE_MAP  = {"1": "other", "2": "reject", "3": "local",  "4": "remote"}
+_ROUTE_PROTO_MAP = {"1": "other", "2": "local",  "3": "static", "9": "ospf",
+                    "10": "isis", "13": "bgp",   "14": "eigrp"}
+
+
+def _init_routing_table():
+    with sqlite3.connect(DB_PATH, check_same_thread=False) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS snmp_routing_table (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                fetched_at TEXT NOT NULL,
+                source_ip  TEXT NOT NULL,
+                dest       TEXT NOT NULL,
+                mask       TEXT NOT NULL,
+                nexthop    TEXT NOT NULL,
+                route_type TEXT,
+                proto      TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rt_ip ON snmp_routing_table(source_ip)")
+        conn.commit()
+
+
+async def _snmp_walk_route_async(ip: str, community: str, base_oid: str,
+                                  port: int, version: str, max_rows: int = 300) -> dict:
+    """ipRouteTable系OIDをWALKし {インデックス(=宛先IP): 値} を返す。
+    インデックスはベースOID以降の数値サフィックス（例: "10.0.0.0"）。"""
+    from pysnmp.hlapi.v3arch.asyncio import (
+        next_cmd, SnmpEngine, CommunityData, UdpTransportTarget,
+        ContextData, ObjectType, ObjectIdentity
+    )
+    ver_map = {"v1": 0, "v2c": 1}
+    mp_model = ver_map.get(version, 1)
+    result = {}
+    target = await UdpTransportTarget.create((ip, port), timeout=5, retries=1)
+    engine = SnmpEngine()
+    auth = CommunityData(community, mpModel=mp_model)
+    ctx = ContextData()
+
+    current_var_binds = [ObjectType(ObjectIdentity(base_oid))]
+    rows = 0
+
+    while rows < max_rows:
+        err_ind, err_st, _, var_bind_table = await next_cmd(
+            engine, auth, target, ctx, *current_var_binds
+        )
+        if err_ind or err_st or not var_bind_table:
+            break
+
+        new_var_binds = []
+        stop = False
+        for var_bind in var_bind_table:
+            o, v = var_bind
+            # 数値OID文字列に変換（名前解決に依存しない）
+            numeric = ".".join(str(x) for x in o.asTuple())
+            if not numeric.startswith(base_oid + "."):
+                stop = True
+                break
+            val_str = str(v)
+            if val_str in ("No more variables left in this MIB View", ""):
+                stop = True
+                break
+            # ベースOID以降のサフィックスをキーにする
+            suffix = numeric[len(base_oid) + 1:]
+            result[suffix] = val_str
+            new_var_binds.append(ObjectType(o))
+        if stop or not new_var_binds:
+            break
+        current_var_binds = new_var_binds
+        rows += 1
+
+    return result
+
+
+def fetch_routing_table(ip: str, community: str = "public",
+                        version: str = "v2c", port: int = 161) -> list[dict]:
+    """SNMPウォークでルーティングテーブルを取得してDBに保存し、ルート一覧を返す。"""
+    _init_routing_table()
+
+    walked = {}
+    for key, oid in _ROUTE_OIDS.items():
+        try:
+            walked[key] = _run_async(
+                _snmp_walk_route_async(ip, community, oid, port, version)
+            )
+        except Exception as e:
+            print(f"[RoutingTable WALK] {ip} {key}: {e}")
+            walked[key] = {}
+
+    # インデックス（宛先IP）でマージ
+    fetched_at = datetime.now().isoformat()
+    routes = []
+    for idx in walked.get("dest", {}):
+        dest    = walked["dest"].get(idx, "")
+        mask    = walked["mask"].get(idx, "")
+        nexthop = walked["nexthop"].get(idx, "")
+        rtype   = _ROUTE_TYPE_MAP.get(walked["type"].get(idx, ""), "")
+        proto   = _ROUTE_PROTO_MAP.get(walked["proto"].get(idx, ""), "")
+        if dest:
+            routes.append({"dest": dest, "mask": mask, "nexthop": nexthop,
+                           "type": rtype, "proto": proto})
+
+    # DBに保存（旧データを削除して置き換え）
+    with sqlite3.connect(DB_PATH, check_same_thread=False) as conn:
+        conn.execute("DELETE FROM snmp_routing_table WHERE source_ip=?", (ip,))
+        for r in routes:
+            conn.execute("""
+                INSERT INTO snmp_routing_table
+                (fetched_at, source_ip, dest, mask, nexthop, route_type, proto)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (fetched_at, ip, r["dest"], r["mask"], r["nexthop"], r["type"], r["proto"]))
+        conn.commit()
+
+    return routes
+
+
+def get_routing_table(ip: str) -> list[dict]:
+    """DBに保存済みのルーティングテーブルを返す。"""
+    _init_routing_table()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(r) for r in conn.execute("""
+            SELECT dest, mask, nexthop, route_type, proto, fetched_at
+            FROM snmp_routing_table WHERE source_ip=?
+            ORDER BY dest
+        """, (ip,)).fetchall()]
+
+
+def route_lookup(ip: str, dest_ip: str) -> dict | None:
+    """宛先IPがルーティングテーブルに存在するか最長一致で探す。"""
+    import ipaddress
+    routes = get_routing_table(ip)
+    best = None
+    best_plen = -1
+    for r in routes:
+        try:
+            net = ipaddress.ip_network(f"{r['dest']}/{r['mask']}", strict=False)
+            if ipaddress.ip_address(dest_ip) in net:
+                plen = net.prefixlen
+                if plen > best_plen:
+                    best = r
+                    best_plen = plen
+        except Exception:
+            continue
+    return best
+
+
+# ─────────────────────────────────────────
 # バックグラウンドポーリングスレッド
 # ─────────────────────────────────────────
 _poller_thread = None

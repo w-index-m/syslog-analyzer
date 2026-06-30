@@ -869,6 +869,35 @@ snmp-server trap enable
                         )
                     st.success(f"品質スコア: {health['health_score']}/100 ({health['status']})")
                     st.caption("詳細は「📊 品質ルーブリック」タブで確認できます")
+
+            st.markdown("---")
+            st.markdown("#### 📍 ルーティングテーブル取得（SNMP Walk）")
+            st.caption("ipRouteTable(RFC1213)をSNMP Walkで自動取得します。")
+            rt_col1, rt_col2 = st.columns([1, 3])
+            with rt_col1:
+                if st.button("📍 ルーティングテーブル取得", key="fetch_rt"):
+                    with st.spinner(f"{sel_ip} のルーティングテーブルをWalk中..."):
+                        dev = next((d for d in devices if d["ip"] == sel_ip), {})
+                        try:
+                            routes = snmp_poller.fetch_routing_table(
+                                sel_ip, dev.get("community","public"),
+                                dev.get("version","v2c"), dev.get("port",161)
+                            )
+                            if routes:
+                                st.success(f"{len(routes)} 件のルートを取得しました")
+                            else:
+                                st.warning("ルートが取得できませんでした（機器の到達性・コミュニティを確認してください）")
+                        except Exception as e:
+                            st.error(f"取得エラー: {e}")
+                    st.rerun()
+            with rt_col2:
+                rt_rows = snmp_poller.get_routing_table(sel_ip)
+                if rt_rows:
+                    df_rt = pd.DataFrame(rt_rows)[["dest","mask","nexthop","route_type","proto","fetched_at"]]
+                    df_rt.columns = ["宛先","マスク","ネクストホップ","タイプ","プロトコル","取得時刻"]
+                    st.dataframe(df_rt, use_container_width=True, hide_index=True)
+                else:
+                    st.caption("ルーティングテーブルなし（上のボタンで取得してください）")
         else:
             st.info("デバイスが登録されていません。上のフォームから追加してください。")
 
@@ -939,19 +968,39 @@ snmp-server trap enable
                 st.dataframe(pd.DataFrame(redirect_dest_tags), use_container_width=True, hide_index=True)
 
             # ── ③ ルーティングテーブル照合 ──
-            cfg = _db.get_device_config(sel_icmp_ip)
+            snmp_routes = snmp_poller.get_routing_table(sel_icmp_ip)
             routing_summary = ""
-            if cfg:
-                routing_summary = cfg.get("routing_summary", "") or cfg.get("interfaces_summary", "")
-                with st.expander("🗺️ 機器のルーティング情報（コンフィグより）"):
-                    st.text(routing_summary[:2000] if routing_summary else "ルーティング情報なし")
+            if snmp_routes:
+                with st.expander(f"🗺️ ルーティングテーブル（SNMP Walk取得済み: {len(snmp_routes)}件）"):
+                    df_rt_icmp = pd.DataFrame(snmp_routes)[["dest","mask","nexthop","route_type","proto","fetched_at"]]
+                    df_rt_icmp.columns = ["宛先","マスク","ネクストホップ","タイプ","プロトコル","取得時刻"]
+                    st.dataframe(df_rt_icmp, use_container_width=True, hide_index=True)
                     if redirect_dest_tags:
+                        st.markdown("**宛先IP照合結果:**")
                         dest_ips = [t["値"] for t in redirect_dest_tags if t["種別"] == "dest"]
                         for dip in set(dest_ips[:5]):
-                            hit = dip in routing_summary if routing_summary else False
-                            st.markdown(f"- 宛先 `{dip}` → {'✅ ルーティングテーブルに記載あり' if hit else '⚠️ ルーティングテーブルに見当たらない（スタティックルート欠落の可能性）'}")
+                            match = snmp_poller.route_lookup(sel_icmp_ip, dip)
+                            if match:
+                                st.markdown(f"- 宛先 `{dip}` → ✅ 一致ルート: `{match['dest']}/{match['mask']}` via `{match['nexthop']}` ({match['proto']})")
+                            else:
+                                st.markdown(f"- 宛先 `{dip}` → ⚠️ ルーティングテーブルに一致なし（スタティックルート欠落の可能性）")
+                routing_summary = "\n".join(
+                    f"{r['dest']}/{r['mask']} via {r['nexthop']} ({r['proto']})"
+                    for r in snmp_routes
+                )
             else:
-                st.caption("ルーティング照合：機器コンフィグ未登録（「機器コンフィグ」タブで登録すると照合できます）")
+                cfg = _db.get_device_config(sel_icmp_ip)
+                if cfg:
+                    routing_summary = cfg.get("routing_summary", "") or cfg.get("interfaces_summary", "")
+                    with st.expander("🗺️ 機器のルーティング情報（コンフィグより）"):
+                        st.text(routing_summary[:2000] if routing_summary else "ルーティング情報なし")
+                        if redirect_dest_tags:
+                            dest_ips = [t["値"] for t in redirect_dest_tags if t["種別"] == "dest"]
+                            for dip in set(dest_ips[:5]):
+                                hit = dip in routing_summary if routing_summary else False
+                                st.markdown(f"- 宛先 `{dip}` → {'✅ コンフィグに記載あり' if hit else '⚠️ コンフィグに見当たらない（スタティックルート欠落の可能性）'}")
+                else:
+                    st.caption("ルーティング照合：SNMPポーリングタブで「📍 ルーティングテーブル取得」を実行するか、「機器コンフィグ」タブにコンフィグを登録してください。")
 
             # ── ④ AI自動原因推定 ──
             st.markdown("**🤖 AI自動原因推定**")
