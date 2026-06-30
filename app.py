@@ -361,21 +361,21 @@ _process_queue()
 # メインUI
 # ─────────────────────────────────────────
 tab_health, tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🩺 健全性ダッシュボード", "📋 ログビューア", "📊 テレメトリダッシュボード",
+    "📊 品質ルーブリック", "📋 ログビューア", "📊 テレメトリダッシュボード",
     "📡 SNMPモニター", "🗂️ 機器コンフィグ", "📖 セットアップガイド"
 ])
 
 # ═══════════════════════════════════════════
-# TAB: 健全性ダッシュボード（メイン画面）
+# TAB: 品質ルーブリック（メイン画面）
 # ═══════════════════════════════════════════
 with tab_health:
-    st.markdown("## 🩺 ネットワーク健全性ダッシュボード")
+    st.markdown("## 🩺 ネットワーク品質ルーブリック（品質評価）")
 
     overall = he.get_network_overall_health()
 
     if overall["overall_score"] is None:
-        st.info("まだ健全性データがありません。「📡 SNMPモニター」タブでデバイスを登録し、"
-                "下の「健全性チェック実行」ボタンを押すか、SNMPポーラーを起動してください。")
+        st.info("まだ品質データがありません。「📡 SNMPモニター」タブでデバイスを登録し、"
+                "下の「品質チェック実行」ボタンを押すか、SNMPポーラーを起動してください。")
     else:
         score = overall["overall_score"]
         score_color = "#16a34a" if score >= 85 else "#b45309" if score >= 60 else "#dc2626"
@@ -401,11 +401,11 @@ with tab_health:
 
     col_run1, col_run2 = st.columns([2, 1])
     with col_run1:
-        st.markdown("### 機器別ヘルスステータス")
+        st.markdown("### 機器別品質ステータス")
     with col_run2:
         run_llm = st.checkbox("LLM診断を含める", value=False,
                               help="各機器をLLMが総合診断します（時間とAPI呼び出しが増えます）")
-        if st.button("🔄 健全性チェック実行", use_container_width=True):
+        if st.button("🔄 品質チェック実行", use_container_width=True):
             devices = snmp_poller.get_devices()
             if not devices:
                 st.warning("SNMPデバイスが登録されていません。SNMPモニタータブで登録してください。")
@@ -423,7 +423,7 @@ with tab_health:
                         except Exception as e:
                             st.error(f"{dev['ip']}: {e}")
                     prog.progress((idx+1)/len(devices))
-                st.success("健全性チェック完了")
+                st.success("品質チェック完了")
                 st.rerun()
 
     st.caption("💡 スループット・破棄・ブロードキャスト率は2回目以降のチェックで差分計算されます。初回は基準値の取得のみです。")
@@ -486,7 +486,7 @@ with tab_health:
                     st.line_chart(df_trend.set_index("time")["health_score"])
 
     st.markdown("---")
-    with st.expander("📖 ヘルススコアの算出基準"):
+    with st.expander("📖 品質スコアの算出基準"):
         st.markdown("""
 **100点満点からの減点方式**
 
@@ -859,16 +859,16 @@ snmp-server trap enable
                     else:
                         st.error("取得できませんでした（機器の設定・到達性を確認してください）")
             with poll_c2:
-                if st.button("🩺 健全性チェック（スループット/破棄/CPU）"):
-                    with st.spinner(f"{sel_ip} の健全性を評価中..."):
+                if st.button("🩺 品質チェック（スループット/破棄/CPU）"):
+                    with st.spinner(f"{sel_ip} の品質を評価中..."):
                         dev = next((d for d in devices if d["ip"] == sel_ip), {})
                         health = snmp_poller.poll_device_health(
                             sel_ip, dev.get("community","public"),
                             dev.get("version","v2c"), dev.get("port",161),
                             llm_mode="none"
                         )
-                    st.success(f"ヘルススコア: {health['health_score']}/100 ({health['status']})")
-                    st.caption("詳細は「🩺 健全性ダッシュボード」タブで確認できます")
+                    st.success(f"品質スコア: {health['health_score']}/100 ({health['status']})")
+                    st.caption("詳細は「📊 品質ルーブリック」タブで確認できます")
         else:
             st.info("デバイスが登録されていません。上のフォームから追加してください。")
 
