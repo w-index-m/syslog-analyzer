@@ -934,7 +934,7 @@ snmp-server trap enable
             if trend_data:
                 import pandas as pd
                 df_trend = pd.DataFrame(trend_data)
-                df_trend["recorded_at"] = pd.to_datetime(df_trend["recorded_at"])
+                df_trend["recorded_at"] = pd.to_datetime(df_trend["recorded_at"], format="ISO8601")
                 df_trend["value"] = pd.to_numeric(df_trend["value"], errors="coerce")
                 df_pivot = df_trend.pivot_table(
                     index="recorded_at", columns="oid_name", values="value"
