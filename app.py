@@ -29,39 +29,41 @@ st.set_page_config(
 # ─────────────────────────────────────────
 st.markdown("""
 <style>
-  .main { background: #0d1117; color: #c9d1d9; }
-  .stApp { background: #0d1117; }
+  .main { background: #f0f2f6; color: #1f2937; }
+  .stApp { background: #f0f2f6; }
   .metric-card {
-    background: #161b22; border: 1px solid #30363d;
+    background: #ffffff; border: 1px solid #d0d7de;
     border-radius: 8px; padding: 16px; text-align: center;
+    box-shadow: 0 1px 3px rgba(16,24,40,0.06);
   }
   .severity-EMERGENCY, .severity-ALERT, .severity-CRITICAL {
-    color: #ff4d4d; font-weight: bold;
+    color: #dc2626; font-weight: bold;
   }
-  .severity-ERROR   { color: #f97316; font-weight: bold; }
-  .severity-WARNING { color: #fbbf24; }
-  .severity-NOTICE  { color: #60a5fa; }
-  .severity-INFO    { color: #86efac; }
-  .severity-DEBUG   { color: #94a3b8; }
+  .severity-ERROR   { color: #ea580c; font-weight: bold; }
+  .severity-WARNING { color: #b45309; }
+  .severity-NOTICE  { color: #2563eb; }
+  .severity-INFO    { color: #16a34a; }
+  .severity-DEBUG   { color: #64748b; }
   .log-card {
-    background: #161b22; border-left: 3px solid #30363d;
+    background: #ffffff; border: 1px solid #e5e9ef; border-left: 3px solid #d0d7de;
     border-radius: 6px; padding: 12px; margin-bottom: 8px;
     font-family: 'JetBrains Mono', monospace; font-size: 12px;
+    box-shadow: 0 1px 2px rgba(16,24,40,0.05);
   }
   .tag-chip {
-    display: inline-block; background: #21262d;
-    border: 1px solid #30363d; border-radius: 12px;
-    padding: 2px 8px; margin: 2px; font-size: 11px; color: #8b949e;
+    display: inline-block; background: #e9edf2;
+    border: 1px solid #d0d7de; border-radius: 12px;
+    padding: 2px 8px; margin: 2px; font-size: 11px; color: #6b7280;
   }
   .ai-explanation {
-    background: #0d2137; border: 1px solid #1f6feb;
+    background: #eff6ff; border: 1px solid #2563eb;
     border-radius: 6px; padding: 12px; margin-top: 8px;
     font-size: 13px;
   }
   .telemetry-note {
-    background: #0f2b1a; border: 1px solid #238636;
+    background: #ecfdf3; border: 1px solid #16a34a;
     border-radius: 6px; padding: 8px; margin-top: 6px;
-    font-size: 12px; color: #3fb950;
+    font-size: 12px; color: #16a34a;
   }
   div[data-testid="stMetricValue"] { font-size: 2rem; }
 </style>
@@ -376,14 +378,14 @@ with tab_health:
                 "下の「健全性チェック実行」ボタンを押すか、SNMPポーラーを起動してください。")
     else:
         score = overall["overall_score"]
-        score_color = "#3fb950" if score >= 85 else "#d29922" if score >= 60 else "#f85149"
+        score_color = "#16a34a" if score >= 85 else "#b45309" if score >= 60 else "#dc2626"
         status_label = "正常" if score >= 85 else "注意" if score >= 60 else "異常"
 
         col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
         with col1:
             st.markdown(f"""
-<div style="background:#161b22; border:2px solid {score_color}; border-radius:12px; padding:20px; text-align:center;">
-  <div style="color:#8b949e; font-size:13px;">ネットワーク総合健全度</div>
+<div style="background:#ffffff; border:2px solid {score_color}; border-radius:12px; padding:20px; text-align:center;">
+  <div style="color:#6b7280; font-size:13px;">ネットワーク総合健全度</div>
   <div style="color:{score_color}; font-size:48px; font-weight:bold; line-height:1.2;">{score}<span style="font-size:20px;">/100</span></div>
   <div style="color:{score_color}; font-size:16px; font-weight:bold;">{status_label}</div>
 </div>
@@ -430,7 +432,7 @@ with tab_health:
     if devices_health:
         for dh in devices_health:
             dh_score = dh["health_score"]
-            dh_color = "#3fb950" if dh_score >= 85 else "#d29922" if dh_score >= 60 else "#f85149"
+            dh_color = "#16a34a" if dh_score >= 85 else "#b45309" if dh_score >= 60 else "#dc2626"
             dh_icon = "🟢" if dh_score >= 85 else "🟡" if dh_score >= 60 else "🔴"
             metrics = dh.get("metrics", {})
             issues = dh.get("issues", [])
@@ -451,7 +453,7 @@ with tab_health:
                 if issues:
                     st.markdown("**検出された問題:**")
                     for iss in issues:
-                        lv_color = "#f85149" if iss["level"] == "critical" else "#d29922"
+                        lv_color = "#dc2626" if iss["level"] == "critical" else "#b45309"
                         st.markdown(
                             f"<div style='color:{lv_color}; font-size:13px;'>"
                             f"● [{iss['category']}] {iss['msg']}</div>",
@@ -558,26 +560,26 @@ with tab1:
             judge_model = log.get("judge_model", "")
 
             sev_color = {
-                "EMERGENCY": "#ff4d4d", "ALERT": "#ff4d4d", "CRITICAL": "#ff4d4d",
-                "ERROR": "#f97316", "WARNING": "#fbbf24",
-                "NOTICE": "#60a5fa", "INFO": "#86efac", "DEBUG": "#94a3b8"
-            }.get(sev, "#94a3b8")
+                "EMERGENCY": "#dc2626", "ALERT": "#dc2626", "CRITICAL": "#dc2626",
+                "ERROR": "#ea580c", "WARNING": "#b45309",
+                "NOTICE": "#2563eb", "INFO": "#16a34a", "DEBUG": "#64748b"
+            }.get(sev, "#64748b")
 
-            border_color = sev_color if sev in ("EMERGENCY","ALERT","CRITICAL","ERROR") else "#30363d"
+            border_color = sev_color if sev in ("EMERGENCY","ALERT","CRITICAL","ERROR") else "#d0d7de"
 
             with st.container():
                 st.markdown(f"""
 <div class="log-card" style="border-left-color:{border_color}">
   <div style="display:flex; justify-content:space-between; align-items:center;">
     <span style="color:{sev_color}; font-weight:bold;">◉ {sev}</span>
-    <span style="color:#8b949e; font-size:11px;">{received} | {src_ip}</span>
+    <span style="color:#6b7280; font-size:11px;">{received} | {src_ip}</span>
   </div>
-  <div style="color:#c9d1d9; margin:4px 0;">
-    <span style="color:#a5f3fc;">[{vendor}]</span>
-    <span style="color:#fde68a;"> {hostname}</span>
-    <span style="color:#c084fc;"> {process}</span>
+  <div style="color:#1f2937; margin:4px 0;">
+    <span style="color:#0891b2;">[{vendor}]</span>
+    <span style="color:#92400e;"> {hostname}</span>
+    <span style="color:#9333ea;"> {process}</span>
   </div>
-  <div style="color:#e2e8f0; margin:4px 0; word-break:break-all;">{message[:300]}</div>
+  <div style="color:#1f2937; margin:4px 0; word-break:break-all;">{message[:300]}</div>
   <div>{"".join(f'<span class="tag-chip">{t}</span>' for t in tags)}</div>
 </div>
 """, unsafe_allow_html=True)
@@ -587,23 +589,23 @@ with tab1:
                     try:
                         ai_data = json.loads(ai_text)
                         impact_color = {
-                            "重大": "#ff4d4d", "中程度": "#f97316",
-                            "軽微": "#fbbf24", "なし": "#86efac"
-                        }.get(ai_data.get("impact",""), "#94a3b8")
+                            "重大": "#dc2626", "中程度": "#ea580c",
+                            "軽微": "#b45309", "なし": "#16a34a"
+                        }.get(ai_data.get("impact",""), "#64748b")
                         config_note = ai_data.get('config_context_note', '')
                         config_note_html = f'''
-<div class="telemetry-note" style="background:#1a1530; border-color:#8957e5; color:#bc8cff;">
+<div class="telemetry-note" style="background:#f3eefd; border-color:#7c3aed; color:#7c3aed;">
   🗂️ コンフィグ参照: {config_note}
 </div>''' if config_note else ''
                         st.markdown(f"""
 <div class="ai-explanation">
-  <div style="color:#58a6ff; font-size:11px; margin-bottom:4px;">
+  <div style="color:#2563eb; font-size:11px; margin-bottom:4px;">
     🤖 AI解析 ({ai_model})
   </div>
-  <div style="font-weight:bold; color:#f0f6fc;">
+  <div style="font-weight:bold; color:#111827;">
     📌 {ai_data.get('summary','')}
   </div>
-  <div style="margin:4px 0; color:#c9d1d9;">{ai_data.get('detail','')}</div>
+  <div style="margin:4px 0; color:#1f2937;">{ai_data.get('detail','')}</div>
   <div>
     影響度: <span style="color:{impact_color}; font-weight:bold;">{ai_data.get('impact','')}</span>
     &nbsp;|&nbsp;
@@ -633,7 +635,7 @@ with tab1:
                                 db.update_ai_explanation(log["id"], expl, model)
                             st.rerun()
 
-                st.markdown("<hr style='border-color:#21262d; margin:8px 0;'>", unsafe_allow_html=True)
+                st.markdown("<hr style='border-color:#e9edf2; margin:8px 0;'>", unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════
 # TAB2: テレメトリダッシュボード
@@ -769,17 +771,17 @@ with tab3:
             for log in trap_logs:
                 sev = log.get("severity", "INFO")
                 sev_color = {
-                    "CRITICAL": "#ff4d4d", "ERROR": "#f97316",
-                    "WARNING": "#fbbf24", "NOTICE": "#60a5fa", "INFO": "#86efac"
-                }.get(sev, "#94a3b8")
+                    "CRITICAL": "#dc2626", "ERROR": "#ea580c",
+                    "WARNING": "#b45309", "NOTICE": "#2563eb", "INFO": "#16a34a"
+                }.get(sev, "#64748b")
                 tags = json.loads(log.get("tags") or "[]")
                 st.markdown(f"""
 <div class="log-card" style="border-left-color:{sev_color}">
   <span style="color:{sev_color}; font-weight:bold;">◉ {sev}</span>
-  <span style="color:#a5f3fc; margin-left:8px;">{log.get('vendor','')}</span>
-  <span style="color:#fde68a; margin-left:8px;">{log.get('hostname','')}</span>
-  <span style="color:#8b949e; float:right; font-size:11px;">{log.get('received_at','')[:19]}</span>
-  <div style="margin-top:6px; color:#e2e8f0;">{log.get('message','')}</div>
+  <span style="color:#0891b2; margin-left:8px;">{log.get('vendor','')}</span>
+  <span style="color:#92400e; margin-left:8px;">{log.get('hostname','')}</span>
+  <span style="color:#6b7280; float:right; font-size:11px;">{log.get('received_at','')[:19]}</span>
+  <div style="margin-top:6px; color:#1f2937;">{log.get('message','')}</div>
   <div>{"".join(f'<span class="tag-chip">{t}</span>' for t in tags)}</div>
 </div>
 """, unsafe_allow_html=True)
@@ -875,16 +877,16 @@ snmp-server trap enable
         alerts = snmp_poller.get_alert_metrics()
         if alerts:
             for a in alerts:
-                level_color = "#ff4d4d" if a["alert_level"] == "critical" else "#fbbf24"
+                level_color = "#dc2626" if a["alert_level"] == "critical" else "#b45309"
                 st.markdown(f"""
 <div class="log-card" style="border-left-color:{level_color}">
   <span style="color:{level_color}; font-weight:bold;">
     {'🔴 CRITICAL' if a['alert_level']=='critical' else '🟡 WARNING'}
   </span>
-  <span style="color:#a5f3fc; margin-left:8px;">{a['source_ip']}</span>
-  <span style="color:#8b949e; margin-left:8px;">{a['oid_name']}</span>
-  <span style="color:#fde68a; margin-left:8px; font-weight:bold;">{a['value']} {a['unit']}</span>
-  <span style="color:#8b949e; float:right; font-size:11px;">{a['recorded_at'][:19]}</span>
+  <span style="color:#0891b2; margin-left:8px;">{a['source_ip']}</span>
+  <span style="color:#6b7280; margin-left:8px;">{a['oid_name']}</span>
+  <span style="color:#92400e; margin-left:8px; font-weight:bold;">{a['value']} {a['unit']}</span>
+  <span style="color:#6b7280; float:right; font-size:11px;">{a['recorded_at'][:19]}</span>
 </div>
 """, unsafe_allow_html=True)
         else:
