@@ -876,7 +876,12 @@ snmp-server trap enable
         st.markdown("### 🔀 ICMP Redirect 監視")
         st.caption("ICMP redirectが急増するとルーティング設定の問題・ループ・意図しないトポロジ変化の可能性があります。")
         icmp_rows = snmp_poller.get_icmp_redirect_latest()
+        import db as _db
+        all_logs = _db.get_logs(limit=500)
+        redirect_logs = [l for l in all_logs if "ICMP Redirect" in (l.get("tags") or "")]
+
         if icmp_rows:
+            # ── デバイスごとのカウンタ表示 ──
             for row in icmp_rows:
                 label = "受信" if "In" in row["oid_name"] else "送信"
                 diff_val = row.get("diff")
@@ -892,10 +897,94 @@ snmp-server trap enable
   <span style="color:#6b7280; float:right; font-size:11px;">{row['recorded_at'][:19]}</span>
 </div>
 """, unsafe_allow_html=True)
-            # 相関syslogを表示
-            import db as _db
-            redirect_logs = [l for l in _db.get_logs(limit=200)
-                             if "ICMP Redirect" in (l.get("tags") or [])]
+
+            # ── ② タイムライン可視化 ──
+            icmp_ips = list({r["source_ip"] for r in icmp_rows})
+            sel_icmp_ip = st.selectbox("タイムライン表示対象IP", icmp_ips, key="icmp_trend_ip")
+            trend_data = snmp_poller.get_icmp_redirect_trend(sel_icmp_ip, hours=6)
+            if trend_data:
+                import pandas as pd
+                df_trend = pd.DataFrame(trend_data)
+                df_trend["recorded_at"] = pd.to_datetime(df_trend["recorded_at"])
+                df_trend["value"] = pd.to_numeric(df_trend["value"], errors="coerce")
+                df_pivot = df_trend.pivot_table(
+                    index="recorded_at", columns="oid_name", values="value"
+                ).reset_index().set_index("recorded_at")
+                df_pivot.columns = [c.replace("icmpIn","受信redirect ").replace("icmpOut","送信redirect ") for c in df_pivot.columns]
+                st.markdown("**📈 ICMP Redirect 累積カウンタ推移（直近6時間）**")
+                st.line_chart(df_pivot)
+            else:
+                st.caption("タイムラインデータなし（2回以上ポーリング後に表示されます）")
+
+            # ── ① redirect先IP・宛先の抽出 ──
+            redirect_dest_tags = []
+            for rl in redirect_logs:
+                tags = rl.get("tags") or []
+                if isinstance(tags, str):
+                    try:
+                        import json as _json
+                        tags = _json.loads(tags)
+                    except Exception:
+                        tags = []
+                for t in tags:
+                    if t.startswith("redirect_"):
+                        redirect_dest_tags.append({
+                            "IP": rl.get("source_ip",""),
+                            "時刻": rl.get("received_at","")[:19],
+                            "種別": t.split(":")[0].replace("redirect_",""),
+                            "値": t.split(":",1)[1] if ":" in t else ""
+                        })
+            if redirect_dest_tags:
+                st.markdown("**🎯 syslogから抽出したredirect先情報**")
+                st.dataframe(pd.DataFrame(redirect_dest_tags), use_container_width=True, hide_index=True)
+
+            # ── ③ ルーティングテーブル照合 ──
+            cfg = _db.get_device_config(sel_icmp_ip)
+            routing_summary = ""
+            if cfg:
+                routing_summary = cfg.get("routing_summary", "") or cfg.get("interfaces_summary", "")
+                with st.expander("🗺️ 機器のルーティング情報（コンフィグより）"):
+                    st.text(routing_summary[:2000] if routing_summary else "ルーティング情報なし")
+                    if redirect_dest_tags:
+                        dest_ips = [t["値"] for t in redirect_dest_tags if t["種別"] == "dest"]
+                        for dip in set(dest_ips[:5]):
+                            hit = dip in routing_summary if routing_summary else False
+                            st.markdown(f"- 宛先 `{dip}` → {'✅ ルーティングテーブルに記載あり' if hit else '⚠️ ルーティングテーブルに見当たらない（スタティックルート欠落の可能性）'}")
+            else:
+                st.caption("ルーティング照合：機器コンフィグ未登録（「機器コンフィグ」タブで登録すると照合できます）")
+
+            # ── ④ AI自動原因推定 ──
+            st.markdown("**🤖 AI自動原因推定**")
+            llm_ok = analyzer.check_claude_available() or analyzer.check_ollama_available()
+            if llm_ok:
+                if st.button("🔍 ICMP redirect根本原因をAIで診断", key="icmp_ai_diag"):
+                    with st.spinner("AIがICMP redirect原因を分析中..."):
+                        dev_snmp = [r for r in icmp_rows if r["source_ip"] == sel_icmp_ip]
+                        dev_logs = [l for l in redirect_logs if l.get("source_ip") == sel_icmp_ip]
+                        result = analyzer.diagnose_icmp_redirect(
+                            ip=sel_icmp_ip,
+                            snmp_data=dev_snmp,
+                            redirect_logs=dev_logs,
+                            routing_summary=routing_summary,
+                            mode=st.session_state.get("llm_mode", "auto")
+                        )
+                    if result:
+                        st.markdown(f"**🎯 根本原因:** {result.get('root_cause','')}")
+                        if result.get("causal_chain"):
+                            st.markdown("**🔗 因果連鎖:** " + " ".join(result["causal_chain"]))
+                        if result.get("routing_issue"):
+                            st.markdown(f"**⚙️ ルーティング問題:** {result.get('routing_issue','')}")
+                        st.markdown(f"**🚨 最優先対処:** {result.get('priority_action','')}")
+                        if result.get("additional_checks"):
+                            st.markdown("**📋 追加確認事項:**")
+                            for c in result["additional_checks"]:
+                                st.markdown(f"  - {c}")
+                        st.markdown(f"**⚠️ 放置リスク:** {result.get('risk_if_ignored','')}")
+                        st.caption(f"診断モデル: {result.get('diagnosis_model','')}")
+            else:
+                st.caption("AI診断を使うにはClaude APIまたはOllamaの設定が必要です")
+
+            # ── 関連syslog一覧 ──
             if redirect_logs:
                 with st.expander(f"📋 関連syslogログ ({len(redirect_logs)}件)"):
                     for rl in redirect_logs[:20]:

@@ -496,6 +496,112 @@ def diagnose_health(device_health, recent_logs, mode="auto", config_context=""):
         result = _rule_based_health_diagnosis(device_health)
     return result
 
+ICMP_REDIRECT_SYSTEM_PROMPT = """あなたはネットワークエンジニアです。
+ICMP redirectが大量発生している機器について、提供されたデータ（SNMPカウンタ・syslog・ルーティング情報）を総合的に分析し、
+根本原因と対処法を日本語で回答してください。
+
+必ず以下のJSON形式で返してください（マークダウンの```不要）:
+{
+  "root_cause": "根本原因の推定（具体的に）",
+  "causal_chain": ["原因A", "→ 結果B", "→ 結果C"],
+  "affected_destinations": ["影響を受けている宛先IPリスト"],
+  "routing_issue": "ルーティング設定上の問題点",
+  "priority_action": "最優先で実施すべき対処",
+  "additional_checks": ["追加確認事項1", "追加確認事項2"],
+  "risk_if_ignored": "放置した場合のリスク",
+  "diagnosis_model": ""
+}"""
+
+
+def _build_icmp_redirect_prompt(ip: str, snmp_data: list, redirect_logs: list, routing_summary: str) -> str:
+    log_lines = "\n".join(
+        f"  [{l.get('received_at','')[:19]}] {l.get('message','')[:200]}"
+        for l in redirect_logs[:20]
+    )
+    snmp_lines = "\n".join(
+        f"  {s.get('oid_name','')}: 累積={s.get('value','')}, 増分={s.get('diff','不明')}/poll, アラート={s.get('alert_level','')}"
+        for s in snmp_data
+    )
+    return f"""
+対象機器IP: {ip}
+
+【SNMPカウンタ（ICMP-MIB）】
+{snmp_lines or "データなし"}
+
+【関連syslogメッセージ（直近20件）】
+{log_lines or "syslogなし"}
+
+【機器のルーティング情報（コンフィグより）】
+{routing_summary[:2000] if routing_summary else "コンフィグ未登録"}
+"""
+
+
+def diagnose_icmp_redirect(ip: str, snmp_data: list, redirect_logs: list,
+                           routing_summary: str = "", mode: str = "auto") -> dict:
+    """ICMP redirect大量発生の根本原因をLLMで診断する"""
+    prompt = _build_icmp_redirect_prompt(ip, snmp_data, redirect_logs, routing_summary)
+
+    def _call_claude():
+        if not ANTHROPIC_API_KEY:
+            return None
+        try:
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": ANTHROPIC_API_KEY,
+                         "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                json={"model": "claude-sonnet-4-6", "max_tokens": 1000,
+                      "system": ICMP_REDIRECT_SYSTEM_PROMPT,
+                      "messages": [{"role": "user", "content": prompt}]},
+                timeout=40
+            )
+            resp.raise_for_status()
+            text = resp.json()["content"][0]["text"].strip().replace("```json","").replace("```","").strip()
+            result = json.loads(text)
+            result["diagnosis_model"] = "claude-sonnet-4-6"
+            return result
+        except Exception as e:
+            print(f"[ICMP redirect diagnosis:Claude] {e}")
+            return None
+
+    def _call_ollama():
+        try:
+            resp = requests.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json={"model": OLLAMA_MODEL,
+                      "messages": [{"role": "system", "content": ICMP_REDIRECT_SYSTEM_PROMPT},
+                                   {"role": "user", "content": prompt}],
+                      "stream": False, "options": {"temperature": 0.1}},
+                timeout=90
+            )
+            resp.raise_for_status()
+            text = resp.json()["message"]["content"].strip().replace("```json","").replace("```","").strip()
+            result = json.loads(text)
+            result["diagnosis_model"] = f"ollama/{OLLAMA_MODEL}"
+            return result
+        except Exception as e:
+            print(f"[ICMP redirect diagnosis:Ollama] {e}")
+            return None
+
+    result = None
+    if mode in ("auto", "claude"):
+        result = _call_claude()
+    if not result and mode in ("auto", "ollama"):
+        result = _call_ollama()
+    if not result:
+        # ルールベースフォールバック
+        result = {
+            "root_cause": "ルーティング設定の不整合（デフォルトGW誤設定またはスタティックルート欠落）が疑われます",
+            "causal_chain": ["ホストが最適でないGWへパケット送信", "→ ルーターがICMP redirectを送信", "→ ホストが誘導先へ再送"],
+            "affected_destinations": [],
+            "routing_issue": "コンフィグ情報と実際のルーティングテーブルの確認が必要",
+            "priority_action": "show ip redirects / show ip route で実際のルーティングを確認し、不要なICMP redirectを無効化（no ip redirects）",
+            "additional_checks": ["デフォルトゲートウェイの設定確認", "スタティックルートの過不足確認"],
+            "risk_if_ignored": "帯域の無駄遣い・レイテンシ増加・ルーティングループの可能性",
+            "diagnosis_model": "ルールベース"
+        }
+    return result
+
+
 def _rule_based_health_diagnosis(device_health):
     issues = device_health.get("issues", [])
     critical = [i for i in issues if i.get("level") == "critical"]
