@@ -427,7 +427,7 @@ with tab_health:
                 st.success("品質チェック完了")
                 st.rerun()
 
-    st.caption("💡 スループット・破棄・ブロードキャスト率は2回目以降のチェックで差分計算されます。初回は基準値の取得のみです。")
+    st.caption("💡 CPU・メモリ・温度は即時取得。スループット・破棄・ブロードキャスト率は2回目以降のチェックで差分計算されます（初回は基準値の取得のみ）。")
 
     devices_health = he.get_latest_health_all()
     if devices_health:
@@ -439,7 +439,7 @@ with tab_health:
             issues = dh.get("issues", [])
 
             with st.expander(f"{dh_icon} {dh['hostname']} ({dh['source_ip']}) — {dh_score}/100", expanded=(dh_score < 60)):
-                mcols = st.columns(4)
+                mcols = st.columns(5)
                 with mcols[0]:
                     cpu = metrics.get("cpu_5min")
                     st.metric("CPU(5分)", f"{cpu}%" if cpu is not None else "—")
@@ -447,8 +447,11 @@ with tab_health:
                     mem = metrics.get("memory_used_pct")
                     st.metric("メモリ", f"{mem}%" if mem is not None else "—")
                 with mcols[2]:
-                    st.metric("検出問題数", len(issues))
+                    temp = metrics.get("temperature_celsius")
+                    st.metric("温度", f"{temp}℃" if temp is not None else "—")
                 with mcols[3]:
+                    st.metric("検出問題数", len(issues))
+                with mcols[4]:
                     st.metric("最終チェック", dh["recorded_at"][11:19])
 
                 if issues:
@@ -499,6 +502,7 @@ with tab_health:
 | ブロードキャスト率 | 5%以上（-6） | 20%以上（-15） |
 | パケット破棄率 | 0.1%以上（-5） | 1%以上（-12） |
 | 入力エラー率 | 0.01%以上（-4） | 0.1%以上（-10） |
+| 筐体温度 | 60℃以上（-8） | 75℃以上（-20） |
 | インターフェースダウン | — | -15 |
 
 **ステータス判定:** 85点以上=🟢正常 / 60〜84点=🟡注意 / 60点未満=🔴異常
@@ -506,6 +510,7 @@ with tab_health:
 **Cisco系の相関分析:**
 ブロードキャスト急増 → CPU上昇 → 破棄増加 → ルーティング不安定、という連鎖を
 LLM診断が「根本原因はブロードキャストストーム」と推定します。
+温度上昇が続く場合は冷却障害・ファン停止の疑いで、CPU/メモリ性能低下の前兆となることがあります。
         """)
 
 # ═══════════════════════════════════════════

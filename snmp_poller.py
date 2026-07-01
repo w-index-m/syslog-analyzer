@@ -294,7 +294,8 @@ def poll_device_health(ip: str, community: str = "public",
     # システムメトリクス（スカラOID）をGET
     snmp_metrics = {}
     for name in ["cpmCPUTotal5min", "cpmCPUTotal1min", "cpmCPUTotal5sec",
-                 "ciscoMemoryPoolUsed", "ciscoMemoryPoolFree"]:
+                 "ciscoMemoryPoolUsed", "ciscoMemoryPoolFree",
+                 "ciscoEnvMonTemperatureStatusValue"]:
         oid = he.EXTENDED_OIDS.get(name)
         if oid:
             val = snmp_get(ip, community, oid, port, version)
