@@ -85,6 +85,8 @@ def test_vendor_messages():
         ("Si-R BGP NOTIFICATION",     "<163>Jul 3 10:02:00 SiR-G210 bgpd: 10.0.0.1 recv NOTIFICATION 6/2 (Cease/Administrative Shutdown)", "BGP"),
         ("Si-R VRRP冗長切替",         "<163>Jul 3 10:03:00 SiR-G210 nsm: vrrp master router down detection. lan0 vrid1 [192.168.1.1] #3", "冗長切替"),
         ("Si-R WWAN SIMエラー",       "<165>Jul 3 10:04:00 SiR-G210 cmodemctl: [WWAN1] PIN code error. modem0 (PUK required)", "WWAN"),
+        ("Si-R エラーコード分類(装置交換)", "<27>Jul 3 10:05:00 SiR-G210 init: error code [85020000]", "対処:装置交換が必要"),
+        ("Si-R エラーコード分類(温度)",     "<27>Jul 3 10:06:00 SiR-G210 init: error code [85010001]", "対処:設置環境（温度）の確認が必要"),
         ("SR-S リンクDOWN",           "<134>Jul 3 10:00:00 sw-srs01 protocol: ether 3 link down", "リンクDOWN"),
         ("SR-S STPトポロジ変更",       "<134>Jul 3 10:01:00 sw-srs01 mstpd: Topology Change detected", "トポロジ変更"),
         ("SR-S ログイン失敗",          "<134>Jul 3 10:02:00 sw-srs01 telnetd: failed login guest on telnet from 192.168.1.100", "認証失敗"),

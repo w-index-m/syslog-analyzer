@@ -233,6 +233,23 @@ def parse(raw: str, source_ip: str) -> dict | None:
     if "configuration restarted" in msg:
         tags.append("設定反映")
 
+    # ── エラーコード対処分類（トラブルシューティング付録A.2 準拠） ──
+    # 例: "error code [85010001]" → 装置交換／環境確認／USB確認／再起動 に分類
+    try:
+        import sir_troubleshooting as _sir_ts
+        _ec = _sir_ts.extract_and_classify(message)
+        if _ec:
+            tags.append("エラーコード")
+            tags.append(f"対処:{_ec['label']}")
+            tags.append("障害候補")
+            # 重大度をエラーコード分類で引き上げ
+            if _ec["severity"] == "CRITICAL":
+                severity = "CRITICAL"
+            elif severity in ("INFO", "NOTICE"):
+                severity = "ERROR"
+    except Exception:
+        pass
+
     # ── 汎用障害キーワード ─────────────────────────────────────
     if any(k in msg for k in ("failed", "error", "mismatch", "invalid", "cannot", "overflow", "reject")):
         if "障害候補" not in tags and "リンクUP" not in tags and "ログイン成功" not in tags:
