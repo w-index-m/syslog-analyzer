@@ -1625,14 +1625,17 @@ with tab_pcap:
         _pcap_key = f"{uploaded_pcap.name}_{len(raw_bytes)}"
         if st.session_state.get("_pcap_key") != _pcap_key:
             with st.spinner("パケットを解析中..."):
-                res   = pcap_analyzer.analyze_pcap(raw_bytes)
-                convs = pcap_analyzer.get_conversations(raw_bytes)
-            st.session_state["_pcap_key"]   = _pcap_key
-            st.session_state["_pcap_res"]   = res
-            st.session_state["_pcap_convs"] = convs
+                res      = pcap_analyzer.analyze_pcap(raw_bytes)
+                convs    = pcap_analyzer.get_conversations(raw_bytes)
+                talkers  = pcap_analyzer.get_top_talkers(raw_bytes)
+            st.session_state["_pcap_key"]     = _pcap_key
+            st.session_state["_pcap_res"]     = res
+            st.session_state["_pcap_convs"]   = convs
+            st.session_state["_pcap_talkers"] = talkers
         else:
-            res   = st.session_state["_pcap_res"]
-            convs = st.session_state["_pcap_convs"]
+            res     = st.session_state["_pcap_res"]
+            convs   = st.session_state["_pcap_convs"]
+            talkers = st.session_state["_pcap_talkers"]
 
         if res["error"]:
             st.error(f"解析エラー: {res['error']}")
@@ -1640,23 +1643,30 @@ with tab_pcap:
             # ── 概要 ───────────────────────────────────
             st.markdown("---")
             st.markdown("### 📊 キャプチャ概要")
-            ov_cols = st.columns(6)
+            ov_cols = st.columns(4)
             with ov_cols[0]:
                 st.metric("総パケット数", f"{res['total_packets']:,}")
             with ov_cols[1]:
-                st.metric("ICMP redirect 検出", len(res["icmp_redirects"]),
-                          delta="⚠️ 要確認" if res["icmp_redirects"] else None)
-            with ov_cols[2]:
-                st.metric("TCP問題", len(res["tcp_issues"]),
+                st.metric("TCP問題フロー", len(res["tcp_issues"]),
                           delta="⚠️ 要確認" if res["tcp_issues"] else None)
+            with ov_cols[2]:
+                _dns_err = res["dns_summary"]["nxdomain"] + res["dns_summary"]["servfail"] + res["dns_summary"]["refused"]
+                st.metric("DNSエラー", _dns_err,
+                          delta="⚠️ 要確認" if _dns_err else None)
             with ov_cols[3]:
-                st.metric("pcap内syslog", len(res.get("syslog_packets", [])),
-                          delta="📋 解析済" if res.get("syslog_packets") else None)
-            with ov_cols[4]:
-                st.metric("RIPパケット", len(res["rip_packets"]))
-            with ov_cols[5]:
+                st.metric("ICMP redirect", len(res["icmp_redirects"]),
+                          delta="⚠️ 要確認" if res["icmp_redirects"] else None)
+            ov_cols2 = st.columns(4)
+            with ov_cols2[0]:
+                st.metric("会話フロー数", len(convs))
+            with ov_cols2[1]:
                 st.metric("ARP異常", len(res["arp_anomalies"]),
                           delta="⚠️ 要確認" if res["arp_anomalies"] else None)
+            with ov_cols2[2]:
+                st.metric("pcap内syslog", len(res.get("syslog_packets", [])),
+                          delta="📋 解析済" if res.get("syslog_packets") else None)
+            with ov_cols2[3]:
+                st.metric("RIPパケット", len(res["rip_packets"]))
             st.caption(f"📅 キャプチャ範囲: {res['capture_start']} 〜 {res['capture_end']}")
 
             # ── ICMP redirect 詳細 ─────────────────────
@@ -1961,42 +1971,98 @@ with tab_pcap:
                 df_syn.columns = ["接続元IP", "接続先IP", "接続元Port", "接続先Port", "SYN送信時刻", "待機(秒)", "説明"]
                 st.dataframe(df_syn, use_container_width=True, hide_index=True)
 
+            # ── TCP ゼロウィンドウ ──────────────────────
+            if res.get("tcp_zero_window"):
+                st.markdown("---")
+                st.markdown("### 🪟 TCP ゼロウィンドウ")
+                st.caption("受信バッファが枯渇して Window=0 を通知したフロー。送信側が停止しスループットが急落します。")
+                df_zw = pd.DataFrame(res["tcp_zero_window"])
+                df_zw = df_zw[["src", "dst", "src_port", "dst_port", "count", "description"]]
+                df_zw.columns = ["Window=0送出IP", "通信相手IP", "送出Port", "相手Port", "発生回数", "説明"]
+                st.dataframe(df_zw, use_container_width=True, hide_index=True)
+
+            # ── DNS 解析 ────────────────────────────────
+            _dns_sum = res.get("dns_summary", {})
+            _dns_issues = res.get("dns_issues", [])
+            if _dns_sum.get("queries", 0) > 0 or _dns_issues:
+                st.markdown("---")
+                st.markdown("### 🌐 DNS 解析")
+                st.caption("UDP 53 のクエリ/レスポンスを解析。NXDOMAIN・SERVFAIL・応答遅延を検出します。")
+                _dc1, _dc2, _dc3, _dc4, _dc5 = st.columns(5)
+                with _dc1:
+                    st.metric("DNSクエリ数",   _dns_sum.get("queries", 0))
+                with _dc2:
+                    st.metric("NXDOMAIN",      _dns_sum.get("nxdomain", 0),
+                              delta="⚠️ 名前解決失敗" if _dns_sum.get("nxdomain") else None)
+                with _dc3:
+                    st.metric("SERVFAIL",      _dns_sum.get("servfail", 0),
+                              delta="⚠️ サーバーエラー" if _dns_sum.get("servfail") else None)
+                with _dc4:
+                    st.metric("REFUSED",       _dns_sum.get("refused", 0),
+                              delta="⚠️ ACL拒否?" if _dns_sum.get("refused") else None)
+                with _dc5:
+                    st.metric("応答遅延(>500ms)", _dns_sum.get("slow", 0),
+                              delta="⚠️ 遅延" if _dns_sum.get("slow") else None)
+                if _dns_issues:
+                    df_dns = pd.DataFrame(_dns_issues)
+                    _dns_disp_cols = ["timestamp", "client", "server", "name", "qtype", "rcode", "rtt_ms", "issue"]
+                    df_dns = df_dns[_dns_disp_cols].rename(columns={
+                        "timestamp": "時刻", "client": "クライアント", "server": "DNSサーバー",
+                        "name": "ドメイン名", "qtype": "タイプ", "rcode": "応答コード",
+                        "rtt_ms": "RTT(ms)", "issue": "問題",
+                    })
+                    st.dataframe(df_dns, use_container_width=True, hide_index=True)
+                else:
+                    st.success("✅ DNS エラー・遅延は検出されませんでした")
+
             # ── 会話フロー一覧 ──────────────────────────
             st.markdown("---")
             st.markdown("### 💬 会話フロー一覧")
-            st.caption("TCP/UDP の双方向フローを集計（パケット数の多い順）")
-            _convs = st.session_state.get("_pcap_convs", [])
-            if _convs:
+            st.caption("TCP/UDP の双方向フローを集計（バイト数の多い順）。RTT・スループット付き。")
+            if convs:
                 _conv_proto = st.selectbox(
                     "プロトコルで絞り込み", ["ALL", "TCP", "UDP"],
                     key="conv_proto_filter"
                 )
-                _convs_f = _convs if _conv_proto == "ALL" else [
-                    c for c in _convs if c["protocol"] == _conv_proto
+                _convs_f = convs if _conv_proto == "ALL" else [
+                    c for c in convs if c["protocol"] == _conv_proto
                 ]
                 df_conv = pd.DataFrame(_convs_f)
-                if "has_syn" in df_conv.columns:
-                    def _tcp_status(row):
-                        s = []
-                        if row.get("has_syn"): s.append("SYN")
-                        if row.get("has_fin"): s.append("FIN")
-                        if row.get("has_rst"): s.append("RST")
-                        return "|".join(s) or "—"
-                    df_conv["tcp_flags"] = df_conv.apply(_tcp_status, axis=1)
                 _conv_cols = ["protocol", "src_ip", "src_port", "dst_ip", "dst_port",
-                              "packets", "bytes", "duration_sec", "tcp_flags"]
+                              "packets", "bytes", "throughput_kbps", "duration_sec",
+                              "rtt_ms", "tcp_state"]
                 _conv_cols = [c for c in _conv_cols if c in df_conv.columns]
                 df_conv = df_conv[_conv_cols].rename(columns={
                     "protocol": "プロトコル", "src_ip": "送信元IP",
                     "src_port": "送信元Port", "dst_ip": "宛先IP",
                     "dst_port": "宛先Port", "packets": "パケット数",
-                    "bytes": "バイト数", "duration_sec": "継続(秒)",
-                    "tcp_flags": "TCPフラグ",
+                    "bytes": "バイト数", "throughput_kbps": "スループット(KB/s)",
+                    "duration_sec": "継続(秒)", "rtt_ms": "RTT(ms)",
+                    "tcp_state": "TCP状態",
                 })
                 st.dataframe(df_conv, use_container_width=True, hide_index=True)
-                st.caption(f"合計 {len(_convs_f)} フロー（双方向集計）")
+                st.caption(f"合計 {len(_convs_f)} フロー（双方向集計・バイト数降順）")
             else:
                 st.info("TCP/UDP フローが検出されませんでした")
+
+            # ── トップトーカー ──────────────────────────
+            st.markdown("---")
+            st.markdown("### 📡 トップトーカー（帯域消費上位）")
+            st.caption("送受信の合計バイト数が多いIPアドレス（ランキング上位20件）")
+            if talkers:
+                df_tk = pd.DataFrame(talkers)
+                df_tk["sent_MB"]  = (df_tk["sent_bytes"]  / 1024 / 1024).round(3)
+                df_tk["recv_MB"]  = (df_tk["recv_bytes"]  / 1024 / 1024).round(3)
+                df_tk["total_MB"] = (df_tk["total_bytes"] / 1024 / 1024).round(3)
+                df_tk_show = df_tk[["ip", "total_MB", "sent_MB", "recv_MB", "sent_pkts", "recv_pkts"]]
+                df_tk_show.columns = ["IPアドレス", "合計(MB)", "送信(MB)", "受信(MB)", "送信パケット数", "受信パケット数"]
+                st.dataframe(df_tk_show, use_container_width=True, hide_index=True)
+
+                _tk_chart = df_tk.set_index("ip")[["sent_MB", "recv_MB"]].head(10)
+                _tk_chart.columns = ["送信MB", "受信MB"]
+                st.bar_chart(_tk_chart)
+            else:
+                st.info("データなし")
 
             # ── フィルター解析 ──────────────────────────
             st.markdown("---")
@@ -2089,7 +2155,10 @@ icmp.type == 5 or udp.port == 520
 | 🔌 TCP RST多発 | 接続拒否・強制切断が多い通信ペア |
 | 🔁 TCP再送多発 | 同一シーケンス番号の再送（輻輳・ロス・遅延の検出） |
 | 🚫 接続失敗 | SYNに対してSYN-ACKが返ってこなかった通信 |
-| 💬 会話フロー一覧 | TCP/UDP全フローをパケット数順に一覧表示 |
+| 🪟 ゼロウィンドウ | 受信バッファ枯渇によるフロー制御問題（スループット低下） |
+| 🌐 DNS解析 | NXDOMAIN・SERVFAIL・REFUSED・応答遅延の検出 |
+| 💬 会話フロー一覧 | RTT・スループット付きで全フローをバイト数順に表示 |
+| 📡 トップトーカー | 帯域を最も消費しているIPアドレスのランキング |
 | 🔍 フィルター解析 | IP・ポート・プロトコル・キーワードでパケット絞り込み |
 | 🤖 AI統合診断 | pcap + syslog + SNMP を統合してAIが根本原因推定 |
         """)
