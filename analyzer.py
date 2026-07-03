@@ -3,8 +3,12 @@ import json
 import requests
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3")
+OLLAMA_BASE_URL   = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL      = os.environ.get("OLLAMA_MODEL", "llama3")
+GEMINI_API_KEY    = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL      = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GROQ_API_KEY      = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL        = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 SYSTEM_PROMPT = """あなたはネットワーク機器のsyslogを解析する専門エンジニアです。
 以下のsyslogメッセージを日本語でわかりやすく説明してください。
@@ -111,29 +115,96 @@ def check_ollama_available() -> bool:
 def check_claude_available() -> bool:
     return bool(ANTHROPIC_API_KEY)
 
+def check_gemini_available() -> bool:
+    return bool(GEMINI_API_KEY)
+
+def check_groq_available() -> bool:
+    return bool(GROQ_API_KEY)
+
+
+# ── 共通 raw caller ──────────────────────────────────────────────
+
+def _call_gemini_raw(system: str, user: str, max_tokens: int = 800) -> tuple[str, str]:
+    if not GEMINI_API_KEY:
+        return "", ""
+    try:
+        resp = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+            params={"key": GEMINI_API_KEY},
+            json={
+                "systemInstruction": {"parts": [{"text": system}]},
+                "contents": [{"parts": [{"text": user}]}],
+                "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.2},
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        return text.replace("```json", "").replace("```", "").strip(), f"gemini/{GEMINI_MODEL}"
+    except Exception as e:
+        print(f"[Gemini error] {e}")
+        return "", ""
+
+
+def _call_groq_raw(system: str, user: str, max_tokens: int = 800) -> tuple[str, str]:
+    if not GROQ_API_KEY:
+        return "", ""
+    try:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}",
+                     "Content-Type": "application/json"},
+            json={
+                "model": GROQ_MODEL,
+                "messages": [{"role": "system", "content": system},
+                             {"role": "user",   "content": user}],
+                "max_tokens": max_tokens,
+                "temperature": 0.2,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        text = resp.json()["choices"][0]["message"]["content"].strip()
+        return text.replace("```json", "").replace("```", "").strip(), f"groq/{GROQ_MODEL}"
+    except Exception as e:
+        print(f"[Groq error] {e}")
+        return "", ""
+
+def analyze_with_gemini(parsed: dict, raw: str, config_context: str = "") -> tuple[str, str]:
+    return _call_gemini_raw(SYSTEM_PROMPT, _build_user_prompt(parsed, raw, config_context))
+
+def analyze_with_groq(parsed: dict, raw: str, config_context: str = "") -> tuple[str, str]:
+    return _call_groq_raw(SYSTEM_PROMPT, _build_user_prompt(parsed, raw, config_context))
+
 def analyze(parsed: dict, raw: str, mode: str = "auto", config_context: str = "") -> tuple[str, str]:
     """
-    mode: "auto" = Claude優先→Ollama fallback
-          "claude" = Claudeのみ
-          "ollama" = Ollamaのみ
-          "none" = AI解析なし
-    config_context: 機器のコンフィグ抜粋（インターフェース・ルーティング情報）。
-                     これを渡すと「構成上正常かどうか」を踏まえた判断が可能になる。
-    戻り値: (表示用dict or str, モデル名)
+    mode: "auto"   = Claude → Gemini → Groq → Ollama の順に試行
+          "claude" = Claude のみ
+          "gemini" = Gemini のみ
+          "groq"   = Groq のみ
+          "ollama" = Ollama のみ（完全ローカル）
+          "none"   = AI解析なし
     """
     if mode == "none":
         return "", "なし"
 
-    explanation, model = "", ""
+    _providers = {
+        "claude": lambda: analyze_with_claude(parsed, raw, config_context),
+        "gemini": lambda: analyze_with_gemini(parsed, raw, config_context),
+        "groq":   lambda: analyze_with_groq(parsed, raw, config_context),
+        "ollama": lambda: analyze_with_ollama(parsed, raw, config_context),
+    }
 
-    if mode in ("auto", "claude"):
-        explanation, model = analyze_with_claude(parsed, raw, config_context)
-
-    if not explanation and mode in ("auto", "ollama"):
-        explanation, model = analyze_with_ollama(parsed, raw, config_context)
+    if mode in _providers:
+        explanation, model = _providers[mode]()
+    else:  # auto
+        explanation, model = "", ""
+        for key in ("claude", "gemini", "groq", "ollama"):
+            explanation, model = _providers[key]()
+            if explanation:
+                break
 
     if not explanation:
-        # フォールバック: ルールベース簡易解説
         explanation = json.dumps(_rule_based_explain(parsed), ensure_ascii=False)
         model = "ルールベース"
 
@@ -315,27 +386,63 @@ def _rule_based_judge(parsed: dict, ai_explanation: str) -> dict:
     }
 
 
+def judge_with_gemini(parsed: dict, raw: str, ai_explanation: str,
+                      config_context: str = "") -> dict | None:
+    text, model = _call_gemini_raw(
+        JUDGE_SYSTEM_PROMPT,
+        _build_judge_prompt(parsed, raw, ai_explanation, config_context),
+        max_tokens=600,
+    )
+    if not text:
+        return None
+    try:
+        result = json.loads(text)
+        result["judge_model"] = model
+        return result
+    except Exception:
+        return None
+
+
+def judge_with_groq(parsed: dict, raw: str, ai_explanation: str,
+                    config_context: str = "") -> dict | None:
+    text, model = _call_groq_raw(
+        JUDGE_SYSTEM_PROMPT,
+        _build_judge_prompt(parsed, raw, ai_explanation, config_context),
+        max_tokens=600,
+    )
+    if not text:
+        return None
+    try:
+        result = json.loads(text)
+        result["judge_model"] = model
+        return result
+    except Exception:
+        return None
+
+
 def judge_quality(parsed: dict, raw: str, ai_explanation: str, mode: str = "auto",
                   config_context: str = "") -> dict:
-    """
-    AI解析結果の品質をLLM-as-a-Judgeで評価する。
-    mode: analyze()と同様 "auto"/"claude"/"ollama"/"none"
-    戻り値: 評価結果dict（accuracy_score等を含む）
-    """
+    """AI解析結果の品質を LLM-as-a-Judge で評価する"""
     if mode == "none" or not ai_explanation:
         return _rule_based_judge(parsed, ai_explanation)
 
-    result = None
-    if mode in ("auto", "claude"):
-        result = judge_with_claude(parsed, raw, ai_explanation, config_context)
+    _providers = {
+        "claude": lambda: judge_with_claude(parsed, raw, ai_explanation, config_context),
+        "gemini": lambda: judge_with_gemini(parsed, raw, ai_explanation, config_context),
+        "groq":   lambda: judge_with_groq(parsed, raw, ai_explanation, config_context),
+        "ollama": lambda: judge_with_ollama(parsed, raw, ai_explanation, config_context),
+    }
 
-    if not result and mode in ("auto", "ollama"):
-        result = judge_with_ollama(parsed, raw, ai_explanation, config_context)
+    if mode in _providers:
+        result = _providers[mode]()
+    else:  # auto
+        result = None
+        for key in ("claude", "gemini", "groq", "ollama"):
+            result = _providers[key]()
+            if result:
+                break
 
-    if not result:
-        result = _rule_based_judge(parsed, ai_explanation)
-
-    return result
+    return result or _rule_based_judge(parsed, ai_explanation)
 
 def _rule_based_explain(parsed: dict) -> dict:
     """LLMが使えない場合のルールベース解説"""
@@ -483,18 +590,60 @@ def diagnose_health_with_ollama(device_health, recent_logs, config_context=""):
         print(f"[Health diagnosis:Ollama error] {e}")
         return None
 
+def diagnose_health_with_gemini(device_health, recent_logs, config_context=""):
+    text, model = _call_gemini_raw(
+        HEALTH_SYSTEM_PROMPT,
+        _build_health_prompt(device_health, recent_logs, config_context),
+        max_tokens=1000,
+    )
+    if not text:
+        return None
+    try:
+        result = json.loads(text)
+        result["diagnosis_model"] = model
+        return result
+    except Exception:
+        return None
+
+
+def diagnose_health_with_groq(device_health, recent_logs, config_context=""):
+    text, model = _call_groq_raw(
+        HEALTH_SYSTEM_PROMPT,
+        _build_health_prompt(device_health, recent_logs, config_context),
+        max_tokens=1000,
+    )
+    if not text:
+        return None
+    try:
+        result = json.loads(text)
+        result["diagnosis_model"] = model
+        return result
+    except Exception:
+        return None
+
+
 def diagnose_health(device_health, recent_logs, mode="auto", config_context=""):
     """機器の健全性をLLMで総合診断する"""
     if mode == "none":
         return _rule_based_health_diagnosis(device_health)
-    result = None
-    if mode in ("auto", "claude"):
-        result = diagnose_health_with_claude(device_health, recent_logs, config_context)
-    if not result and mode in ("auto", "ollama"):
-        result = diagnose_health_with_ollama(device_health, recent_logs, config_context)
-    if not result:
-        result = _rule_based_health_diagnosis(device_health)
-    return result
+
+    _providers = {
+        "claude": lambda: diagnose_health_with_claude(device_health, recent_logs, config_context),
+        "gemini": lambda: diagnose_health_with_gemini(device_health, recent_logs, config_context),
+        "groq":   lambda: diagnose_health_with_groq(device_health, recent_logs, config_context),
+        "ollama": lambda: diagnose_health_with_ollama(device_health, recent_logs, config_context),
+    }
+
+    if mode in _providers:
+        result = _providers[mode]()
+    else:  # auto
+        result = None
+        for key in ("claude", "gemini", "groq", "ollama"):
+            result = _providers[key]()
+            if result:
+                break
+
+    return result or _rule_based_health_diagnosis(device_health)
 
 ICMP_REDIRECT_SYSTEM_PROMPT = """あなたはネットワークエンジニアです。
 ICMP redirectが大量発生している機器について、提供されたデータ（SNMPカウンタ・syslog・ルーティング情報）を総合的に分析し、
@@ -582,11 +731,40 @@ def diagnose_icmp_redirect(ip: str, snmp_data: list, redirect_logs: list,
             print(f"[ICMP redirect diagnosis:Ollama] {e}")
             return None
 
+    def _call_gemini():
+        text, model = _call_gemini_raw(ICMP_REDIRECT_SYSTEM_PROMPT, prompt, max_tokens=1000)
+        if not text:
+            return None
+        try:
+            r = json.loads(text)
+            r["diagnosis_model"] = model
+            return r
+        except Exception:
+            return None
+
+    def _call_groq():
+        text, model = _call_groq_raw(ICMP_REDIRECT_SYSTEM_PROMPT, prompt, max_tokens=1000)
+        if not text:
+            return None
+        try:
+            r = json.loads(text)
+            r["diagnosis_model"] = model
+            return r
+        except Exception:
+            return None
+
+    _icmp_providers = {
+        "claude": _call_claude, "gemini": _call_gemini,
+        "groq": _call_groq,    "ollama": _call_ollama,
+    }
     result = None
-    if mode in ("auto", "claude"):
-        result = _call_claude()
-    if not result and mode in ("auto", "ollama"):
-        result = _call_ollama()
+    if mode in _icmp_providers:
+        result = _icmp_providers[mode]()
+    else:  # auto
+        for key in ("claude", "gemini", "groq", "ollama"):
+            result = _icmp_providers[key]()
+            if result:
+                break
     if not result:
         # ルールベースフォールバック
         result = {

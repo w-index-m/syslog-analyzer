@@ -188,15 +188,41 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 🤖 AI解析エンジン")
     claude_ok = analyzer.check_claude_available()
+    gemini_ok = analyzer.check_gemini_available()
+    groq_ok   = analyzer.check_groq_available()
     ollama_ok = analyzer.check_ollama_available()
 
     st.markdown(f"{'✅' if claude_ok else '❌'} Claude API "
                 f"({'APIキーあり' if claude_ok else 'ANTHROPIC_API_KEY未設定'})")
+    st.markdown(f"{'✅' if gemini_ok else '❌'} Gemini "
+                f"({'APIキーあり' if gemini_ok else 'GEMINI_API_KEY未設定'})")
+    st.markdown(f"{'✅' if groq_ok else '❌'} Groq "
+                f"({'APIキーあり' if groq_ok else 'GROQ_API_KEY未設定'})")
     st.markdown(f"{'✅' if ollama_ok else '❌'} Ollama "
                 f"({'接続OK' if ollama_ok else 'localhost:11434 未起動'})")
 
+    with st.expander("🔑 APIキー設定", expanded=not (claude_ok or gemini_ok or groq_ok)):
+        import os
+        _gk = st.text_input("Gemini API Key", type="password",
+                             value=os.environ.get("GEMINI_API_KEY",""),
+                             help="Google AI Studio (aistudio.google.com) で無料取得")
+        _rk = st.text_input("Groq API Key", type="password",
+                             value=os.environ.get("GROQ_API_KEY",""),
+                             help="console.groq.com で無料取得")
+        if st.button("適用", key="apply_api_keys"):
+            if _gk:
+                os.environ["GEMINI_API_KEY"] = _gk
+                analyzer.GEMINI_API_KEY = _gk
+            if _rk:
+                os.environ["GROQ_API_KEY"] = _rk
+                analyzer.GROQ_API_KEY = _rk
+            st.success("APIキーを更新しました")
+            st.rerun()
+
     llm_mode = st.selectbox("解析モード", [
-        ("auto",   "🔄 自動 (Claude優先→Ollama)"),
+        ("auto",   "🔄 自動 (Claude→Gemini→Groq→Ollama)"),
+        ("gemini", "✨ Gemini（無料枠あり）"),
+        ("groq",   "⚡ Groq（無料枠あり・高速）"),
         ("claude", "☁️  Claude APIのみ"),
         ("ollama", "🏠 Ollamaのみ（完全ローカル）"),
         ("none",   "⛔ AI解析なし（高速）"),
@@ -1252,7 +1278,7 @@ end""", language="text")
 
             # ── ⑤ AI自動原因推定 ──
             st.markdown("**🤖 AI自動原因推定**")
-            llm_ok = analyzer.check_claude_available() or analyzer.check_ollama_available()
+            llm_ok = analyzer.check_claude_available() or analyzer.check_gemini_available() or analyzer.check_groq_available() or analyzer.check_ollama_available()
             if llm_ok:
                 if st.button("🔍 ICMP redirect根本原因をAIで診断", key="icmp_ai_diag"):
                     with st.spinner("AIがICMP redirect原因を分析中..."):
@@ -1903,7 +1929,7 @@ with tab_pcap:
                 st.markdown("### 🤖 pcap + syslog + SNMP 統合AI診断")
                 st.caption("3つのデータソースを統合してICMP redirect の根本原因をAIが推定します。")
 
-                llm_ok = analyzer.check_claude_available() or analyzer.check_ollama_available()
+                llm_ok = analyzer.check_claude_available() or analyzer.check_gemini_available() or analyzer.check_groq_available() or analyzer.check_ollama_available()
                 if llm_ok:
                     if st.button("🔍 統合AI診断を実行", key="pcap_ai_diag"):
                         # ルーターIPを自動検出
