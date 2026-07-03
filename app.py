@@ -1084,11 +1084,15 @@ snmp-server trap enable
                         else:
                             st.error(res.get("error", "起動失敗"))
                 with epc_cols[1]:
-                    if st.button("■ EPC 停止＋エクスポート", key=f"epc_stop_{sel_icmp_ip}",
+                    if st.button("■ EPC 停止＋自動取得", key=f"epc_stop_{sel_icmp_ip}",
                                  disabled=not is_cap):
-                        res = rc_epc.manual_stop_epc(sel_icmp_ip)
+                        with st.spinner("停止 → flash エクスポート → SCP ダウンロード中..."):
+                            res = rc_epc.manual_stop_epc(sel_icmp_ip)
                         if res["ok"]:
-                            st.success(f"✅ 停止＆エクスポート: {res.get('pcap_flash_path','')}")
+                            if res.get("local_path"):
+                                st.success(f"✅ 自動取得完了: {res['local_path']}")
+                            elif res.get("scp_error"):
+                                st.warning(f"flash 保存済み: {res['pcap_flash_path']}\nSCP エラー: {res['scp_error']}")
                         else:
                             st.error(res.get("error", "停止失敗"))
                 with epc_cols[2]:
@@ -1130,8 +1134,16 @@ snmp-server trap enable
 
                     # 一覧から選択 or 手動入力
                     flash_list = st.session_state.get(f"flash_pcaps_{dl_ip}", [])
-                    # EPC イベント履歴からもパスを収集
-                    hist_paths = [e.get("pcap_flash_path","") for e in epc_events if e.get("pcap_flash_path")]
+                    # EPC イベント履歴から flash パスと自動ダウンロード済みパスを収集
+                    hist_paths = []
+                    for e in epc_events:
+                        fp = e.get("pcap_flash_path","")
+                        if fp and fp.startswith("flash:"):
+                            hist_paths.append(fp)
+                        # "downloaded:/path/to/file.pcap" 形式のステータスからも取得
+                        st_val = e.get("status","")
+                        if st_val.startswith("downloaded:"):
+                            hist_paths.append(st_val.split("downloaded:",1)[1])
                     all_options = list(dict.fromkeys(flash_list + hist_paths))  # 重複除去
 
                     if all_options:

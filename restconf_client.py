@@ -320,16 +320,42 @@ def _trigger_epc(dev: dict, ip: str, duration: int, reason: str):
 
 
 def _stop_and_export_epc(ip: str, capture_name: str, dev: dict):
-    """タイマー満了時に EPC を停止してエクスポート"""
+    """タイマー満了時に EPC を停止 → flash エクスポート → SCP ダウンロードまで自動実行"""
     client = RestconfClient(
         ip, dev["username"], dev["password"],
         dev.get("port", 443), bool(dev.get("verify_ssl"))
     )
+
+    # 1. キャプチャ停止
     client.stop_epc(capture_name)
-    pcap_path = client.export_epc(capture_name)
-    status = f"exported:{pcap_path}" if pcap_path else "export_failed"
-    _log_epc_event(ip, "auto_stop", capture_name, status, pcap_path or "")
-    print(f"[EPC AutoTrigger] {ip} auto-stopped capture={capture_name} pcap={pcap_path}")
+
+    # 2. flash にエクスポート
+    pcap_flash = client.export_epc(capture_name)
+    if not pcap_flash:
+        _log_epc_event(ip, "auto_stop", capture_name, "export_failed", "")
+        print(f"[EPC AutoTrigger] {ip} export failed")
+        with _epc_lock:
+            _epc_active.pop(ip, None)
+        return
+
+    _log_epc_event(ip, "auto_stop", capture_name, f"exported:{pcap_flash}", pcap_flash)
+    print(f"[EPC AutoTrigger] {ip} exported to {pcap_flash}")
+
+    # 3. SCP で自動ダウンロード（flash エクスポート後に少し待つ）
+    time.sleep(3)
+    local_data, err = download_pcap_via_scp(
+        ip, dev["username"], dev["password"], pcap_flash
+    )
+    if local_data:
+        # uploads/ に保存されたローカルパスを記録
+        clean = pcap_flash.replace("flash:", "").replace("/", "").strip()
+        local_path = str(_UPLOADS_DIR / clean)
+        _log_epc_event(ip, "auto_scp", capture_name,
+                       f"downloaded:{local_path}", local_path)
+        print(f"[EPC AutoTrigger] {ip} SCP download OK → {local_path}")
+    else:
+        _log_epc_event(ip, "auto_scp", capture_name, f"scp_failed:{err}", "")
+        print(f"[EPC AutoTrigger] {ip} SCP download failed: {err}")
 
     with _epc_lock:
         _epc_active.pop(ip, None)
@@ -357,7 +383,7 @@ def manual_start_epc(ip: str, capture_name: str = None,
 
 
 def manual_stop_epc(ip: str) -> dict:
-    """手動で EPC を停止しエクスポート"""
+    """手動で EPC を停止 → flash エクスポート → SCP ダウンロードまで自動実行"""
     dev = get_device(ip)
     if not dev:
         return {"ok": False, "error": "RESTCONF デバイス未登録"}
@@ -373,11 +399,25 @@ def manual_stop_epc(ip: str) -> dict:
         dev.get("port", 443), bool(dev.get("verify_ssl"))
     )
     client.stop_epc(capture_name)
-    pcap_path = client.export_epc(capture_name)
-    _log_epc_event(ip, "手動停止", capture_name,
-                   f"exported:{pcap_path}" if pcap_path else "export_failed",
-                   pcap_path or "")
-    return {"ok": True, "pcap_flash_path": pcap_path}
+    pcap_flash = client.export_epc(capture_name)
+    if not pcap_flash:
+        _log_epc_event(ip, "手動停止", capture_name, "export_failed", "")
+        return {"ok": False, "error": "flash エクスポート失敗"}
+
+    _log_epc_event(ip, "手動停止", capture_name, f"exported:{pcap_flash}", pcap_flash)
+
+    time.sleep(3)
+    local_data, err = download_pcap_via_scp(
+        ip, dev["username"], dev["password"], pcap_flash
+    )
+    if local_data:
+        clean = pcap_flash.replace("flash:", "").replace("/", "").strip()
+        local_path = str(_UPLOADS_DIR / clean)
+        _log_epc_event(ip, "手動SCP", capture_name, f"downloaded:{local_path}", local_path)
+        return {"ok": True, "pcap_flash_path": pcap_flash, "local_path": local_path}
+    else:
+        _log_epc_event(ip, "手動SCP", capture_name, f"scp_failed:{err}", "")
+        return {"ok": True, "pcap_flash_path": pcap_flash, "scp_error": err}
 
 
 def is_capturing(ip: str) -> bool:
