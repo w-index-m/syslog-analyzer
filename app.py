@@ -1667,6 +1667,20 @@ with tab_pcap:
                           delta="📋 解析済" if res.get("syslog_packets") else None)
             with ov_cols2[3]:
                 st.metric("RIPパケット", len(res["rip_packets"]))
+            ov_cols3 = st.columns(4)
+            with ov_cols3[0]:
+                _http_err_cnt = len(res.get("http_errors", []))
+                st.metric("HTTPエラー(4xx/5xx)", _http_err_cnt,
+                          delta="⚠️ 要確認" if _http_err_cnt else None)
+            with ov_cols3[1]:
+                st.metric("TLS Fatal Alert", res.get("tls_summary", {}).get("fatal_alerts", 0),
+                          delta="⚠️ 要確認" if res.get("tls_summary", {}).get("fatal_alerts") else None)
+            with ov_cols3[2]:
+                st.metric("IPフラグメント", len(res.get("ip_fragments", [])),
+                          delta="⚠️ MTU問題?" if res.get("ip_fragments") else None)
+            with ov_cols3[3]:
+                st.metric("DHCP問題", len(res.get("dhcp_issues", [])),
+                          delta="⚠️ 要確認" if res.get("dhcp_issues") else None)
             st.caption(f"📅 キャプチャ範囲: {res['capture_start']} 〜 {res['capture_end']}")
 
             # ── ICMP redirect 詳細 ─────────────────────
@@ -2015,6 +2029,111 @@ with tab_pcap:
                 else:
                     st.success("✅ DNS エラー・遅延は検出されませんでした")
 
+            # ── IPフラグメント ──────────────────────────
+            _ip_frags = res.get("ip_fragments", [])
+            if _ip_frags:
+                st.markdown("---")
+                st.markdown("### 🧩 IPフラグメント")
+                st.caption("フラグメント化されたIPパケットを検出。MTU問題・Path MTU Discovery障害の可能性があります。")
+                df_frag = pd.DataFrame(_ip_frags)
+                df_frag = df_frag[["src", "dst", "protocol", "fragment_count", "description"]]
+                df_frag.columns = ["送信元IP", "宛先IP", "プロトコル", "フラグメント数", "説明"]
+                st.dataframe(df_frag, use_container_width=True, hide_index=True)
+
+            # ── HTTP 解析 ────────────────────────────────
+            _http_errs = res.get("http_errors", [])
+            _http_sum  = res.get("http_summary", [])
+            if _http_sum or _http_errs:
+                st.markdown("---")
+                st.markdown("### 🌍 HTTP 応答コード解析")
+                st.caption("平文 HTTP レスポンスの応答コードを集計。4xx/5xx エラーを検出します（暗号化されていないHTTP通信のみ）。")
+                if _http_sum:
+                    df_http_sum = pd.DataFrame(_http_sum)
+                    df_http_sum.columns = ["ステータスコード", "件数"]
+                    _hc1, _hc2 = st.columns([1, 2])
+                    with _hc1:
+                        st.dataframe(df_http_sum, use_container_width=True, hide_index=True)
+                    with _hc2:
+                        st.bar_chart(df_http_sum.set_index("ステータスコード"))
+                if _http_errs:
+                    st.markdown("**4xx / 5xx エラー一覧**")
+                    df_http_err = pd.DataFrame(_http_errs)
+                    _http_cols = ["timestamp", "server", "client", "server_port", "status_code", "reason", "category"]
+                    df_http_err = df_http_err[_http_cols].rename(columns={
+                        "timestamp": "時刻", "server": "サーバーIP", "client": "クライアントIP",
+                        "server_port": "Port", "status_code": "ステータス",
+                        "reason": "理由", "category": "カテゴリ",
+                    })
+                    st.dataframe(df_http_err, use_container_width=True, hide_index=True)
+                else:
+                    st.success("✅ HTTP 4xx/5xx エラーは検出されませんでした")
+
+            # ── TLS / HTTPS 解析 ─────────────────────────
+            _tls_sum      = res.get("tls_summary", {})
+            _tls_sessions = res.get("tls_sessions", [])
+            _tls_alerts   = res.get("tls_alerts", [])
+            if _tls_sum.get("sessions", 0) > 0 or _tls_alerts:
+                st.markdown("---")
+                st.markdown("### 🔒 TLS / HTTPS 解析")
+                st.caption(
+                    "HTTPS のペイロードは暗号化されており読めませんが、"
+                    "SNI（接続先ホスト名）・TLSバージョン・Fatal Alert は平文で送受信されるため取得できます。"
+                )
+                _tc1, _tc2, _tc3, _tc4 = st.columns(4)
+                with _tc1:
+                    st.metric("TLSセッション数", _tls_sum.get("sessions", 0))
+                with _tc2:
+                    st.metric("ユニーク接続先", _tls_sum.get("unique_sites", 0))
+                with _tc3:
+                    st.metric("Fatal Alert", _tls_sum.get("fatal_alerts", 0),
+                              delta="⚠️ 接続エラー" if _tls_sum.get("fatal_alerts") else None)
+                with _tc4:
+                    st.metric("非推奨TLS(<1.2)", _tls_sum.get("deprecated_tls", 0),
+                              delta="⚠️ セキュリティ問題" if _tls_sum.get("deprecated_tls") else None)
+                if _tls_sessions:
+                    st.markdown("**TLS セッション一覧（SNI付き）**")
+                    df_tls = pd.DataFrame(_tls_sessions)
+                    _tls_cols = ["timestamp", "client", "server", "server_port", "sni", "tls_version"]
+                    df_tls = df_tls[[c for c in _tls_cols if c in df_tls.columns]].rename(columns={
+                        "timestamp": "時刻", "client": "クライアントIP", "server": "サーバーIP",
+                        "server_port": "Port", "sni": "接続先ホスト名(SNI)", "tls_version": "TLSバージョン",
+                    })
+                    st.dataframe(df_tls, use_container_width=True, hide_index=True)
+                if _tls_alerts:
+                    st.markdown("**⚠️ TLS Alert 一覧**")
+                    df_ta = pd.DataFrame(_tls_alerts)
+                    _ta_cols = ["timestamp", "client", "server", "server_port", "sni", "alert", "issue"]
+                    df_ta = df_ta[[c for c in _ta_cols if c in df_ta.columns]].rename(columns={
+                        "timestamp": "時刻", "client": "クライアントIP", "server": "サーバーIP",
+                        "server_port": "Port", "sni": "接続先ホスト名(SNI)",
+                        "alert": "アラート内容", "issue": "問題",
+                    })
+                    st.dataframe(df_ta, use_container_width=True, hide_index=True)
+
+            # ── DHCP 解析 ────────────────────────────────
+            _dhcp_issues = res.get("dhcp_issues", [])
+            _dhcp_sum    = res.get("dhcp_summary", {})
+            if _dhcp_sum or _dhcp_issues:
+                st.markdown("---")
+                st.markdown("### 📋 DHCP 解析")
+                st.caption("DHCP NAK・DECLINE・DISCOVER未応答などのIPアドレス割り当て問題を検出します。")
+                if _dhcp_sum:
+                    df_dhcp_sum = pd.DataFrame(
+                        [{"メッセージタイプ": k, "件数": v} for k, v in sorted(_dhcp_sum.items())]
+                    )
+                    st.dataframe(df_dhcp_sum, use_container_width=True, hide_index=True)
+                if _dhcp_issues:
+                    st.markdown("**⚠️ DHCP 問題検出**")
+                    df_dhcp = pd.DataFrame(_dhcp_issues)
+                    _dhcp_cols = ["timestamp", "server", "client_mac", "hostname", "event", "detail", "issue"]
+                    df_dhcp = df_dhcp[[c for c in _dhcp_cols if c in df_dhcp.columns]].rename(columns={
+                        "timestamp": "時刻", "server": "サーバーIP", "client_mac": "クライアントMAC",
+                        "hostname": "ホスト名", "event": "イベント", "detail": "詳細", "issue": "問題",
+                    })
+                    st.dataframe(df_dhcp, use_container_width=True, hide_index=True)
+                else:
+                    st.success("✅ DHCP 問題は検出されませんでした")
+
             # ── 会話フロー一覧 ──────────────────────────
             st.markdown("---")
             st.markdown("### 💬 会話フロー一覧")
@@ -2157,6 +2276,10 @@ icmp.type == 5 or udp.port == 520
 | 🚫 接続失敗 | SYNに対してSYN-ACKが返ってこなかった通信 |
 | 🪟 ゼロウィンドウ | 受信バッファ枯渇によるフロー制御問題（スループット低下） |
 | 🌐 DNS解析 | NXDOMAIN・SERVFAIL・REFUSED・応答遅延の検出 |
+| 🧩 IPフラグメント | MTU問題・Path MTU Discovery障害によるフラグメント化の検出 |
+| 🌍 HTTP解析 | 平文HTTPの応答コード集計・4xx/5xxエラー一覧 |
+| 🔒 TLS/HTTPS解析 | SNI（接続先ホスト名）・TLSバージョン・Fatal Alert の検出 |
+| 📋 DHCP解析 | NAK・DECLINE・DISCOVER未応答などのIPアドレス割り当て問題 |
 | 💬 会話フロー一覧 | RTT・スループット付きで全フローをバイト数順に表示 |
 | 📡 トップトーカー | 帯域を最も消費しているIPアドレスのランキング |
 | 🔍 フィルター解析 | IP・ポート・プロトコル・キーワードでパケット絞り込み |
