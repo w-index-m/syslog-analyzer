@@ -931,8 +931,8 @@ snmp-server trap enable
                         df_rt = pd.DataFrame(rt_rows)[["dest","mask","nexthop","route_type","proto","fetched_at"]]
                         df_rt.columns = ["宛先","マスク","ネクストホップ","タイプ","プロトコル","取得時刻"]
                         st.dataframe(df_rt, use_container_width=True, hide_index=True)
-                else:
-                    st.caption("ルーティングテーブルなし（上のボタンで取得してください）")
+                    else:
+                        st.caption("ルーティングテーブルなし（上のボタンで取得してください）")
         else:
             st.info("デバイスが登録されていません。上のフォームから追加してください。")
 
@@ -1619,9 +1619,20 @@ with tab_pcap:
     )
 
     if uploaded_pcap is not None:
-        with st.spinner("パケットを解析中..."):
-            raw_bytes = uploaded_pcap.read()
-            res = pcap_analyzer.analyze_pcap(raw_bytes)
+        raw_bytes = uploaded_pcap.read()
+
+        # キャッシュ: 同じファイルなら再解析しない
+        _pcap_key = f"{uploaded_pcap.name}_{len(raw_bytes)}"
+        if st.session_state.get("_pcap_key") != _pcap_key:
+            with st.spinner("パケットを解析中..."):
+                res   = pcap_analyzer.analyze_pcap(raw_bytes)
+                convs = pcap_analyzer.get_conversations(raw_bytes)
+            st.session_state["_pcap_key"]   = _pcap_key
+            st.session_state["_pcap_res"]   = res
+            st.session_state["_pcap_convs"] = convs
+        else:
+            res   = st.session_state["_pcap_res"]
+            convs = st.session_state["_pcap_convs"]
 
         if res["error"]:
             st.error(f"解析エラー: {res['error']}")
@@ -1629,18 +1640,21 @@ with tab_pcap:
             # ── 概要 ───────────────────────────────────
             st.markdown("---")
             st.markdown("### 📊 キャプチャ概要")
-            ov_cols = st.columns(5)
+            ov_cols = st.columns(6)
             with ov_cols[0]:
                 st.metric("総パケット数", f"{res['total_packets']:,}")
             with ov_cols[1]:
                 st.metric("ICMP redirect 検出", len(res["icmp_redirects"]),
                           delta="⚠️ 要確認" if res["icmp_redirects"] else None)
             with ov_cols[2]:
+                st.metric("TCP問題", len(res["tcp_issues"]),
+                          delta="⚠️ 要確認" if res["tcp_issues"] else None)
+            with ov_cols[3]:
                 st.metric("pcap内syslog", len(res.get("syslog_packets", [])),
                           delta="📋 解析済" if res.get("syslog_packets") else None)
-            with ov_cols[3]:
-                st.metric("RIPパケット", len(res["rip_packets"]))
             with ov_cols[4]:
+                st.metric("RIPパケット", len(res["rip_packets"]))
+            with ov_cols[5]:
                 st.metric("ARP異常", len(res["arp_anomalies"]),
                           delta="⚠️ 要確認" if res["arp_anomalies"] else None)
             st.caption(f"📅 キャプチャ範囲: {res['capture_start']} 〜 {res['capture_end']}")
@@ -1908,10 +1922,130 @@ with tab_pcap:
             # ── TCP 問題 ───────────────────────────────
             if res["tcp_issues"]:
                 st.markdown("---")
-                st.markdown("### 🔌 TCP RST 多発")
+                st.markdown("### 🔌 TCP 問題検出")
+                _rst_n    = sum(1 for x in res["tcp_issues"] if x.get("type") == "RST多発")
+                _retrans_n = sum(1 for x in res["tcp_issues"] if x.get("type") == "再送多発")
+                _syn_n    = sum(1 for x in res["tcp_issues"] if x.get("type") == "接続失敗")
+                _tc1, _tc2, _tc3 = st.columns(3)
+                with _tc1:
+                    st.metric("RST多発フロー", _rst_n,
+                              delta="⚠️ 接続拒否" if _rst_n else None)
+                with _tc2:
+                    st.metric("再送多発フロー", _retrans_n,
+                              delta="⚠️ 品質低下" if _retrans_n else None)
+                with _tc3:
+                    st.metric("接続失敗(SYN未応答)", _syn_n,
+                              delta="⚠️ サービス停止?" if _syn_n else None)
                 df_tcp = pd.DataFrame(res["tcp_issues"])
-                df_tcp.columns = ["送信元","宛先","RST回数","説明"]
-                st.dataframe(df_tcp, use_container_width=True, hide_index=True)
+                df_tcp_show = df_tcp[["type", "src", "dst", "src_port", "dst_port", "count", "description"]]
+                df_tcp_show.columns = ["種別", "送信元IP", "宛先IP", "送信元Port", "宛先Port", "回数", "説明"]
+                st.dataframe(df_tcp_show, use_container_width=True, hide_index=True)
+
+            # ── TCP 再送詳細 ─────────────────────────────
+            if res.get("tcp_retransmissions"):
+                st.markdown("---")
+                st.markdown("### 🔁 TCP 再送詳細")
+                st.caption("同一シーケンス番号＋サイズのパケットが複数回出現したフロー（輻輳・ロス・遅延の指標）")
+                df_rt = pd.DataFrame(res["tcp_retransmissions"])
+                df_rt = df_rt[["src", "dst", "src_port", "dst_port", "retrans_count", "description"]]
+                df_rt.columns = ["送信元IP", "宛先IP", "送信元Port", "宛先Port", "再送回数", "説明"]
+                st.dataframe(df_rt, use_container_width=True, hide_index=True)
+
+            # ── SYN 未応答 ──────────────────────────────
+            if res.get("tcp_syn_no_synack"):
+                st.markdown("---")
+                st.markdown("### 🚫 接続失敗（SYN未応答）")
+                st.caption("SYNを送ったがSYN-ACKが返ってこなかった通信（サービス停止・ファイアウォール拒否の可能性）")
+                df_syn = pd.DataFrame(res["tcp_syn_no_synack"])
+                df_syn = df_syn[["src", "dst", "src_port", "dst_port", "syn_at", "wait_sec", "description"]]
+                df_syn.columns = ["接続元IP", "接続先IP", "接続元Port", "接続先Port", "SYN送信時刻", "待機(秒)", "説明"]
+                st.dataframe(df_syn, use_container_width=True, hide_index=True)
+
+            # ── 会話フロー一覧 ──────────────────────────
+            st.markdown("---")
+            st.markdown("### 💬 会話フロー一覧")
+            st.caption("TCP/UDP の双方向フローを集計（パケット数の多い順）")
+            _convs = st.session_state.get("_pcap_convs", [])
+            if _convs:
+                _conv_proto = st.selectbox(
+                    "プロトコルで絞り込み", ["ALL", "TCP", "UDP"],
+                    key="conv_proto_filter"
+                )
+                _convs_f = _convs if _conv_proto == "ALL" else [
+                    c for c in _convs if c["protocol"] == _conv_proto
+                ]
+                df_conv = pd.DataFrame(_convs_f)
+                if "has_syn" in df_conv.columns:
+                    def _tcp_status(row):
+                        s = []
+                        if row.get("has_syn"): s.append("SYN")
+                        if row.get("has_fin"): s.append("FIN")
+                        if row.get("has_rst"): s.append("RST")
+                        return "|".join(s) or "—"
+                    df_conv["tcp_flags"] = df_conv.apply(_tcp_status, axis=1)
+                _conv_cols = ["protocol", "src_ip", "src_port", "dst_ip", "dst_port",
+                              "packets", "bytes", "duration_sec", "tcp_flags"]
+                _conv_cols = [c for c in _conv_cols if c in df_conv.columns]
+                df_conv = df_conv[_conv_cols].rename(columns={
+                    "protocol": "プロトコル", "src_ip": "送信元IP",
+                    "src_port": "送信元Port", "dst_ip": "宛先IP",
+                    "dst_port": "宛先Port", "packets": "パケット数",
+                    "bytes": "バイト数", "duration_sec": "継続(秒)",
+                    "tcp_flags": "TCPフラグ",
+                })
+                st.dataframe(df_conv, use_container_width=True, hide_index=True)
+                st.caption(f"合計 {len(_convs_f)} フロー（双方向集計）")
+            else:
+                st.info("TCP/UDP フローが検出されませんでした")
+
+            # ── フィルター解析 ──────────────────────────
+            st.markdown("---")
+            st.markdown("### 🔍 フィルター解析")
+            st.caption("IPアドレス・ポート・プロトコル・キーワードでパケットを絞り込みます")
+            with st.form("pcap_filter_form"):
+                _fc1, _fc2, _fc3 = st.columns(3)
+                with _fc1:
+                    _f_ip     = st.text_input("IPアドレス（送受信どちらか）", placeholder="10.0.0.1")
+                    _f_src_ip = st.text_input("送信元IP（厳密指定）", placeholder="10.0.0.1")
+                with _fc2:
+                    _f_dst_ip   = st.text_input("宛先IP（厳密指定）", placeholder="10.0.0.2")
+                    _f_port_str = st.text_input("ポート番号（送受信どちらか）", placeholder="80")
+                with _fc3:
+                    _f_proto   = st.selectbox("プロトコル", ["（全て）", "TCP", "UDP", "ICMP", "ARP"])
+                    _f_keyword = st.text_input("キーワード（ペイロード内テキスト）",
+                                               placeholder="GET / HTTP / password")
+                _filter_btn = st.form_submit_button("🔍 フィルター実行")
+
+            if _filter_btn:
+                _f_port  = int(_f_port_str) if _f_port_str.strip().isdigit() else 0
+                _f_proto_arg = "" if _f_proto == "（全て）" else _f_proto
+                with st.spinner("フィルタリング中..."):
+                    _filtered = pcap_analyzer.filter_pcap(
+                        raw_bytes,
+                        src_ip=_f_src_ip.strip(),
+                        dst_ip=_f_dst_ip.strip(),
+                        ip=_f_ip.strip(),
+                        port=_f_port,
+                        protocol=_f_proto_arg,
+                        keyword=_f_keyword.strip(),
+                    )
+                if _filtered:
+                    st.success(f"✅ {len(_filtered)} パケット一致（最大500件）")
+                    df_filt = pd.DataFrame(_filtered)
+                    _fcols = ["timestamp", "protocol", "src_ip", "src_port",
+                              "dst_ip", "dst_port", "length", "info"]
+                    if _f_keyword.strip():
+                        _fcols.append("payload_text")
+                    df_filt = df_filt[_fcols].rename(columns={
+                        "timestamp": "時刻", "protocol": "プロトコル",
+                        "src_ip": "送信元IP", "src_port": "送信元Port",
+                        "dst_ip": "宛先IP", "dst_port": "宛先Port",
+                        "length": "長さ(B)", "info": "情報",
+                        "payload_text": "ペイロード（一部）",
+                    })
+                    st.dataframe(df_filt, use_container_width=True, hide_index=True)
+                else:
+                    st.warning("条件に一致するパケットが見つかりませんでした")
 
             # ── ICMP 分布 ──────────────────────────────
             if res["icmp_summary"]:
@@ -1953,5 +2087,9 @@ icmp.type == 5 or udp.port == 520
 | 🔄 RIP | ネイバー一覧・Request/Response の交換状況 |
 | ⚠️ ARP異常 | MACアドレス変化（ARPスプーフィング検出） |
 | 🔌 TCP RST多発 | 接続拒否・強制切断が多い通信ペア |
+| 🔁 TCP再送多発 | 同一シーケンス番号の再送（輻輳・ロス・遅延の検出） |
+| 🚫 接続失敗 | SYNに対してSYN-ACKが返ってこなかった通信 |
+| 💬 会話フロー一覧 | TCP/UDP全フローをパケット数順に一覧表示 |
+| 🔍 フィルター解析 | IP・ポート・プロトコル・キーワードでパケット絞り込み |
 | 🤖 AI統合診断 | pcap + syslog + SNMP を統合してAIが根本原因推定 |
         """)
