@@ -83,6 +83,8 @@ if "snmp_trap_started" not in st.session_state:
     st.session_state.snmp_trap_started = False
 if "snmp_poller_started" not in st.session_state:
     st.session_state.snmp_poller_started = False
+if "netflow_started" not in st.session_state:
+    st.session_state.netflow_started = False
 if "auto_analyze" not in st.session_state:
     st.session_state.auto_analyze = True
 if "judge_enabled" not in st.session_state:
@@ -184,6 +186,33 @@ with st.sidebar:
             snmp_poller.stop_poller()
             st.session_state.snmp_poller_started = False
             st.info("停止")
+
+    # NetFlow 制御
+    st.markdown("**🌊 NetFlow v5 受信**")
+    import netflow_collector as _nfc
+    nf_port = st.number_input("NetFlow ポート", min_value=1024, max_value=65535,
+                               value=9995, key="netflow_port_input")
+    col7, col8 = st.columns(2)
+    with col7:
+        if st.button("▶ NetFlow起動", use_container_width=True,
+                     disabled=st.session_state.netflow_started):
+            srv = _nfc.get_server(port=int(nf_port))
+            srv.start()
+            if srv.running:
+                st.session_state.netflow_started = True
+                st.success(f"UDP {nf_port} 受信中")
+            else:
+                st.error(srv.error or "起動失敗")
+    with col8:
+        if st.button("⏹ NetFlow停止", use_container_width=True,
+                     disabled=not st.session_state.netflow_started):
+            _nfc.get_server().stop()
+            st.session_state.netflow_started = False
+            st.info("停止")
+    if st.session_state.netflow_started:
+        st.success(f"✅ UDP {nf_port} NetFlow受信中")
+    else:
+        st.warning("⏸ NetFlow停止中")
 
     st.markdown("---")
     st.markdown("### 🤖 AI解析エンジン")
@@ -386,10 +415,10 @@ _process_queue()
 # ─────────────────────────────────────────
 # メインUI
 # ─────────────────────────────────────────
-tab_health, tab1, tab2, tab3, tab4, tab5, tab_pcap = st.tabs([
+tab_health, tab1, tab2, tab3, tab4, tab5, tab_netflow, tab_pcap = st.tabs([
     "📊 品質ルーブリック", "📋 ログビューア", "📊 テレメトリダッシュボード",
     "📡 SNMPモニター", "🗂️ 機器コンフィグ", "📖 セットアップガイド",
-    "📦 パケット解析"
+    "🌊 NetFlow", "📦 パケット解析"
 ])
 
 # ═══════════════════════════════════════════
@@ -1631,6 +1660,119 @@ output.logstash:
 # ═══════════════════════════════════════════
 # TAB: パケット解析（Wireshark pcap/pcapng）
 # ═══════════════════════════════════════════
+# ═══════════════════════════════════════════
+# TAB: NetFlow
+# ═══════════════════════════════════════════
+with tab_netflow:
+    import netflow_collector as _nfc2
+
+    st.markdown("## 🌊 NetFlow フロー解析")
+    st.caption("ルーターから送信される NetFlow v5 を受信・集計してトラフィックを可視化します。")
+
+    if not st.session_state.netflow_started:
+        st.info("サイドバーから NetFlow サーバーを起動してください。\n\n"
+                "**ルーター側の設定例（Cisco IOS-XE）:**\n```\n"
+                "ip flow-export version 5\n"
+                "ip flow-export destination <このPCのIP> 9995\n"
+                "ip flow-cache timeout active 1\n"
+                "!\n"
+                "interface GigabitEthernet1/0/1\n"
+                " ip flow ingress\n"
+                " ip flow egress\n```")
+    else:
+        _nf_hours = st.select_slider(
+            "集計期間", options=[1, 3, 6, 12, 24], value=1,
+            format_func=lambda x: f"過去 {x} 時間"
+        )
+
+        if st.button("🔄 更新", key="nf_refresh"):
+            st.rerun()
+
+        _nf_sum = _nfc2.get_summary(_nf_hours)
+
+        # ── 概要メトリクス ──
+        st.markdown("### 📊 概要")
+        _nc1, _nc2, _nc3, _nc4, _nc5 = st.columns(5)
+        _nc1.metric("総フロー数",    f"{_nf_sum['total_flows']:,}")
+        _nc2.metric("総バイト数",    f"{_nf_sum['total_bytes']/1024/1024:.1f} MB")
+        _nc3.metric("総パケット数",  f"{_nf_sum['total_packets']:,}")
+        _nc4.metric("ユニーク送信元", f"{_nf_sum['unique_src']:,}")
+        _nc5.metric("エクスポーター", f"{_nf_sum['exporters']:,}")
+
+        # ── タイムライン ──
+        _nf_timeline = _nfc2.get_traffic_timeline(_nf_hours)
+        if _nf_timeline:
+            st.markdown("---")
+            st.markdown("### 📈 トラフィックタイムライン")
+            df_tl = pd.DataFrame(_nf_timeline)
+            df_tl["MB"] = (df_tl["total_bytes"] / 1024 / 1024).round(3)
+            st.line_chart(df_tl.set_index("ts")["MB"], height=200)
+            st.caption("単位: MB / 集計バケット")
+
+        # ── トップトーカー + プロトコル ──
+        st.markdown("---")
+        _ta_col, _pr_col = st.columns(2)
+
+        with _ta_col:
+            st.markdown("### 📡 トップトーカー（送信元IP）")
+            _nf_talkers = _nfc2.get_top_talkers(_nf_hours, limit=15)
+            if _nf_talkers:
+                df_tk = pd.DataFrame(_nf_talkers)
+                df_tk["MB"] = (df_tk["total_bytes"] / 1024 / 1024).round(3)
+                st.bar_chart(df_tk.set_index("ip")["MB"].head(10))
+                _tk_show = df_tk[["ip", "MB", "total_packets", "flows"]]
+                _tk_show.columns = ["IPアドレス", "MB", "パケット数", "フロー数"]
+                st.dataframe(_tk_show, use_container_width=True, hide_index=True)
+            else:
+                st.info("データなし")
+
+        with _pr_col:
+            st.markdown("### 🔌 プロトコル分布")
+            _nf_protos = _nfc2.get_protocol_stats(_nf_hours)
+            if _nf_protos:
+                df_pr = pd.DataFrame(_nf_protos)
+                df_pr["MB"] = (df_pr["total_bytes"] / 1024 / 1024).round(3)
+                st.bar_chart(df_pr.set_index("protocol_name")["MB"])
+                _pr_show = df_pr[["protocol_name", "MB", "total_packets", "flows"]]
+                _pr_show.columns = ["プロトコル", "MB", "パケット数", "フロー数"]
+                st.dataframe(_pr_show, use_container_width=True, hide_index=True)
+            else:
+                st.info("データなし")
+
+        # ── アプリケーション（ポート別） ──
+        _nf_ports = _nfc2.get_port_stats(_nf_hours)
+        if _nf_ports:
+            st.markdown("---")
+            st.markdown("### 🌐 アプリケーション別トラフィック（TCP/UDP 宛先ポート）")
+            df_pt = pd.DataFrame(_nf_ports)
+            df_pt["MB"] = (df_pt["total_bytes"] / 1024 / 1024).round(3)
+            _pt_col1, _pt_col2 = st.columns([2, 1])
+            with _pt_col1:
+                st.bar_chart(df_pt.set_index("app")["MB"])
+            with _pt_col2:
+                _pt_show = df_pt[["app", "dst_port", "MB", "flows"]]
+                _pt_show.columns = ["アプリ", "ポート", "MB", "フロー"]
+                st.dataframe(_pt_show, use_container_width=True, hide_index=True)
+
+        # ── フロー一覧 ──
+        st.markdown("---")
+        st.markdown("### 📋 フロー一覧（直近500件）")
+        _nf_flows = _nfc2.get_recent_flows(_nf_hours, limit=500)
+        if _nf_flows:
+            df_fl = pd.DataFrame(_nf_flows)
+            _fl_cols = ["received_at", "exporter_ip", "src_ip", "dst_ip",
+                        "src_port", "dst_port", "proto_name", "app", "packets", "bytes"]
+            df_fl = df_fl[_fl_cols].rename(columns={
+                "received_at":  "受信時刻", "exporter_ip": "エクスポーター",
+                "src_ip":       "送信元IP",  "dst_ip":       "宛先IP",
+                "src_port":     "送信元Port","dst_port":     "宛先Port",
+                "proto_name":   "プロトコル","app":          "アプリ",
+                "packets":      "パケット数","bytes":        "バイト数",
+            })
+            st.dataframe(df_fl, use_container_width=True, hide_index=True)
+        else:
+            st.info("まだフローデータがありません。ルーターの flow-export 設定を確認してください。")
+
 with tab_pcap:
     import pcap_analyzer
     import restconf_client as _rc
