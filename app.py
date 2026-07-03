@@ -66,6 +66,19 @@ st.markdown("""
     font-size: 12px; color: #16a34a;
   }
   div[data-testid="stMetricValue"] { font-size: 2rem; }
+
+  /* タブが多いとき横に見切れないよう複数行に折り返す */
+  div[data-baseweb="tab-list"] {
+    flex-wrap: wrap !important;
+    row-gap: 4px;
+  }
+  /* タブ内テキストの折り返しを防ぎ、ラベルを見やすく */
+  button[data-baseweb="tab"] {
+    white-space: nowrap;
+  }
+  button[data-baseweb="tab"] > div[data-testid="stMarkdownContainer"] p {
+    font-size: 0.9rem;
+  }
 </style>
 """, unsafe_allow_html=True)
 
