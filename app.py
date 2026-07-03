@@ -1115,12 +1115,11 @@ snmp-server trap enable
                     latest = analyses[0]
                     st.caption(f"最終解析: {latest['analyzed_at'][:19]}  |  キャプチャ: {latest['capture_name']}")
                     an = latest.get("analysis", {})
-                    s = an.get("summary", {})
                     ac1, ac2, ac3, ac4 = st.columns(4)
-                    ac1.metric("総パケット数", s.get("total_packets", 0))
-                    ac2.metric("ICMP Redirect", s.get("icmp_redirects", 0))
-                    ac3.metric("TCP RST", s.get("tcp_rst", 0))
-                    ac4.metric("キャプチャ時間", f"{s.get('duration_sec', 0):.1f}s")
+                    ac1.metric("総パケット数", an.get("total_packets", 0))
+                    ac2.metric("ICMP Redirect", len(an.get("icmp_redirects", [])))
+                    ac3.metric("TCP問題", len(an.get("tcp_issues", [])))
+                    ac4.metric("DNSエラー", an.get("dns_summary", {}).get("nxdomain", 0))
 
                     rds = an.get("icmp_redirects", [])
                     if rds:
@@ -1140,12 +1139,12 @@ snmp-server trap enable
                     if len(analyses) > 1:
                         with st.expander(f"📜 過去の解析履歴 ({len(analyses)-1} 件)"):
                             for old in analyses[1:]:
-                                s2 = old.get("analysis", {}).get("summary", {})
+                                a2 = old.get("analysis", {})
                                 st.markdown(
                                     f"- `{old['analyzed_at'][:19]}` — "
-                                    f"pkts={s2.get('total_packets',0)} "
-                                    f"redirects={s2.get('icmp_redirects',0)} "
-                                    f"RST={s2.get('tcp_rst',0)}"
+                                    f"pkts={a2.get('total_packets',0)} "
+                                    f"redirects={len(a2.get('icmp_redirects',[]))} "
+                                    f"TCP問題={len(a2.get('tcp_issues',[]))}"
                                 )
                     if st.button("🔄 解析結果を更新", key="refresh_analysis"):
                         st.rerun()
@@ -1608,9 +1607,109 @@ output.logstash:
 # ═══════════════════════════════════════════
 with tab_pcap:
     import pcap_analyzer
+    import restconf_client as _rc
 
     st.markdown("## 📦 パケット解析（Wireshark pcap/pcapng）")
-    st.caption("Wiresharkでキャプチャしたファイルをアップロードすると、ICMP redirect・RIP・ARP異常などを自動解析します。")
+
+    # ══════════════════════════════════════════
+    # デバイス登録 & SSH/SCP ダウンロード
+    # ══════════════════════════════════════════
+    st.markdown("### 📡 デバイスから直接取得（SSH/SCP）")
+    st.caption("Catalyst など IOS-XE の flash にある pcap を SCP でダウンロードして自動解析します。（`ip scp server enable` が必要）")
+
+    with st.expander("⚙️ デバイス登録・管理", expanded=False):
+        _saved_devs = _rc.get_pcap_devices()
+        if _saved_devs:
+            st.markdown("**登録済みデバイス**")
+            _dev_df = pd.DataFrame(_saved_devs)[["name", "ip", "username", "ssh_port"]]
+            _dev_df.columns = ["名前", "IPアドレス", "ユーザー名", "SSHポート"]
+            st.dataframe(_dev_df, use_container_width=True, hide_index=True)
+            _del_opts = {f"{d['name']} ({d['ip']})": d["id"] for d in _saved_devs}
+            _del_sel  = st.selectbox("削除するデバイス", ["（選択）"] + list(_del_opts.keys()),
+                                     key="pcap_del_dev")
+            if st.button("🗑 削除", key="pcap_del_btn") and _del_sel != "（選択）":
+                _rc.remove_pcap_device(_del_opts[_del_sel])
+                st.success("削除しました")
+                st.rerun()
+            st.markdown("---")
+
+        st.markdown("**新規デバイス登録**")
+        with st.form("pcap_dev_reg_form"):
+            _rd1, _rd2 = st.columns(2)
+            with _rd1:
+                _reg_name = st.text_input("デバイス名", placeholder="core-sw-01")
+                _reg_ip   = st.text_input("IPアドレス", placeholder="192.168.1.1")
+                _reg_port = st.number_input("SSHポート", min_value=1, max_value=65535, value=22)
+            with _rd2:
+                _reg_user = st.text_input("ユーザー名")
+                _reg_pass = st.text_input("パスワード", type="password")
+            if st.form_submit_button("💾 登録"):
+                if _reg_name and _reg_ip and _reg_user and _reg_pass:
+                    _rc.add_pcap_device(_reg_name, _reg_ip, _reg_user, _reg_pass, int(_reg_port))
+                    st.success(f"✅ {_reg_name} ({_reg_ip}) を登録しました")
+                    st.rerun()
+                else:
+                    st.error("全項目を入力してください")
+
+    # ── ダウンロード & 解析 ──────────────────
+    _pcap_devs = _rc.get_pcap_devices()
+    if _pcap_devs:
+        _dev_labels = {f"{d['name']} ({d['ip']})": d for d in _pcap_devs}
+        _sel_label  = st.selectbox("対象デバイス", list(_dev_labels.keys()), key="pcap_dev_sel")
+        _sel_dev    = _dev_labels[_sel_label]
+
+        _dl_col1, _dl_col2 = st.columns([1, 2])
+        with _dl_col1:
+            if st.button("🔍 flash の pcap 一覧を取得", key="pcap_list_btn"):
+                with st.spinner(f"{_sel_dev['ip']} に接続中..."):
+                    _found = _rc.list_flash_pcaps(
+                        _sel_dev["ip"], _sel_dev["username"], _sel_dev["password"]
+                    )
+                if _found:
+                    st.session_state[f"_flash_{_sel_dev['ip']}"] = _found
+                    st.success(f"{len(_found)} 件を検出")
+                else:
+                    st.warning("pcap ファイルが見つかりません")
+
+        with _dl_col2:
+            _flash_list = st.session_state.get(f"_flash_{_sel_dev['ip']}", [])
+            if _flash_list:
+                _dl_file = st.selectbox("ダウンロードするファイル", _flash_list, key="pcap_file_sel")
+            else:
+                _dl_file = st.text_input("flash パス（例: flash:/epc_cap.pcap）",
+                                         key="pcap_file_manual")
+
+        if st.button("⬇ ダウンロード＆解析", key="pcap_dl_btn", type="primary",
+                     disabled=not _dl_file):
+            with st.spinner(f"SCP ダウンロード中: {_sel_dev['ip']}:{_dl_file}"):
+                _dl_bytes, _dl_err = _rc.download_pcap_via_scp(
+                    _sel_dev["ip"], _sel_dev["username"],
+                    _sel_dev["password"], _dl_file
+                )
+            if _dl_bytes:
+                st.success(f"✅ ダウンロード完了 ({len(_dl_bytes):,} bytes)")
+                with st.spinner("解析中..."):
+                    _dl_res   = pcap_analyzer.analyze_pcap(_dl_bytes)
+                    _dl_convs = pcap_analyzer.get_conversations(_dl_bytes)
+                    _dl_tlk   = pcap_analyzer.get_top_talkers(_dl_bytes)
+                st.session_state["_pcap_key"]     = f"_dl_{_sel_dev['ip']}_{_dl_file}"
+                st.session_state["_pcap_res"]     = _dl_res
+                st.session_state["_pcap_convs"]   = _dl_convs
+                st.session_state["_pcap_talkers"] = _dl_tlk
+                st.download_button(
+                    "💾 ローカルに保存", data=_dl_bytes,
+                    file_name=_dl_file.split("/")[-1],
+                    mime="application/octet-stream",
+                )
+                st.rerun()
+            else:
+                st.error(f"ダウンロード失敗: {_dl_err}")
+    else:
+        st.info("まずデバイスを登録してください（上の「デバイス登録・管理」を開く）")
+
+    st.markdown("---")
+    st.markdown("### 📁 ファイルアップロード")
+    st.caption("Wireshark でキャプチャしたファイルを直接アップロードします。")
 
     uploaded_pcap = st.file_uploader(
         "pcap / pcapng ファイルをアップロード",

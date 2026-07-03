@@ -91,6 +91,17 @@ def _init_tables():
                 UNIQUE(device_ip, pattern)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pcap_ssh_devices (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL,
+                ip          TEXT NOT NULL,
+                username    TEXT NOT NULL,
+                password    TEXT NOT NULL,
+                ssh_port    INTEGER DEFAULT 22,
+                UNIQUE(ip)
+            )
+        """)
         conn.commit()
 
 
@@ -466,12 +477,41 @@ def _auto_analyze(ip: str, capture_name: str, pcap_bytes: bytes, local_path: str
                 VALUES (?,?,?,?,?)
             """, (datetime.now().isoformat(), ip, capture_name, local_path, result_json))
             conn.commit()
-        summary = result.get("summary", {})
         print(f"[EPC AutoAnalyze] {ip} done — "
-              f"pkts={summary.get('total_packets',0)} "
-              f"redirects={summary.get('icmp_redirects',0)}")
+              f"pkts={result.get('total_packets',0)} "
+              f"redirects={len(result.get('icmp_redirects',[]))}")
     except Exception as e:
         print(f"[EPC AutoAnalyze] {ip} error: {e}")
+
+
+def add_pcap_device(name: str, ip: str, username: str, password: str,
+                    ssh_port: int = 22):
+    _init_tables()
+    with sqlite3.connect(DB_PATH, check_same_thread=False) as conn:
+        conn.execute("""
+            INSERT INTO pcap_ssh_devices (name, ip, username, password, ssh_port)
+            VALUES (?,?,?,?,?)
+            ON CONFLICT(ip) DO UPDATE SET
+                name=excluded.name, username=excluded.username,
+                password=excluded.password, ssh_port=excluded.ssh_port
+        """, (name, ip, username, password, ssh_port))
+        conn.commit()
+
+
+def get_pcap_devices() -> list[dict]:
+    _init_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM pcap_ssh_devices ORDER BY name"
+        ).fetchall()]
+
+
+def remove_pcap_device(device_id: int):
+    _init_tables()
+    with sqlite3.connect(DB_PATH, check_same_thread=False) as conn:
+        conn.execute("DELETE FROM pcap_ssh_devices WHERE id=?", (device_id,))
+        conn.commit()
 
 
 def get_epc_analyses(ip: str = None, limit: int = 10) -> list[dict]:
