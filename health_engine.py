@@ -3,12 +3,13 @@
 SNMPメトリクスから機器ごとのヘルススコアを算出し、
 スループット・破棄・ブロードキャスト・CPU相関などを評価する。
 """
+import os
 import sqlite3
 import json
 from datetime import datetime
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "syslog.db"
+DB_PATH = Path(os.environ.get("DB_PATH", str(Path(__file__).parent / "syslog.db")))
 
 # ─────────────────────────────────────────
 # 拡張SNMP収集対象OID（スループット・Cisco輻輳系）

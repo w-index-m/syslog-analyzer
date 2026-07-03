@@ -1,0 +1,77 @@
+services:
+
+  # ─────────────────────────
+  # Streamlit UI（ブラウザ画面）
+  # ─────────────────────────
+  ui:
+    build: .
+    container_name: syslog-ui
+    command: streamlit run app.py --server.address=0.0.0.0 --server.port=8501 --server.headless=true
+    ports:
+      - "8501:8501"        # ブラウザ: http://localhost:8501
+    volumes:
+      - syslog-data:/data  # DB を永続化
+    environment:
+      - DB_PATH=/data/syslog.db
+    restart: unless-stopped
+    depends_on:
+      - api
+
+  # ─────────────────────────
+  # REST API（FastAPI）
+  # ─────────────────────────
+  api:
+    build: .
+    container_name: syslog-api
+    command: uvicorn api:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"        # API: http://localhost:8000/docs
+    volumes:
+      - syslog-data:/data
+    environment:
+      - DB_PATH=/data/syslog.db
+    restart: unless-stopped
+
+  # ─────────────────────────
+  # syslog 受信（UDP 514）
+  # ─────────────────────────
+  syslog:
+    build: .
+    container_name: syslog-receiver
+    command: python -c "
+import syslog_server, db, time
+db.init_db()
+srv = syslog_server.SyslogServer('0.0.0.0', 514)
+srv.start()
+print('syslog receiver started on UDP 514')
+while True:
+    import queue
+    try:
+        item = syslog_server.log_queue.get(timeout=1)
+        p = item['parsed']
+        import json
+        import sqlite3, os
+        from datetime import datetime
+        from pathlib import Path
+        DB_PATH = os.environ.get('DB_PATH', str(Path('/data/syslog.db')))
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute('''INSERT INTO logs
+                (received_at,source_ip,raw,vendor,severity,facility,hostname,process,message,tags)
+                VALUES (?,?,?,?,?,?,?,?,?,?)''',
+                (datetime.now().isoformat(), item['source_ip'], item['raw'],
+                 p.get('vendor',''), p.get('severity',''), p.get('facility',''),
+                 p.get('hostname',''), p.get('process',''), p.get('message',''),
+                 json.dumps(p.get('tags',[]), ensure_ascii=False)))
+            conn.commit()
+    except: pass
+"
+    ports:
+      - "514:514/udp"      # Cisco の logging host でここを指定
+    volumes:
+      - syslog-data:/data
+    environment:
+      - DB_PATH=/data/syslog.db
+    restart: unless-stopped
+
+volumes:
+  syslog-data:

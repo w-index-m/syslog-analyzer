@@ -3,6 +3,7 @@ SNMP Poller
 ネットワーク機器に定期的にSNMP GETを送信してテレメトリデータを収集する
 対象MIB: IF-MIB, ENTITY-MIB, HOST-RESOURCES-MIB, Cisco/Fujitsu固有MIB
 """
+import os
 import threading
 import time
 import sqlite3
@@ -10,7 +11,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "syslog.db"
+DB_PATH = Path(os.environ.get("DB_PATH", str(Path(__file__).parent / "syslog.db")))
 
 # ─────────────────────────────────────────
 # 収集対象OID定義

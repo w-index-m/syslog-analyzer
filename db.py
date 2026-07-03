@@ -1,10 +1,11 @@
+import os
 import sqlite3
 import json
 import re
 from datetime import datetime
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "syslog.db"
+DB_PATH = Path(os.environ.get("DB_PATH", str(Path(__file__).parent / "syslog.db")))
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
