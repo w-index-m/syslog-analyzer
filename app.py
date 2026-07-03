@@ -1775,8 +1775,37 @@ with tab_netflow:
 
         # ── DDoS 検出 ──
         st.markdown("---")
-        st.markdown("### 🚨 DDoS / 攻撃パターン検出")
+        _ddos_row1, _ddos_row2 = st.columns([4, 1])
+        _ddos_row1.markdown("### 🚨 DDoS / 攻撃パターン検出")
         _nf_alerts = _nfc2.get_ddos_alerts(_nf_hours)
+        with _ddos_row2:
+            _nf_llm_ok = (analyzer.check_claude_available() or analyzer.check_gemini_available()
+                          or analyzer.check_groq_available() or analyzer.check_ollama_available())
+            if st.button("🤖 AI分析", key="nf_ddos_ai", disabled=not _nf_llm_ok,
+                         use_container_width=True):
+                _nf_sum2 = _nfc2.get_summary(_nf_hours)
+                _nf_ai_ctx = (
+                    f"NetFlow集計期間: 過去{_nf_hours}時間\n"
+                    f"総フロー: {_nf_sum2['total_flows']:,} / 総バイト: {_nf_sum2['total_bytes']/1024/1024:.1f}MB\n\n"
+                    "検出アラート:\n" +
+                    "\n".join(f"- [{a['type']}] {a['src_ip']} : {a['detail']}" for a in _nf_alerts)
+                    if _nf_alerts else "アラートなし"
+                )
+                with st.spinner("LLM分析中..."):
+                    _nf_ai_text, _nf_ai_model = analyzer.ask_llm(
+                        "あなたはネットワークセキュリティの専門家です。"
+                        "NetFlowの異常検出結果を日本語で簡潔に解説し、対策を提案してください。",
+                        _nf_ai_ctx,
+                        st.session_state.get("llm_mode", "auto"),
+                    )
+                st.session_state["_nf_ddos_ai"] = (_nf_ai_text, _nf_ai_model)
+
+        if "nf_ddos_ai" in [k.split("_")[-1] for k in st.session_state]:
+            _nf_ai_res = st.session_state.get("_nf_ddos_ai")
+            if _nf_ai_res and _nf_ai_res[0]:
+                with st.expander(f"🤖 AI分析結果（{_nf_ai_res[1]}）", expanded=True):
+                    st.markdown(_nf_ai_res[0])
+
         if _nf_alerts:
             _alert_cols = st.columns([1, 2, 3])
             _alert_cols[0].markdown("**種別**")
@@ -2002,6 +2031,47 @@ with tab_pcap:
                 st.metric("DHCP問題", len(res.get("dhcp_issues", [])),
                           delta="⚠️ 要確認" if res.get("dhcp_issues") else None)
             st.caption(f"📅 キャプチャ範囲: {res['capture_start']} 〜 {res['capture_end']}")
+
+            # ── pcap 総合 AI 診断 ──────────────────────
+            st.markdown("---")
+            _llm_ok = (analyzer.check_claude_available() or analyzer.check_gemini_available()
+                       or analyzer.check_groq_available() or analyzer.check_ollama_available())
+            _ai_col1, _ai_col2 = st.columns([5, 1])
+            _ai_col1.markdown("### 🤖 pcap 総合 AI 診断")
+            _ai_col1.caption("TCP / DNS / DHCP / HTTP / TLS / VoIP / ICMP / ARP の全解析結果を LLM に投げて根本原因を推定します。")
+            with _ai_col2:
+                _pcap_ai_btn = st.button("🔍 AI診断実行", key="pcap_ai_diag_main",
+                                         disabled=not _llm_ok, use_container_width=True)
+            if not _llm_ok:
+                st.caption("AI診断を使うにはサイドバーの「🔑 APIキー設定」でClaude / Gemini / Groqのいずれかを設定してください。")
+
+            if _pcap_ai_btn:
+                with st.spinner("LLM がpcap解析結果を総合分析中..."):
+                    _pcap_diag = analyzer.diagnose_pcap(res, st.session_state.get("llm_mode", "auto"))
+                st.session_state["_pcap_diag"] = _pcap_diag
+
+            _pcap_diag = st.session_state.get("_pcap_diag")
+            if _pcap_diag:
+                _health = _pcap_diag.get("overall_health", "")
+                _health_color = {"正常": "🟢", "要注意": "🟡", "問題あり": "🟠", "重大": "🔴"}.get(_health, "⚪")
+                st.markdown(f"**総合評価: {_health_color} {_health}**")
+                st.markdown(f"{_pcap_diag.get('summary','')}")
+
+                _issues = _pcap_diag.get("top_issues", [])
+                if _issues:
+                    st.markdown("**検出された問題（優先順）:**")
+                    for _iss in _issues:
+                        _sev = _iss.get("severity", "")
+                        _sev_icon = {"高": "🔴", "中": "🟡", "低": "🟢"}.get(_sev, "⚪")
+                        with st.expander(f"{_sev_icon} [{_iss.get('category','')}] {_iss.get('description','')}"):
+                            st.markdown(f"**原因推定:** {_iss.get('root_cause','')}")
+                            st.markdown(f"**推奨対応:** {_iss.get('action','')}")
+
+                if _pcap_diag.get("positive_findings"):
+                    st.markdown("**✅ 問題なし:** " + " / ".join(_pcap_diag["positive_findings"]))
+                st.info(f"**🚨 最優先対応:** {_pcap_diag.get('priority_action','')}")
+                st.caption(f"診断モデル: {_pcap_diag.get('diagnosis_model','')} | "
+                           f"LLMモード: {st.session_state.get('llm_mode','auto')}")
 
             # ── ICMP redirect 詳細 ─────────────────────
             st.markdown("---")
@@ -2700,7 +2770,32 @@ end""", language="text")
         if _cached_topo is not None:
             if _cached_topo:
                 _proto_label = {"lldp": "LLDP", "cdp": "CDP", "both": "LLDP + CDP"}.get(_cached_topo_proto, "")
-                st.caption(f"取得プロトコル: **{_proto_label}** | ネイバー数: {len(_cached_topo)}")
+                _topo_cap_col, _topo_ai_col = st.columns([4, 1])
+                _topo_cap_col.caption(f"取得プロトコル: **{_proto_label}** | ネイバー数: {len(_cached_topo)}")
+                _topo_llm_ok = (analyzer.check_claude_available() or analyzer.check_gemini_available()
+                                or analyzer.check_groq_available() or analyzer.check_ollama_available())
+                if _topo_ai_col.button("🤖 AI解説", key="topo_ai", disabled=not _topo_llm_ok):
+                    _topo_ctx = "\n".join(
+                        f"{n['local_device']} {n['local_if']} ←[{n['protocol']}]→ "
+                        f"{n['neighbor_id']} {n['neighbor_if']} (管理IP:{n['neighbor_ip']})"
+                        for n in _cached_topo
+                    )
+                    with st.spinner("LLMがトポロジーを解析中..."):
+                        _topo_ai_text, _topo_ai_model = analyzer.ask_llm(
+                            "あなたはネットワーク設計の専門家です。"
+                            "提供されるLLDP/CDPネイバー情報からネットワーク構成を日本語で解説してください。"
+                            "冗長性・スパニングツリー・設計上の注意点があれば指摘してください。",
+                            _topo_ctx,
+                            st.session_state.get("llm_mode", "auto"),
+                        )
+                    st.session_state["_topo_ai"] = (_topo_ai_text, _topo_ai_model)
+
+                if st.session_state.get("_topo_ai"):
+                    _tai = st.session_state["_topo_ai"]
+                    if _tai[0]:
+                        with st.expander(f"🤖 AI解説（{_tai[1]}）", expanded=True):
+                            st.markdown(_tai[0])
+
                 _dot_str = _rc_topo.build_topology_dot(_cached_topo)
                 st.graphviz_chart(_dot_str, use_container_width=True)
                 st.markdown("---")

@@ -176,6 +176,61 @@ def analyze_with_gemini(parsed: dict, raw: str, config_context: str = "") -> tup
 def analyze_with_groq(parsed: dict, raw: str, config_context: str = "") -> tuple[str, str]:
     return _call_groq_raw(SYSTEM_PROMPT, _build_user_prompt(parsed, raw, config_context))
 
+
+def ask_llm(system: str, user: str, mode: str = "auto", max_tokens: int = 1000) -> tuple[str, str]:
+    """
+    汎用LLM呼び出し。どのタブからでも使えるシンプルなインターフェース。
+    戻り値: (テキスト, モデル名)  失敗時は ("", "")
+    """
+    def _claude():
+        if not ANTHROPIC_API_KEY:
+            return "", ""
+        try:
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": ANTHROPIC_API_KEY,
+                         "anthropic-version": "2023-06-01",
+                         "content-type": "application/json"},
+                json={"model": "claude-sonnet-4-6", "max_tokens": max_tokens,
+                      "system": system,
+                      "messages": [{"role": "user", "content": user}]},
+                timeout=45,
+            )
+            resp.raise_for_status()
+            return resp.json()["content"][0]["text"].strip(), "claude-sonnet-4-6"
+        except Exception as e:
+            print(f"[ask_llm:Claude] {e}"); return "", ""
+
+    def _ollama():
+        try:
+            resp = requests.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json={"model": OLLAMA_MODEL,
+                      "messages": [{"role": "system", "content": system},
+                                   {"role": "user",   "content": user}],
+                      "stream": False, "options": {"temperature": 0.2}},
+                timeout=120,
+            )
+            resp.raise_for_status()
+            return resp.json()["message"]["content"].strip(), f"ollama/{OLLAMA_MODEL}"
+        except Exception as e:
+            print(f"[ask_llm:Ollama] {e}"); return "", ""
+
+    def _gemini():
+        return _call_gemini_raw(system, user, max_tokens)
+
+    def _groq():
+        return _call_groq_raw(system, user, max_tokens)
+
+    providers = {"claude": _claude, "gemini": _gemini, "groq": _groq, "ollama": _ollama}
+    if mode in providers:
+        return providers[mode]()
+    for fn in (_claude, _gemini, _groq, _ollama):
+        text, model = fn()
+        if text:
+            return text, model
+    return "", ""
+
 def analyze(parsed: dict, raw: str, mode: str = "auto", config_context: str = "") -> tuple[str, str]:
     """
     mode: "auto"   = Claude → Gemini → Groq → Ollama の順に試行
@@ -803,3 +858,226 @@ def _rule_based_health_diagnosis(device_health):
         "risk_if_ignored": "問題が継続・悪化する可能性があります",
         "diagnosis_model": "ルールベース"
     }
+
+
+# ─────────────────────────────────────────
+# pcap 総合 AI 診断
+# ─────────────────────────────────────────
+
+_PCAP_SYSTEM_PROMPT = """あなたはパケットキャプチャ（pcap）を分析するネットワークエンジニアです。
+提供されるpcap解析サマリーを読み、ネットワーク上の問題を日本語で診断してください。
+
+必ずJSON形式で以下の構造で返してください:
+{
+  "overall_health": "正常|要注意|問題あり|重大",
+  "summary": "全体状況を2〜3文で要約",
+  "top_issues": [
+    {
+      "category": "問題カテゴリ（TCP/DNS/DHCP/VoIP/TLS/HTTP/ICMPなど）",
+      "severity": "高|中|低",
+      "description": "何が問題か",
+      "root_cause": "推定される原因",
+      "action": "推奨する対応"
+    }
+  ],
+  "positive_findings": ["問題のなかった点・正常な点"],
+  "priority_action": "最優先で行うべき対応",
+  "diagnosis_model": ""
+}
+
+JSONのみ返してください。```は不要です。"""
+
+
+def _build_pcap_prompt(pcap_result: dict) -> str:
+    r = pcap_result
+    icmp_types   = ", ".join(i["name"] + "(" + str(i["count"]) + "件)" for i in r.get("icmp_summary", []))
+    dhcp_types   = ", ".join(str(k) + ":" + str(v) for k, v in r.get("dhcp_summary", {}).items())
+    http_status  = ", ".join(str(i["status_code"]) + ":" + str(i["count"]) + "件" for i in r.get("http_summary", []))
+    dns_s        = r.get("dns_summary", {})
+    tls_s        = r.get("tls_summary", {})
+
+    lines = [
+        f"キャプチャ期間: {r.get('capture_start','')} 〜 {r.get('capture_end','')}",
+        f"総パケット数: {r.get('total_packets', 0):,}",
+        "",
+        "【ICMP】",
+        f"  redirect検出: {len(r.get('icmp_redirects', []))} 件",
+        f"  タイプ別: {icmp_types}",
+        "",
+        "【TCP】",
+        f"  問題フロー: {len(r.get('tcp_issues', []))} 件",
+        f"  再送多発: {len(r.get('tcp_retransmissions', []))} フロー",
+        f"  SYN未応答（接続失敗）: {len(r.get('tcp_syn_no_synack', []))} フロー",
+        f"  ゼロウィンドウ: {len(r.get('tcp_zero_window', []))} フロー",
+    ]
+    if r.get("tcp_issues"):
+        for i in r["tcp_issues"][:5]:
+            lines.append("    - " + i.get("type","") + " " + i.get("src","") + "→" + i.get("dst","") + " : " + i.get("description","")[:80])
+
+    lines += [
+        "",
+        "【DNS】",
+        f"  クエリ: {dns_s.get('queries',0)} / レスポンス: {dns_s.get('responses',0)}",
+        f"  NXDOMAIN: {dns_s.get('nxdomain',0)} / SERVFAIL: {dns_s.get('servfail',0)}",
+        f"  応答遅延: {dns_s.get('slow',0)} 件",
+    ]
+    if r.get("dns_issues"):
+        for i in r["dns_issues"][:5]:
+            lines.append("    - [" + i.get("type","") + "] " + i.get("name","") + " " + i.get("detail","")[:60])
+
+    lines += [
+        "",
+        "【DHCP】",
+        f"  メッセージタイプ別: {dhcp_types}",
+        f"  問題: {len(r.get('dhcp_issues', []))} 件",
+    ]
+    for i in r.get("dhcp_issues", [])[:3]:
+        lines.append("    - [" + i.get("event","") + "] " + i.get("issue","")[:80])
+
+    lines += [
+        "",
+        "【HTTP】",
+        f"  ステータス別: {http_status}",
+        f"  4xx/5xxエラー: {len(r.get('http_errors', []))} 件",
+    ]
+    for e in r.get("http_errors", [])[:3]:
+        lines.append(f"    - {e.get('method','')} {e.get('host','')} → HTTP {e.get('status_code','')}")
+
+    lines += [
+        "",
+        "【TLS/HTTPS】",
+        f"  接続数: {tls_s.get('sessions',0)} / ユニークサイト: {tls_s.get('unique_sites',0)}",
+        f"  Fatal Alert: {tls_s.get('fatal_alerts',0)} 件",
+        f"  非推奨TLS（1.0/1.1）: {tls_s.get('deprecated_tls',0)} 件",
+    ]
+    for a in r.get("tls_alerts", [])[:3]:
+        lines.append(f"    - [{a.get('alert_type','')}] {a.get('src','')}→{a.get('dst','')} : {a.get('description','')[:60]}")
+
+    lines += [
+        "",
+        "【IPフラグメント】",
+        f"  フラグメント発生フロー: {len(r.get('ip_fragments', []))} 件",
+    ]
+    for f in r.get("ip_fragments", [])[:3]:
+        lines.append(f"    - {f.get('src','')}→{f.get('dst','')} {f.get('fragment_count',0)}パケット : {f.get('description','')[:60]}")
+
+    lines += [
+        "",
+        "【ARP】",
+        f"  異常（スプーフィング疑い）: {len(r.get('arp_anomalies', []))} 件",
+    ]
+
+    # VoIP
+    vc = r.get("voip_stream_count", 0)
+    if vc > 0:
+        lines += [
+            "",
+            "【VoIP/RTP】",
+            f"  ストリーム数: {vc} / 平均MOS: {r.get('voip_avg_mos', 0)} / 品質不良: {r.get('voip_poor_streams', 0)} ストリーム",
+        ]
+        for s in r.get("voip_streams", [])[:3]:
+            lines.append(f"    - {s.get('src_ip','')}→{s.get('dst_ip','')} MOS={s.get('mos','')} "
+                         f"ジッター={s.get('jitter_ms','')}ms ロス={s.get('loss_pct','')}%")
+
+    return "\n".join(lines)
+
+
+def diagnose_pcap(pcap_result: dict, mode: str = "auto") -> dict:
+    """
+    pcap解析結果を LLM に投げて総合診断を返す。
+    戻り値の構造:
+        overall_health, summary, top_issues[], positive_findings[],
+        priority_action, diagnosis_model
+    """
+    prompt = _build_pcap_prompt(pcap_result)
+
+    def _parse(text: str, model: str) -> dict | None:
+        try:
+            r = json.loads(text)
+            r["diagnosis_model"] = model
+            return r
+        except Exception:
+            return None
+
+    def _call_claude():
+        if not ANTHROPIC_API_KEY:
+            return None
+        try:
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": ANTHROPIC_API_KEY,
+                         "anthropic-version": "2023-06-01",
+                         "content-type": "application/json"},
+                json={"model": "claude-sonnet-4-6", "max_tokens": 1500,
+                      "system": _PCAP_SYSTEM_PROMPT,
+                      "messages": [{"role": "user", "content": prompt}]},
+                timeout=45,
+            )
+            resp.raise_for_status()
+            text = resp.json()["content"][0]["text"].strip().replace("```json","").replace("```","").strip()
+            return _parse(text, "claude-sonnet-4-6")
+        except Exception as e:
+            print(f"[pcap diag:Claude] {e}")
+            return None
+
+    def _call_ollama():
+        try:
+            resp = requests.post(
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json={"model": OLLAMA_MODEL,
+                      "messages": [{"role": "system", "content": _PCAP_SYSTEM_PROMPT},
+                                   {"role": "user",   "content": prompt}],
+                      "stream": False, "options": {"temperature": 0.1}},
+                timeout=120,
+            )
+            resp.raise_for_status()
+            text = resp.json()["message"]["content"].strip().replace("```json","").replace("```","").strip()
+            return _parse(text, f"ollama/{OLLAMA_MODEL}")
+        except Exception as e:
+            print(f"[pcap diag:Ollama] {e}")
+            return None
+
+    def _call_gemini():
+        text, model = _call_gemini_raw(_PCAP_SYSTEM_PROMPT, prompt, max_tokens=1500)
+        return _parse(text, model) if text else None
+
+    def _call_groq():
+        text, model = _call_groq_raw(_PCAP_SYSTEM_PROMPT, prompt, max_tokens=1500)
+        return _parse(text, model) if text else None
+
+    providers = {"claude": _call_claude, "gemini": _call_gemini,
+                 "groq": _call_groq, "ollama": _call_ollama}
+
+    if mode in providers:
+        result = providers[mode]()
+    else:
+        result = None
+        for fn in (_call_claude, _call_gemini, _call_groq, _call_ollama):
+            result = fn()
+            if result:
+                break
+
+    if not result:
+        # ルールベースフォールバック
+        issues = []
+        if len(pcap_result.get("tcp_issues", [])) >= 3:
+            issues.append("TCP問題多発")
+        if pcap_result.get("dns_summary", {}).get("nxdomain", 0) > 5:
+            issues.append("DNS NXDOMAIN多発")
+        if pcap_result.get("dhcp_issues"):
+            issues.append("DHCP異常")
+        if pcap_result.get("tls_summary", {}).get("fatal_alerts", 0) > 0:
+            issues.append("TLS Fatal Alert")
+        if pcap_result.get("voip_poor_streams", 0) > 0:
+            issues.append(f"VoIP品質不良 MOS={pcap_result.get('voip_avg_mos', 0)}")
+        health = "重大" if len(issues) >= 3 else "問題あり" if issues else "正常"
+        result = {
+            "overall_health": health,
+            "summary": f"ルールベース診断。検出問題: {', '.join(issues) or 'なし'}",
+            "top_issues": [{"category": i, "severity": "中", "description": i,
+                            "root_cause": "詳細はLLM診断で確認", "action": "各セクション参照"} for i in issues],
+            "positive_findings": [],
+            "priority_action": issues[0] if issues else "問題なし",
+            "diagnosis_model": "ルールベース",
+        }
+    return result
