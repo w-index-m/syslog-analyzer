@@ -80,6 +80,17 @@ def _init_tables():
                 analysis_json    TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS syslog_epc_triggers (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_ip        TEXT NOT NULL,
+                pattern          TEXT NOT NULL,
+                cooldown_sec     INTEGER DEFAULT 300,
+                enabled          INTEGER DEFAULT 1,
+                last_triggered   TEXT DEFAULT '',
+                UNIQUE(device_ip, pattern)
+            )
+        """)
         conn.commit()
 
 
