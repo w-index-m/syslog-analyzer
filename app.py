@@ -2649,11 +2649,23 @@ with tab_topo:
     _topo_c1, _topo_c2 = st.columns([3, 1])
 
     with _topo_c2:
-        st.markdown("**操作**")
+        st.markdown("**プロトコル選択**")
+        _topo_proto = st.radio(
+            "ネイバー探索プロトコル",
+            options=["lldp", "cdp", "both"],
+            format_func=lambda x: {"lldp": "🔵 LLDP（標準・マルチベンダー）",
+                                   "cdp":  "🟠 CDP（Cisco独自）",
+                                   "both": "🟣 両方（重複除去）"}[x],
+            index=2,
+            key="topo_proto",
+        )
+        st.markdown("---")
         if st.button("🔄 トポロジー取得", key="topo_refresh", use_container_width=True):
-            with st.spinner("RESTCONF で LLDP/CDP ネイバーを取得中..."):
-                _topo_neighbors = _rc_topo.get_all_topology()
+            _proto_label = {"lldp": "LLDP", "cdp": "CDP", "both": "LLDP+CDP"}[_topo_proto]
+            with st.spinner(f"RESTCONF で {_proto_label} ネイバーを取得中..."):
+                _topo_neighbors = _rc_topo.get_all_topology(_topo_proto)
             st.session_state["_topo_neighbors"] = _topo_neighbors
+            st.session_state["_topo_proto_used"] = _topo_proto
             st.rerun()
 
         _devs_for_topo = _rc_topo.get_devices()
@@ -2665,18 +2677,30 @@ with tab_topo:
                 st.code(_td["ip"])
 
         st.markdown("---")
-        st.markdown("**ルーター側の事前設定**")
-        st.code("""conf t
+        st.markdown("**ルーター/SW側の設定**")
+        if _topo_proto in ("lldp", "both"):
+            st.markdown("🔵 **LLDP**")
+            st.code("""conf t
  lldp run
  interface Gi0/0
   lldp transmit
   lldp receive
 end""", language="text")
+        if _topo_proto in ("cdp", "both"):
+            st.markdown("🟠 **CDP**")
+            st.code("""conf t
+ cdp run
+ interface Gi0/0
+  cdp enable
+end""", language="text")
 
     with _topo_c1:
-        _cached_topo = st.session_state.get("_topo_neighbors", None)
+        _cached_topo      = st.session_state.get("_topo_neighbors", None)
+        _cached_topo_proto = st.session_state.get("_topo_proto_used", "")
         if _cached_topo is not None:
             if _cached_topo:
+                _proto_label = {"lldp": "LLDP", "cdp": "CDP", "both": "LLDP + CDP"}.get(_cached_topo_proto, "")
+                st.caption(f"取得プロトコル: **{_proto_label}** | ネイバー数: {len(_cached_topo)}")
                 _dot_str = _rc_topo.build_topology_dot(_cached_topo)
                 st.graphviz_chart(_dot_str, use_container_width=True)
                 st.markdown("---")
@@ -2689,22 +2713,31 @@ end""", language="text")
                     "neighbor_ip": "ネイバー管理IP", "protocol": "プロトコル",
                 })
                 st.dataframe(_topo_show, use_container_width=True, hide_index=True)
-                st.caption(f"合計 {len(_cached_topo)} ネイバー接続")
+
+                # プロトコル別件数
+                if "protocol" in df_topo.columns:
+                    _proto_counts = df_topo["protocol"].value_counts()
+                    _pc_cols = st.columns(len(_proto_counts))
+                    for _i, (proto, cnt) in enumerate(_proto_counts.items()):
+                        _icon = "🔵" if proto == "LLDP" else "🟠"
+                        _pc_cols[_i].metric(f"{_icon} {proto}", cnt)
             else:
-                st.warning("ネイバー情報が取得できませんでした。\n- LLDP/CDP が有効か確認してください\n- RESTCONF 認証情報を確認してください")
+                _hints = {
+                    "lldp": "- `lldp run` がグローバルに設定されているか確認\n- インターフェースで `lldp transmit / receive` が有効か確認",
+                    "cdp":  "- `cdp run` がグローバルに設定されているか確認\n- インターフェースで `cdp enable` が有効か確認",
+                    "both": "- LLDP: `lldp run` / インターフェースで `lldp transmit / receive`\n- CDP: `cdp run` / インターフェースで `cdp enable`",
+                }
+                st.warning(f"ネイバー情報が取得できませんでした。\n\n"
+                           f"{_hints.get(_cached_topo_proto, '')}\n\n"
+                           "- RESTCONF 認証情報を確認してください")
         else:
-            st.info("「🔄 トポロジー取得」ボタンを押してください。\n\n"
-                    "LLDP が有効であれば接続されている機器の接続図が自動生成されます。")
+            st.info("左のパネルでプロトコルを選択して「🔄 トポロジー取得」を押してください。")
             st.markdown("""
-#### 必要な設定（Cisco IOS-XE）
-
-```
-lldp run
-
-interface GigabitEthernet0/1
- lldp transmit
- lldp receive
-```
+| プロトコル | 特徴 | 対応機器 |
+|-----------|------|----------|
+| 🔵 **LLDP** | IEEE 802.1AB 標準、マルチベンダー対応 | Cisco / Juniper / Arista / HP 等 |
+| 🟠 **CDP** | Cisco 独自、Cisco機器は確実に対応 | Cisco のみ |
+| 🟣 **両方** | どちらか一方でも取得できれば表示（重複除去） | 混在環境に最適 |
 
 RESTCONF デバイスは「🗂️ 機器コンフィグ」タブで登録できます。
 """)

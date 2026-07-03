@@ -679,16 +679,30 @@ def get_cdp_neighbors(dev: dict) -> list[dict]:
         return []
 
 
-def get_all_topology() -> list[dict]:
-    """登録済み全デバイスの LLDP/CDP ネイバー情報を統合して返す。"""
+def get_all_topology(protocol: str = "both") -> list[dict]:
+    """登録済み全デバイスの LLDP/CDP ネイバー情報を統合して返す。
+
+    protocol: "lldp" | "cdp" | "both"
+    """
     _init_tables()
     devices = get_devices()
     all_neighbors: list[dict] = []
     for dev in devices:
-        nb = get_lldp_neighbors(dev)
-        if not nb:
-            nb = get_cdp_neighbors(dev)
-        all_neighbors.extend(nb)
+        if protocol in ("lldp", "both"):
+            all_neighbors.extend(get_lldp_neighbors(dev))
+        if protocol in ("cdp", "both"):
+            all_neighbors.extend(get_cdp_neighbors(dev))
+    # "both" の場合、同一リンクが LLDP/CDP 両方で取れることがある → 重複除去
+    if protocol == "both":
+        seen: set[tuple] = set()
+        deduped: list[dict] = []
+        for nb in all_neighbors:
+            key = tuple(sorted([nb["local_device"] + nb["local_if"],
+                                nb["neighbor_id"]  + nb["neighbor_if"]]))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(nb)
+        return deduped
     return all_neighbors
 
 
