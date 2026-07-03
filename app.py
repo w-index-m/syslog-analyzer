@@ -415,10 +415,10 @@ _process_queue()
 # ─────────────────────────────────────────
 # メインUI
 # ─────────────────────────────────────────
-tab_health, tab1, tab2, tab3, tab4, tab5, tab_netflow, tab_pcap = st.tabs([
+tab_health, tab1, tab2, tab3, tab4, tab5, tab_netflow, tab_pcap, tab_topo, tab_probe = st.tabs([
     "📊 品質ルーブリック", "📋 ログビューア", "📊 テレメトリダッシュボード",
     "📡 SNMPモニター", "🗂️ 機器コンフィグ", "📖 セットアップガイド",
-    "🌊 NetFlow", "📦 パケット解析"
+    "🌊 NetFlow", "📦 パケット解析", "🗺️ トポロジー", "⏱️ 応答時間"
 ])
 
 # ═══════════════════════════════════════════
@@ -1773,6 +1773,59 @@ with tab_netflow:
         else:
             st.info("まだフローデータがありません。ルーターの flow-export 設定を確認してください。")
 
+        # ── DDoS 検出 ──
+        st.markdown("---")
+        st.markdown("### 🚨 DDoS / 攻撃パターン検出")
+        _nf_alerts = _nfc2.get_ddos_alerts(_nf_hours)
+        if _nf_alerts:
+            _alert_cols = st.columns([1, 2, 3])
+            _alert_cols[0].markdown("**種別**")
+            _alert_cols[1].markdown("**送信元IP**")
+            _alert_cols[2].markdown("**詳細**")
+            for _al in _nf_alerts:
+                _sev_icon = "🔴" if _al["severity"] == "high" else "🟡"
+                _type_map = {
+                    "volumetric": "ボリューム攻撃",
+                    "port_scan":  "ポートスキャン",
+                    "syn_flood":  "SYNフラッド",
+                    "icmp_flood": "ICMPフラッド",
+                }
+                _c1, _c2, _c3 = st.columns([1, 2, 3])
+                _c1.markdown(f"{_sev_icon} **{_type_map.get(_al['type'], _al['type'])}**")
+                _c2.code(_al["src_ip"])
+                _c3.markdown(_al["detail"])
+        else:
+            st.success("✅ 現在の集計期間で異常なトラフィックパターンは検出されていません。")
+
+        # ── 帯域トレンド（容量計画） ──
+        st.markdown("---")
+        st.markdown("### 📉 帯域トレンド（容量計画）")
+        _nf_trend_days = st.select_slider(
+            "表示期間", options=[1, 3, 7, 14, 30], value=7,
+            format_func=lambda x: f"過去 {x} 日間", key="nf_trend_days"
+        )
+        _cap_threshold = st.number_input(
+            "容量閾値 (MB/時間)", min_value=0, value=100, step=10, key="nf_cap_thresh"
+        )
+        _bw_hist = _nfc2.get_bandwidth_history(_nf_trend_days)
+        if _bw_hist:
+            import pandas as pd
+            df_bw = pd.DataFrame(_bw_hist)
+            df_bw["MB"] = (df_bw["total_bytes"] / 1024 / 1024).round(2)
+            df_bw_idx = df_bw.set_index("hour")[["MB"]]
+            if _cap_threshold > 0:
+                df_bw_idx["閾値"] = float(_cap_threshold)
+            st.line_chart(df_bw_idx, height=220)
+            _peak_mb  = df_bw["MB"].max()
+            _avg_mb   = df_bw["MB"].mean()
+            _over_cnt = int((df_bw["MB"] > _cap_threshold).sum()) if _cap_threshold > 0 else 0
+            _bw_c1, _bw_c2, _bw_c3 = st.columns(3)
+            _bw_c1.metric("ピーク (MB/h)",   f"{_peak_mb:.1f}")
+            _bw_c2.metric("平均 (MB/h)",     f"{_avg_mb:.1f}")
+            _bw_c3.metric("閾値超過 (時間数)", f"{_over_cnt}")
+        else:
+            st.info("帯域トレンドデータがありません（NetFlowデータが蓄積されると表示されます）。")
+
 with tab_pcap:
     import pcap_analyzer
     import restconf_client as _rc
@@ -2401,6 +2454,36 @@ with tab_pcap:
                 else:
                     st.success("✅ DHCP 問題は検出されませんでした")
 
+            # ── VoIP/RTP 品質（MOS）─────────────────────
+            _voip_streams = res.get("voip_streams", [])
+            if _voip_streams or res.get("voip_stream_count", 0) > 0:
+                st.markdown("---")
+                st.markdown("### 📞 VoIP / RTP 品質（MOS スコア）")
+                st.caption("RTP ストリームを検出してジッター・パケットロス・MOS スコアを算出します（G.107 E-model 近似）。")
+                _vc1, _vc2, _vc3, _vc4 = st.columns(4)
+                _vc1.metric("RTPストリーム数",  res.get("voip_stream_count", 0))
+                _vc2.metric("平均MOSスコア",    res.get("voip_avg_mos", 0))
+                _vc3.metric("品質不良ストリーム", res.get("voip_poor_streams", 0),
+                            delta="⚠️ MOS<3.6" if res.get("voip_poor_streams", 0) > 0 else None)
+                _avg_mos = res.get("voip_avg_mos", 0)
+                _vc4.metric("品質判定",
+                    "最高" if _avg_mos >= 4.3 else
+                    "良好" if _avg_mos >= 4.0 else
+                    "普通" if _avg_mos >= 3.6 else
+                    "やや悪い" if _avg_mos >= 3.1 else "悪い")
+                if _voip_streams:
+                    df_voip = pd.DataFrame(_voip_streams)
+                    _voip_show_cols = ["src_ip", "dst_ip", "ssrc", "codec",
+                                       "packets", "duration_s", "jitter_ms", "loss_pct", "mos", "quality"]
+                    df_voip = df_voip[[c for c in _voip_show_cols if c in df_voip.columns]].rename(columns={
+                        "src_ip": "送信元IP", "dst_ip": "宛先IP", "ssrc": "SSRC",
+                        "codec": "コーデック", "packets": "パケット数",
+                        "duration_s": "継続(秒)", "jitter_ms": "ジッター(ms)",
+                        "loss_pct": "パケットロス%", "mos": "MOS", "quality": "品質",
+                    })
+                    st.dataframe(df_voip, use_container_width=True, hide_index=True)
+                    st.info("💡 MOS 4.0以上=良好 / 3.6以上=普通 / 3.1以上=やや悪い / 3.1未満=悪い（電話品質不可）")
+
             # ── 会話フロー一覧 ──────────────────────────
             st.markdown("---")
             st.markdown("### 💬 会話フロー一覧")
@@ -2551,4 +2634,243 @@ icmp.type == 5 or udp.port == 520
 | 📡 トップトーカー | 帯域を最も消費しているIPアドレスのランキング |
 | 🔍 フィルター解析 | IP・ポート・プロトコル・キーワードでパケット絞り込み |
 | 🤖 AI統合診断 | pcap + syslog + SNMP を統合してAIが根本原因推定 |
+| 📞 VoIP/RTP品質 | MOSスコア・ジッター・パケットロス（RTPストリーム自動検出） |
         """)
+
+# ═══════════════════════════════════════════
+# TAB: ネットワークトポロジー
+# ═══════════════════════════════════════════
+with tab_topo:
+    import restconf_client as _rc_topo
+
+    st.markdown("## 🗺️ ネットワークトポロジー")
+    st.caption("RESTCONF で取得した LLDP/CDP ネイバー情報をもとにスイッチ/ルーターの接続図を自動生成します。")
+
+    _topo_c1, _topo_c2 = st.columns([3, 1])
+
+    with _topo_c2:
+        st.markdown("**操作**")
+        if st.button("🔄 トポロジー取得", key="topo_refresh", use_container_width=True):
+            with st.spinner("RESTCONF で LLDP/CDP ネイバーを取得中..."):
+                _topo_neighbors = _rc_topo.get_all_topology()
+            st.session_state["_topo_neighbors"] = _topo_neighbors
+            st.rerun()
+
+        _devs_for_topo = _rc_topo.get_devices()
+        if not _devs_for_topo:
+            st.warning("RESTCONFデバイスが未登録です。\n「機器コンフィグ」タブで登録してください。")
+        else:
+            st.success(f"{len(_devs_for_topo)} 台登録済み")
+            for _td in _devs_for_topo:
+                st.code(_td["ip"])
+
+        st.markdown("---")
+        st.markdown("**ルーター側の事前設定**")
+        st.code("""conf t
+ lldp run
+ interface Gi0/0
+  lldp transmit
+  lldp receive
+end""", language="text")
+
+    with _topo_c1:
+        _cached_topo = st.session_state.get("_topo_neighbors", None)
+        if _cached_topo is not None:
+            if _cached_topo:
+                _dot_str = _rc_topo.build_topology_dot(_cached_topo)
+                st.graphviz_chart(_dot_str, use_container_width=True)
+                st.markdown("---")
+                st.markdown("**ネイバー一覧**")
+                df_topo = pd.DataFrame(_cached_topo)
+                _topo_show = df_topo[["local_device", "local_if", "neighbor_id", "neighbor_if",
+                                      "neighbor_ip", "protocol"]].rename(columns={
+                    "local_device": "自デバイスIP", "local_if": "ローカルIF",
+                    "neighbor_id": "ネイバー名", "neighbor_if": "ネイバーIF",
+                    "neighbor_ip": "ネイバー管理IP", "protocol": "プロトコル",
+                })
+                st.dataframe(_topo_show, use_container_width=True, hide_index=True)
+                st.caption(f"合計 {len(_cached_topo)} ネイバー接続")
+            else:
+                st.warning("ネイバー情報が取得できませんでした。\n- LLDP/CDP が有効か確認してください\n- RESTCONF 認証情報を確認してください")
+        else:
+            st.info("「🔄 トポロジー取得」ボタンを押してください。\n\n"
+                    "LLDP が有効であれば接続されている機器の接続図が自動生成されます。")
+            st.markdown("""
+#### 必要な設定（Cisco IOS-XE）
+
+```
+lldp run
+
+interface GigabitEthernet0/1
+ lldp transmit
+ lldp receive
+```
+
+RESTCONF デバイスは「🗂️ 機器コンフィグ」タブで登録できます。
+""")
+
+# ═══════════════════════════════════════════
+# TAB: アプリケーション応答時間 / IP SLA
+# ═══════════════════════════════════════════
+with tab_probe:
+    import app_probe as _probe
+
+    st.markdown("## ⏱️ アプリケーション応答時間")
+    st.caption("HTTP/HTTPS エンドポイントや ping の応答時間を定期計測してトレンドを可視化します。IP SLA 結果もルーターから RESTCONF で取得できます。")
+
+    _probe_tab1, _probe_tab2 = st.tabs(["📡 HTTP/Ping プローブ", "📊 IP SLA（ルーター）"])
+
+    # ── HTTP/Ping プローブ ──
+    with _probe_tab1:
+        _pb_c1, _pb_c2 = st.columns([2, 1])
+
+        with _pb_c2:
+            st.markdown("**ターゲット登録**")
+            with st.form("probe_add_form"):
+                _pb_name  = st.text_input("名前", placeholder="Google DNS")
+                _pb_url   = st.text_input("URL または ping://ホスト",
+                                          placeholder="https://8.8.8.8 または ping://8.8.8.8")
+                _pb_type  = st.selectbox("プローブ種別", ["http", "ping"])
+                _pb_add   = st.form_submit_button("➕ 追加")
+            if _pb_add and _pb_name and _pb_url:
+                _probe.add_target(_pb_name, _pb_url, _pb_type)
+                st.success(f"追加しました: {_pb_name}")
+                st.rerun()
+
+            st.markdown("**登録済みターゲット**")
+            for _pt in _probe.get_targets():
+                _pc1, _pc2 = st.columns([3, 1])
+                _pc1.markdown(f"**{_pt['name']}**  \n`{_pt['url']}`")
+                if _pc2.button("🗑️", key=f"del_probe_{_pt['id']}"):
+                    _probe.remove_target(_pt["id"])
+                    st.rerun()
+
+            st.markdown("---")
+            if "probe_bg_started" not in st.session_state:
+                st.session_state.probe_bg_started = False
+
+            _probe_interval = st.number_input("自動計測間隔（秒）", min_value=30,
+                                              value=60, step=30, key="probe_interval")
+            _pb_col1, _pb_col2 = st.columns(2)
+            if _pb_col1.button("▶ 自動計測開始", use_container_width=True,
+                               disabled=st.session_state.probe_bg_started):
+                _probe.start_background_probe(_probe_interval)
+                st.session_state.probe_bg_started = True
+                st.rerun()
+            if _pb_col2.button("⏹ 停止", use_container_width=True,
+                               disabled=not st.session_state.probe_bg_started):
+                _probe.stop_background_probe()
+                st.session_state.probe_bg_started = False
+                st.rerun()
+
+            if st.button("🔄 今すぐ計測", use_container_width=True):
+                with st.spinner("計測中..."):
+                    _now_results = _probe.run_all_probes()
+                st.session_state["_probe_now"] = _now_results
+                st.rerun()
+
+        with _pb_c1:
+            _probe_hours = st.select_slider(
+                "集計期間", options=[1, 3, 6, 12, 24], value=6,
+                format_func=lambda x: f"過去 {x} 時間", key="probe_hours"
+            )
+            _summary = _probe.get_probe_summary(_probe_hours)
+
+            if _summary:
+                st.markdown("### 📊 サマリー")
+                for _ps in _summary:
+                    _avail = _ps.get("availability_pct", 0)
+                    _last  = _ps.get("last_ok", None)
+                    _rtt   = _ps.get("last_rtt") or 0
+                    _col_icon = "🟢" if _last else "🔴"
+                    _st_c1, _st_c2, _st_c3, _st_c4 = st.columns([2, 1, 1, 1])
+                    _st_c1.markdown(f"{_col_icon} **{_ps['name']}**  \n`{_ps['url']}`")
+                    _st_c2.metric("可用性", f"{_avail:.0f}%")
+                    _st_c3.metric("平均RTT", f"{_ps.get('avg_rtt') or 0:.0f} ms")
+                    _st_c4.metric("直近RTT", f"{_rtt:.0f} ms")
+
+                # 個別ターゲットのトレンドグラフ
+                st.markdown("---")
+                st.markdown("### 📈 応答時間トレンド")
+                _targets_list = _probe.get_targets()
+                if _targets_list:
+                    _sel_probe = st.selectbox(
+                        "ターゲット選択",
+                        _targets_list,
+                        format_func=lambda t: t["name"],
+                        key="probe_target_sel"
+                    )
+                    if _sel_probe:
+                        _hist = _probe.get_probe_history(_sel_probe["id"], _probe_hours)
+                        if _hist:
+                            df_hist = pd.DataFrame(_hist)
+                            df_hist["RTT(ms)"] = df_hist["rtt_ms"]
+                            st.line_chart(df_hist.set_index("measured_at")["RTT(ms)"], height=200)
+                            _ok_rate = df_hist["success"].mean() * 100
+                            _avg_rtt = df_hist[df_hist["success"] == 1]["rtt_ms"].mean()
+                            _hc1, _hc2, _hc3 = st.columns(3)
+                            _hc1.metric("成功率", f"{_ok_rate:.1f}%")
+                            _hc2.metric("平均RTT", f"{_avg_rtt:.1f} ms" if _avg_rtt == _avg_rtt else "N/A")
+                            _hc3.metric("計測回数", len(_hist))
+                        else:
+                            st.info("このターゲットの履歴がありません。計測を実行してください。")
+            else:
+                st.info("ターゲットを登録して計測を開始してください。\n\n"
+                        "例:\n- `https://8.8.8.8` → Google DNS（HTTP応答確認）\n"
+                        "- `ping://192.168.1.1` → デフォルトゲートウェイへの ping")
+
+            if "_probe_now" in st.session_state:
+                st.markdown("---")
+                st.markdown("### 🕐 最新計測結果")
+                for _nr in st.session_state["_probe_now"]:
+                    _icon = "✅" if _nr["success"] else "❌"
+                    st.markdown(f"{_icon} **{_nr['name']}** — RTT: `{_nr['rtt_ms']} ms` "
+                                f"| ステータス: `{_nr.get('status_code', '-')}` "
+                                f"| エラー: {_nr.get('error_msg', '') or 'なし'}")
+
+    # ── IP SLA ──
+    with _probe_tab2:
+        st.markdown("### 📡 IP SLA 統計（Cisco IOS-XE RESTCONF）")
+        st.caption("ルーターで設定された IP SLA プローブの RTT・ジッター・パケットロスを取得します。")
+        st.code("""# ルーター側設定例（ICMP-echo SLA）
+ip sla 1
+ icmp-echo 8.8.8.8 source-ip 192.168.1.1
+ frequency 60
+ip sla schedule 1 life forever start-time now
+
+# UDP-jitter（VoIP品質評価）
+ip sla 2
+ udp-jitter 10.0.0.1 5000 codec g711alaw
+ frequency 60
+ip sla schedule 2 life forever start-time now""", language="text")
+
+        if st.button("🔄 IP SLA データ取得", key="ipsla_refresh"):
+            with st.spinner("RESTCONF で IP SLA を取得中..."):
+                _ipsla_data = _rc_topo.get_all_ip_sla()
+            st.session_state["_ipsla_data"] = _ipsla_data
+            st.rerun()
+
+        _ipsla_cached = st.session_state.get("_ipsla_data", None)
+        if _ipsla_cached is not None:
+            if _ipsla_cached:
+                df_sla = pd.DataFrame(_ipsla_cached)
+                _sla_show_cols = ["device_ip", "sla_id", "type", "destination",
+                                  "rtt_avg_ms", "rtt_min_ms", "rtt_max_ms",
+                                  "success_count", "failure_count", "return_code"]
+                df_sla = df_sla[[c for c in _sla_show_cols if c in df_sla.columns]].rename(columns={
+                    "device_ip": "デバイスIP", "sla_id": "SLA ID", "type": "種別",
+                    "destination": "宛先", "rtt_avg_ms": "RTT平均(ms)",
+                    "rtt_min_ms": "RTT最小(ms)", "rtt_max_ms": "RTT最大(ms)",
+                    "success_count": "成功", "failure_count": "失敗", "return_code": "結果",
+                })
+                st.dataframe(df_sla, use_container_width=True, hide_index=True)
+
+                # RTT グラフ
+                if "RTT平均(ms)" in df_sla.columns and not df_sla.empty:
+                    df_sla_chart = df_sla.set_index("SLA ID")[["RTT平均(ms)", "RTT最大(ms)"]].dropna()
+                    if not df_sla_chart.empty:
+                        st.bar_chart(df_sla_chart)
+            else:
+                st.warning("IP SLA データが取得できませんでした。\n"
+                           "- ip sla が設定・スケジュール済みか確認してください\n"
+                           "- RESTCONF デバイスが登録済みか確認してください")

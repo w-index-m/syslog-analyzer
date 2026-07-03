@@ -298,3 +298,109 @@ def get_recent_flows(hours: int = 1, limit: int = 500) -> list[dict]:
             d["app"]        = WELL_KNOWN_PORTS.get(d["dst_port"], "")
             result.append(d)
         return result
+
+
+# ─────────────────────────────────────────
+# DDoS 検出
+# ─────────────────────────────────────────
+
+def get_ddos_alerts(hours: int = 1) -> list[dict]:
+    """NetFlowデータから DDoS/攻撃パターンを検出する。"""
+    _init_tables()
+    alerts = []
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+
+        # 1. ボリューム攻撃: 単一送信元から 100MB 超
+        for r in conn.execute("""
+            SELECT src_ip, SUM(bytes) AS tb, SUM(packets) AS tp,
+                   COUNT(*) AS flows, COUNT(DISTINCT dst_ip) AS uniq_dst
+            FROM netflow_flows
+            WHERE received_at >= datetime('now', ? || ' hours')
+            GROUP BY src_ip HAVING tb > 100000000
+            ORDER BY tb DESC LIMIT 20
+        """, (f"-{hours}",)).fetchall():
+            alerts.append({
+                "type": "volumetric",
+                "severity": "high" if r["tb"] > 500_000_000 else "medium",
+                "src_ip": r["src_ip"],
+                "detail": f"大量転送: {r['tb']/1024/1024:.1f} MB / {r['flows']} フロー / 宛先 {r['uniq_dst']} IP",
+                "bytes": r["tb"],
+            })
+
+        # 2. ポートスキャン: 単一送信元から 50 以上の異なる宛先ポート
+        for r in conn.execute("""
+            SELECT src_ip, COUNT(DISTINCT dst_port) AS dp,
+                   COUNT(DISTINCT dst_ip) AS di, COUNT(*) AS flows
+            FROM netflow_flows
+            WHERE received_at >= datetime('now', ? || ' hours') AND protocol IN (6,17)
+            GROUP BY src_ip HAVING dp > 50
+            ORDER BY dp DESC LIMIT 20
+        """, (f"-{hours}",)).fetchall():
+            alerts.append({
+                "type": "port_scan",
+                "severity": "high" if r["dp"] > 200 else "medium",
+                "src_ip": r["src_ip"],
+                "detail": f"ポートスキャン: {r['dp']} ポート / 宛先 {r['di']} IP / {r['flows']} フロー",
+                "ports": r["dp"],
+            })
+
+        # 3. SYN フラッド: SYN のみ（ACK なし）フローが 100 超
+        for r in conn.execute("""
+            SELECT src_ip, COUNT(*) AS syn_flows, SUM(packets) AS tp
+            FROM netflow_flows
+            WHERE received_at >= datetime('now', ? || ' hours')
+              AND protocol = 6
+              AND (tcp_flags & 2) = 2
+              AND (tcp_flags & 16) = 0
+            GROUP BY src_ip HAVING syn_flows > 100
+            ORDER BY syn_flows DESC LIMIT 20
+        """, (f"-{hours}",)).fetchall():
+            alerts.append({
+                "type": "syn_flood",
+                "severity": "high" if r["syn_flows"] > 500 else "medium",
+                "src_ip": r["src_ip"],
+                "detail": f"SYNフラッド: {r['syn_flows']} SYN-only フロー / {r['tp']} パケット",
+                "syn_flows": r["syn_flows"],
+            })
+
+        # 4. ICMP フラッド: 単一送信元から 10000 パケット超
+        for r in conn.execute("""
+            SELECT src_ip, SUM(packets) AS tp, COUNT(*) AS flows
+            FROM netflow_flows
+            WHERE received_at >= datetime('now', ? || ' hours') AND protocol = 1
+            GROUP BY src_ip HAVING tp > 10000
+            ORDER BY tp DESC LIMIT 10
+        """, (f"-{hours}",)).fetchall():
+            alerts.append({
+                "type": "icmp_flood",
+                "severity": "medium",
+                "src_ip": r["src_ip"],
+                "detail": f"ICMPフラッド: {r['tp']:,} パケット / {r['flows']} フロー",
+                "packets": r["tp"],
+            })
+
+    severity_order = {"high": 0, "medium": 1, "low": 2}
+    alerts.sort(key=lambda x: severity_order.get(x.get("severity", "low"), 2))
+    return alerts
+
+
+# ─────────────────────────────────────────
+# 帯域トレンド（容量計画用）
+# ─────────────────────────────────────────
+
+def get_bandwidth_history(days: int = 7) -> list[dict]:
+    """時間別帯域使用量（容量計画・トレンド分析用）"""
+    _init_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT strftime('%Y-%m-%d %H:00', received_at, 'localtime') AS hour,
+                   SUM(bytes)   AS total_bytes,
+                   SUM(packets) AS total_packets,
+                   COUNT(*)     AS flows
+            FROM netflow_flows
+            WHERE received_at >= datetime('now', ? || ' days')
+            GROUP BY hour ORDER BY hour
+        """, (f"-{days}",)).fetchall()
+        return [dict(r) for r in rows]

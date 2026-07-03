@@ -603,6 +603,171 @@ def download_pcap_via_scp(ip: str, username: str, password: str,
         ssh.close()
 
 
+# ─────────────────────────────────────────
+# ネットワークトポロジー（LLDP/CDP via RESTCONF）
+# ─────────────────────────────────────────
+
+def get_lldp_neighbors(dev: dict) -> list[dict]:
+    """RESTCONF で LLDP ネイバー情報を取得する（Cisco IOS-XE）。"""
+    ip   = dev["ip"]
+    port = dev.get("port", 443)
+    auth = (dev["username"], dev["password"])
+    verify = bool(dev.get("verify_ssl", 0))
+    base = f"https://{ip}:{port}/restconf/data"
+
+    # Cisco IOS-XE LLDP oper YANG
+    url = f"{base}/Cisco-IOS-XE-lldp-oper:lldp-entries/lldp-intf-details"
+    try:
+        r = requests.get(url, auth=auth, headers=_RESTCONF_HEADERS, verify=verify, timeout=10)
+        if r.status_code != 200:
+            return []
+        data  = r.json()
+        intfs = data.get("Cisco-IOS-XE-lldp-oper:lldp-intf-details", [])
+        if isinstance(intfs, dict):
+            intfs = [intfs]
+        neighbors = []
+        for intf in intfs:
+            local_if = intf.get("if-name", "?")
+            for nb in intf.get("lldp-neighbor-details", {}).get("lldp-neighbor-detail", []):
+                neighbors.append({
+                    "local_device": ip,
+                    "local_if":     local_if,
+                    "neighbor_id":  nb.get("system-name", nb.get("port-id-detail", "?")),
+                    "neighbor_if":  nb.get("port-id-detail", "?"),
+                    "neighbor_ip":  nb.get("mgmt-addr", ""),
+                    "capability":   nb.get("system-capability", ""),
+                    "protocol":     "LLDP",
+                })
+        return neighbors
+    except Exception as e:
+        print(f"[lldp] {ip}: {e}")
+        return []
+
+
+def get_cdp_neighbors(dev: dict) -> list[dict]:
+    """RESTCONF で CDP ネイバー情報を取得する（Cisco IOS-XE）。"""
+    ip   = dev["ip"]
+    port = dev.get("port", 443)
+    auth = (dev["username"], dev["password"])
+    verify = bool(dev.get("verify_ssl", 0))
+    base = f"https://{ip}:{port}/restconf/data"
+
+    url = f"{base}/Cisco-IOS-XE-cdp-oper:cdp-neighbor-details"
+    try:
+        r = requests.get(url, auth=auth, headers=_RESTCONF_HEADERS, verify=verify, timeout=10)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        entries = data.get("Cisco-IOS-XE-cdp-oper:cdp-neighbor-details", {})
+        detail_list = entries.get("cdp-neighbor-detail", [])
+        if isinstance(detail_list, dict):
+            detail_list = [detail_list]
+        neighbors = []
+        for nb in detail_list:
+            neighbors.append({
+                "local_device": ip,
+                "local_if":     nb.get("local-intf-name", "?"),
+                "neighbor_id":  nb.get("device-name",    "?"),
+                "neighbor_if":  nb.get("port-id",        "?"),
+                "neighbor_ip":  nb.get("mgmt-addr",      ""),
+                "capability":   nb.get("capability",     ""),
+                "protocol":     "CDP",
+            })
+        return neighbors
+    except Exception as e:
+        print(f"[cdp] {ip}: {e}")
+        return []
+
+
+def get_all_topology() -> list[dict]:
+    """登録済み全デバイスの LLDP/CDP ネイバー情報を統合して返す。"""
+    _init_tables()
+    devices = get_devices()
+    all_neighbors: list[dict] = []
+    for dev in devices:
+        nb = get_lldp_neighbors(dev)
+        if not nb:
+            nb = get_cdp_neighbors(dev)
+        all_neighbors.extend(nb)
+    return all_neighbors
+
+
+def build_topology_dot(neighbors: list[dict]) -> str:
+    """ネイバー情報から Graphviz DOT 文字列を生成する。"""
+    edges: set[tuple] = set()
+    nodes: set[str]   = set()
+    lines = ['graph G {', '  layout=neato;', '  overlap=false;',
+             '  node [shape=box style=filled fillcolor="#d0e8ff" fontname="sans-serif"];',
+             '  edge [fontname="sans-serif" fontsize=9];']
+    for nb in neighbors:
+        a = nb["local_device"]
+        b = nb["neighbor_id"]
+        la = nb.get("local_if", "")
+        lb = nb.get("neighbor_if", "")
+        label = f'"{la}\\n{lb}"' if la or lb else '""'
+        edge = tuple(sorted([a, b]))
+        nodes.add(a); nodes.add(b)
+        if edge not in edges:
+            edges.add(edge)
+            lines.append(f'  "{a}" -- "{b}" [label={label}];')
+    if not edges and not nodes:
+        lines.append('  "（データなし）" [fillcolor="#ffe0e0"];')
+    lines.append("}")
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────
+# IP SLA（アプリ応答時間・SD-WAN品質）
+# ─────────────────────────────────────────
+
+def get_ip_sla_stats(dev: dict) -> list[dict]:
+    """RESTCONF で IP SLA の RTT・ジッター・パケットロスを取得する。"""
+    ip   = dev["ip"]
+    port = dev.get("port", 443)
+    auth = (dev["username"], dev["password"])
+    verify = bool(dev.get("verify_ssl", 0))
+    url = f"https://{ip}:{port}/restconf/data/Cisco-IOS-XE-ip-sla-oper:ip-sla-stats"
+    try:
+        r = requests.get(url, auth=auth, headers=_RESTCONF_HEADERS, verify=verify, timeout=10)
+        if r.status_code != 200:
+            return []
+        data    = r.json()
+        entries = data.get("Cisco-IOS-XE-ip-sla-oper:ip-sla-stats", {})
+        sla_list = entries.get("sla-oper-entry", [])
+        if isinstance(sla_list, dict):
+            sla_list = [sla_list]
+        result = []
+        for e in sla_list:
+            st = e.get("stats", {})
+            rtt = st.get("rtt", {})
+            jitter_data = st.get("oneway-latency", {})
+            result.append({
+                "device_ip":    ip,
+                "sla_id":       e.get("oper-id", "?"),
+                "type":         e.get("sla-type", "?"),
+                "destination":  e.get("dest-address", "?"),
+                "rtt_avg_ms":   rtt.get("rtt-avg", 0),
+                "rtt_min_ms":   rtt.get("rtt-min", 0),
+                "rtt_max_ms":   rtt.get("rtt-max", 0),
+                "success_count": e.get("success-count", 0),
+                "failure_count": e.get("failure-count", 0),
+                "return_code":   e.get("return-code", "?"),
+            })
+        return result
+    except Exception as e:
+        print(f"[ip_sla] {ip}: {e}")
+        return []
+
+
+def get_all_ip_sla() -> list[dict]:
+    """登録済み全デバイスの IP SLA 統計を返す。"""
+    _init_tables()
+    result = []
+    for dev in get_devices():
+        result.extend(get_ip_sla_stats(dev))
+    return result
+
+
 def list_flash_pcaps(ip: str, username: str, password: str) -> list[str]:
     """
     IOS-XE の flash にある .pcap ファイル一覧を SSH で取得する。

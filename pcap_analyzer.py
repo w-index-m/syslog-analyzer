@@ -69,6 +69,33 @@ TLS_ALERT_DESCS = {
 
 PROTO_NAMES = {1: "ICMP", 2: "IGMP", 6: "TCP", 17: "UDP", 89: "OSPF"}
 
+# ── VoIP/RTP ────────────────────────────────────────────────────
+RTP_CLOCK_RATES = {
+    0: 8000, 8: 8000,   # G.711 u-law / a-law
+    3: 8000,             # GSM
+    4: 8000,             # G.723
+    9: 8000,             # G.722
+    18: 8000,            # G.729
+    96: 48000, 97: 48000, 98: 48000, 99: 48000, 100: 48000,
+    101: 8000,           # telephone-event (RFC 2833)
+    111: 48000,          # Opus
+    120: 90000,          # H.264 video
+}
+
+RTP_CODEC_NAMES = {
+    0: "G.711μ", 8: "G.711a", 3: "GSM", 4: "G.723",
+    9: "G.722", 18: "G.729", 96: "動的", 97: "動的",
+    101: "DTMF", 111: "Opus",
+}
+
+MOS_LABELS = {
+    (4.3, 5.0): "最高 (≥4.3)",
+    (4.0, 4.3): "良好 (4.0-4.3)",
+    (3.6, 4.0): "普通 (3.6-4.0)",
+    (3.1, 3.6): "やや悪い (3.1-3.6)",
+    (1.0, 3.1): "悪い (<3.1)",
+}
+
 
 # ── ユーティリティ ───────────────────────────────────────────────
 def _ip_str(raw: bytes) -> str:
@@ -79,6 +106,33 @@ def _ip_str(raw: bytes) -> str:
 def _ts_str(ts: float) -> str:
     try:   return datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
     except Exception: return str(ts)
+
+
+def _is_rtp(payload: bytes) -> bool:
+    """RTPパケットのヒューリスティック判定 (version=2, payload type が有効範囲)。"""
+    if len(payload) < 12:
+        return False
+    v  = (payload[0] >> 6) & 0x3
+    pt = payload[1] & 0x7F
+    return v == 2 and (pt <= 34 or 96 <= pt <= 127)
+
+
+def _r_to_mos(r: float) -> float:
+    """R値 (0-100) を MOS (1.0-4.5) に変換 (ITU-T G.107 近似)。"""
+    if r < 0:
+        return 1.0
+    if r > 100:
+        return 4.5
+    mos = 1 + 0.035 * r + r * (r - 60) * (100 - r) * 7e-6
+    return round(max(1.0, min(4.5, mos)), 2)
+
+
+def _mos_label(mos: float) -> str:
+    if mos >= 4.3: return "最高"
+    if mos >= 4.0: return "良好"
+    if mos >= 3.6: return "普通"
+    if mos >= 3.1: return "やや悪い"
+    return "悪い"
 
 
 def _open_capture(data: bytes):
@@ -292,6 +346,7 @@ def analyze_pcap(data: bytes) -> dict:
         "dns_summary": {"queries": 0, "responses": 0, "nxdomain": 0,
                         "servfail": 0, "refused": 0, "slow": 0},
         "syslog_packets": [],
+        "voip_streams": [], "voip_avg_mos": 0.0, "voip_stream_count": 0, "voip_poor_streams": 0,
         "total_packets": 0,
         "capture_start": "", "capture_end": "",
         "error": None,
@@ -321,6 +376,9 @@ def analyze_pcap(data: bytes) -> dict:
 
     # DHCP: xid -> {ts, client_mac, hostname, has_offer}
     dhcp_pending_discover: dict[int, dict] = {}
+
+    # VoIP/RTP: ssrc -> {pkts:[{ts,seq,rtp_ts,size}], src, dst, pt}
+    rtp_streams: dict[int, dict] = {}
 
     try:
         for ts, raw_pkt in reader:
@@ -570,6 +628,20 @@ def analyze_pcap(data: bytes) -> dict:
                                     "issue":      f"DHCP DECLINE — クライアントがIPを拒否（IPアドレス競合の可能性: {dhcp.get('requested_ip','?')}）",
                                 })
 
+                    # RTP/VoIP
+                    elif _is_rtp(udp.data):
+                        try:
+                            pl = udp.data
+                            seq     = struct.unpack("!H", pl[2:4])[0]
+                            rtp_ts  = struct.unpack("!I", pl[4:8])[0]
+                            ssrc    = struct.unpack("!I", pl[8:12])[0]
+                            pt      = pl[1] & 0x7F
+                            if ssrc not in rtp_streams:
+                                rtp_streams[ssrc] = {"src": src, "dst": dst, "pt": pt, "pkts": []}
+                            rtp_streams[ssrc]["pkts"].append({"ts": float(ts), "seq": seq, "rtp_ts": rtp_ts})
+                        except Exception:
+                            pass
+
                     # syslog
                     elif udp.dport in SYSLOG_PORTS or udp.sport in SYSLOG_PORTS:
                         try:
@@ -674,6 +746,46 @@ def analyze_pcap(data: bytes) -> dict:
                 "detail":     f"{wait:.1f}秒待機",
                 "issue":      f"DHCP DISCOVER に OFFER なし ({wait:.1f}秒) — DHCPサーバー停止/到達不能の可能性",
             })
+
+    # VoIP/RTP MOS 計算
+    voip_list = []
+    for ssrc, st in rtp_streams.items():
+        pkts = sorted(st["pkts"], key=lambda p: p["ts"])
+        if len(pkts) < 4:
+            continue
+        pt = st["pt"]
+        clock_rate = RTP_CLOCK_RATES.get(pt, 8000)
+        jitter = 0.0
+        for i in range(1, len(pkts)):
+            d_recv = (pkts[i]["ts"] - pkts[i-1]["ts"]) * clock_rate
+            d_send = pkts[i]["rtp_ts"] - pkts[i-1]["rtp_ts"]
+            jitter += (abs(d_recv - d_send) - jitter) / 16.0
+        jitter_ms = jitter / clock_rate * 1000
+        seqs = [p["seq"] for p in pkts]
+        expected = max(seqs) - min(seqs) + 1
+        loss_pct = max(0.0, (expected - len(pkts)) / expected * 100) if expected > 0 else 0.0
+        ie = loss_pct * 2.5
+        id_val = min(jitter_ms * 0.5, 30.0)
+        r_val = max(0.0, 93.2 - ie - id_val)
+        mos = _r_to_mos(r_val)
+        duration = pkts[-1]["ts"] - pkts[0]["ts"]
+        voip_list.append({
+            "src_ip": st["src"], "dst_ip": st["dst"],
+            "ssrc": f"{ssrc:08X}",
+            "codec": RTP_CODEC_NAMES.get(pt, f"PT={pt}"),
+            "packets": len(pkts),
+            "duration_s": round(duration, 2),
+            "jitter_ms": round(jitter_ms, 2),
+            "loss_pct": round(loss_pct, 2),
+            "mos": mos,
+            "r_value": round(r_val, 1),
+            "quality": _mos_label(mos),
+        })
+    voip_list.sort(key=lambda x: x["mos"])
+    result["voip_streams"]      = voip_list
+    result["voip_stream_count"] = len(voip_list)
+    result["voip_avg_mos"]      = round(sum(s["mos"] for s in voip_list) / len(voip_list), 2) if voip_list else 0.0
+    result["voip_poor_streams"] = sum(1 for s in voip_list if s["mos"] < 3.6)
 
     # TLS unique sites 集計
     result["tls_summary"]["unique_sites"] = len(tls_unique_sites)
