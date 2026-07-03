@@ -70,6 +70,16 @@ def _init_tables():
                 pcap_flash_path  TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS epc_analyses (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                analyzed_at      TEXT NOT NULL,
+                source_ip        TEXT NOT NULL,
+                capture_name     TEXT,
+                local_pcap_path  TEXT,
+                analysis_json    TEXT
+            )
+        """)
         conn.commit()
 
 
@@ -347,12 +357,13 @@ def _stop_and_export_epc(ip: str, capture_name: str, dev: dict):
         ip, dev["username"], dev["password"], pcap_flash
     )
     if local_data:
-        # uploads/ に保存されたローカルパスを記録
         clean = pcap_flash.replace("flash:", "").replace("/", "").strip()
         local_path = str(_UPLOADS_DIR / clean)
         _log_epc_event(ip, "auto_scp", capture_name,
                        f"downloaded:{local_path}", local_path)
         print(f"[EPC AutoTrigger] {ip} SCP download OK → {local_path}")
+        # 4. 自動解析
+        _auto_analyze(ip, capture_name, local_data, local_path)
     else:
         _log_epc_event(ip, "auto_scp", capture_name, f"scp_failed:{err}", "")
         print(f"[EPC AutoTrigger] {ip} SCP download failed: {err}")
@@ -414,6 +425,7 @@ def manual_stop_epc(ip: str) -> dict:
         clean = pcap_flash.replace("flash:", "").replace("/", "").strip()
         local_path = str(_UPLOADS_DIR / clean)
         _log_epc_event(ip, "手動SCP", capture_name, f"downloaded:{local_path}", local_path)
+        _auto_analyze(ip, capture_name, local_data, local_path)
         return {"ok": True, "pcap_flash_path": pcap_flash, "local_path": local_path}
     else:
         _log_epc_event(ip, "手動SCP", capture_name, f"scp_failed:{err}", "")
@@ -423,6 +435,57 @@ def manual_stop_epc(ip: str) -> dict:
 def is_capturing(ip: str) -> bool:
     with _epc_lock:
         return ip in _epc_active
+
+
+# ─────────────────────────────────────────
+# 自動 pcap 解析
+# ─────────────────────────────────────────
+
+def _auto_analyze(ip: str, capture_name: str, pcap_bytes: bytes, local_path: str):
+    """SCP ダウンロード後に自動で pcap を解析して DB に保存する"""
+    try:
+        import pcap_analyzer
+        result = pcap_analyzer.analyze_pcap(pcap_bytes)
+        result_json = json.dumps(result, ensure_ascii=False)
+        _init_tables()
+        with sqlite3.connect(DB_PATH, check_same_thread=False) as conn:
+            conn.execute("""
+                INSERT INTO epc_analyses
+                (analyzed_at, source_ip, capture_name, local_pcap_path, analysis_json)
+                VALUES (?,?,?,?,?)
+            """, (datetime.now().isoformat(), ip, capture_name, local_path, result_json))
+            conn.commit()
+        summary = result.get("summary", {})
+        print(f"[EPC AutoAnalyze] {ip} done — "
+              f"pkts={summary.get('total_packets',0)} "
+              f"redirects={summary.get('icmp_redirects',0)}")
+    except Exception as e:
+        print(f"[EPC AutoAnalyze] {ip} error: {e}")
+
+
+def get_epc_analyses(ip: str = None, limit: int = 10) -> list[dict]:
+    """自動解析結果の一覧を取得する"""
+    _init_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        if ip:
+            rows = conn.execute("""
+                SELECT * FROM epc_analyses WHERE source_ip=?
+                ORDER BY analyzed_at DESC LIMIT ?
+            """, (ip, limit)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT * FROM epc_analyses ORDER BY analyzed_at DESC LIMIT ?
+            """, (limit,)).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["analysis"] = json.loads(d.get("analysis_json") or "{}")
+            except Exception:
+                d["analysis"] = {}
+            result.append(d)
+        return result
 
 
 # ─────────────────────────────────────────

@@ -1109,7 +1109,51 @@ snmp-server trap enable
                     st.caption("EPC イベント履歴なし")
 
                 st.markdown("---")
-                st.markdown("**📥 pcap ダウンロード＆即時解析**")
+                st.markdown("**🤖 自動解析結果**")
+                analyses = rc_epc.get_epc_analyses(sel_icmp_ip, limit=5)
+                if analyses:
+                    latest = analyses[0]
+                    st.caption(f"最終解析: {latest['analyzed_at'][:19]}  |  キャプチャ: {latest['capture_name']}")
+                    an = latest.get("analysis", {})
+                    s = an.get("summary", {})
+                    ac1, ac2, ac3, ac4 = st.columns(4)
+                    ac1.metric("総パケット数", s.get("total_packets", 0))
+                    ac2.metric("ICMP Redirect", s.get("icmp_redirects", 0))
+                    ac3.metric("TCP RST", s.get("tcp_rst", 0))
+                    ac4.metric("キャプチャ時間", f"{s.get('duration_sec', 0):.1f}s")
+
+                    rds = an.get("icmp_redirects", [])
+                    if rds:
+                        st.markdown(f"**🔀 ICMP Redirect 詳細 ({len(rds)} 件)**")
+                        st.dataframe(pd.DataFrame(rds), use_container_width=True, hide_index=True)
+
+                    rip = an.get("rip_packets", [])
+                    if rip:
+                        with st.expander(f"🗺️ RIP パケット ({len(rip)} 件)"):
+                            st.dataframe(pd.DataFrame(rip), use_container_width=True, hide_index=True)
+
+                    arp = an.get("arp_anomalies", [])
+                    if arp:
+                        with st.expander(f"⚠️ ARP 異常 ({len(arp)} 件)"):
+                            st.dataframe(pd.DataFrame(arp), use_container_width=True, hide_index=True)
+
+                    if len(analyses) > 1:
+                        with st.expander(f"📜 過去の解析履歴 ({len(analyses)-1} 件)"):
+                            for old in analyses[1:]:
+                                s2 = old.get("analysis", {}).get("summary", {})
+                                st.markdown(
+                                    f"- `{old['analyzed_at'][:19]}` — "
+                                    f"pkts={s2.get('total_packets',0)} "
+                                    f"redirects={s2.get('icmp_redirects',0)} "
+                                    f"RST={s2.get('tcp_rst',0)}"
+                                )
+                    if st.button("🔄 解析結果を更新", key="refresh_analysis"):
+                        st.rerun()
+                else:
+                    st.info("まだ自動解析結果がありません。EPC が完了すると自動で解析・保存されます。")
+
+                st.markdown("---")
+                st.markdown("**📥 手動 pcap ダウンロード＆解析**")
                 st.caption("Catalyst の flash から SCP で pcap を取得してそのまま解析します。（IOS-XE 側: `ip scp server enable` が必要）")
 
                 dl_ip   = sel_icmp_ip
