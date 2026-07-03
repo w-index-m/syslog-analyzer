@@ -323,7 +323,7 @@ with st.sidebar:
     st.markdown("### 🧪 テストログ投入")
     test_vendor = st.selectbox("ベンダー", [
         "Cisco IOS/IOS-XE", "Cisco NX-OS", "富士通 Si-R",
-        "NEC IPCOM", "APRESIA", "RHEL/Linux", "Windows"
+        "富士通 IPCOM", "APRESIA", "RHEL/Linux", "Windows"
     ])
     if st.button("📨 テストログ送信", use_container_width=True):
         _inject_test_log(test_vendor)
@@ -360,7 +360,7 @@ TEST_LOGS = {
         ("<163>Jun 30 10:04:00 SiRbx001 bgpd[200]: ERR BGP neighbor 10.0.0.1 Down Hold Timer Expired", "192.168.1.3"),
         ("<165>Jun 30 10:05:00 SiR-G200 sshd[500]: WARN Failed password for admin from 203.0.113.100 port 52341", "192.168.1.3"),
     ],
-    "NEC IPCOM": [
+    "富士通 IPCOM": [
         ("<165>Jun 30 10:00:00 ipcom-ex01 ipf[1234]: [DENY] TCP 192.168.100.50:54321->10.0.0.1:22", "192.168.1.7"),
         ("<166>Jun 30 10:01:00 ipcom-ex01 ifmgr[100]: IF GigabitEthernet0 link down", "192.168.1.7"),
         ("<165>Jun 30 10:02:00 ipcom-ex01 iked[200]: INFO IKE SA established peer=203.0.113.1", "192.168.1.7"),
@@ -634,7 +634,7 @@ with tab1:
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         f_vendor = st.selectbox("ベンダー", ["すべて", "Cisco IOS/IOS-XE", "Cisco NX-OS",
-                                              "富士通 Si-R", "NEC IPCOM",
+                                              "富士通 Si-R", "富士通 IPCOM",
                                               "APRESIA ApresiaLight",
                                               "RHEL/Linux", "Windows", "Generic/不明"])
     with col2:

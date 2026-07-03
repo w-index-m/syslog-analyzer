@@ -1,5 +1,5 @@
 """
-NEC IPCOM EX / EX2 / VA シリーズ syslog パーサー
+富士通 IPCOM EX / EX2 / VA シリーズ syslog パーサー
 
 ログフォーマット例:
   <165>Jan  1 00:00:01 IPCOM-EX hostname ipf[1234]: [DENY] TCP 192.168.1.1:12345->10.0.0.1:80
@@ -57,7 +57,7 @@ def _is_ipcom(raw: str) -> bool:
     # IPCOM固有キーワード
     keywords = [
         "ipcom", "ipf[", "ifmgr[", "netd[", "sslowd[", "filterd[",
-        "ipcomd[", "cmdd[", "watchdog[", "nec ipcom", "ipcom ex",
+        "ipcomd[", "cmdd[", "watchdog[", "fujitsu ipcom", "ipcom ex",
     ]
     if any(k in raw_lower for k in keywords):
         return True
@@ -86,7 +86,7 @@ def parse(raw: str, source_ip: str) -> dict | None:
     else:
         severity = "INFO"
 
-    tags = ["NEC IPCOM"]
+    tags = ["富士通 IPCOM"]
     msg_upper = (message or "").upper()
     proc_lower = (process or "").lower()
 
@@ -141,7 +141,7 @@ def parse(raw: str, source_ip: str) -> dict | None:
         tags.append("メモリ不足")
 
     return {
-        "vendor": "NEC IPCOM",
+        "vendor": "富士通 IPCOM",
         "hostname": hostname or source_ip,
         "facility": "IPCOM",
         "severity": severity,
