@@ -323,7 +323,7 @@ with st.sidebar:
     st.markdown("### 🧪 テストログ投入")
     test_vendor = st.selectbox("ベンダー", [
         "Cisco IOS/IOS-XE", "Cisco NX-OS", "富士通 Si-R",
-        "富士通 IPCOM", "APRESIA", "RHEL/Linux", "Windows"
+        "富士通 IPCOM", "富士通 SR-S", "APRESIA", "RHEL/Linux", "Windows"
     ])
     if st.button("📨 テストログ送信", use_container_width=True):
         _inject_test_log(test_vendor)
@@ -337,7 +337,7 @@ with st.sidebar:
         st.success("クリアしました")
 
     st.markdown("---")
-    st.caption("v1.0 | Cisco/NX-OS/Si-R/APRESIA/RHEL/Windows対応")
+    st.caption("v1.0 | Cisco/NX-OS/Si-R/IPCOM/SR-S/APRESIA/RHEL/Windows対応")
 
 # ─────────────────────────────────────────
 # テストログ定義
@@ -366,6 +366,14 @@ TEST_LOGS = {
         ("<165>Jun 30 10:02:00 ipcom-ex01 iked[200]: INFO IKE SA established peer=203.0.113.1", "192.168.1.7"),
         ("<163>Jun 30 10:03:00 ipcom-ex01 bgpd[300]: BGP neighbor 10.0.0.2 Down: Hold Timer Expired", "192.168.1.7"),
         ("<165>Jun 30 10:04:00 ipcom-ex01 natd[400]: NAT session table full, dropping new connection", "192.168.1.7"),
+    ],
+    "富士通 SR-S": [
+        ("<134>Jun 30 10:00:00 sw-srs01 l2loopd: Configuration Testing Protocol detects a loop in port 5 and port 6", "192.168.1.8"),
+        ("<134>Jun 30 10:01:00 sw-srs01 l2loopd: Configuration Testing Protocol blocked port 5", "192.168.1.8"),
+        ("<134>Jun 30 10:02:00 sw-srs01 protocol: ether 3 link down", "192.168.1.8"),
+        ("<134>Jun 30 10:03:00 sw-srs01 mstpd: Topology Change detected", "192.168.1.8"),
+        ("<134>Jun 30 10:04:00 sw-srs01 protocol: MAC learning entry moved from ether 1 to ether 2 [00:11:22:33:44:55 vid=10]", "192.168.1.8"),
+        ("<134>Jun 30 10:05:00 sw-srs01 telnetd: failed login guest on telnet from 192.168.1.100", "192.168.1.8"),
     ],
     "APRESIA": [
         ("<131>Jun 30 10:00:00 apresia01 LINK_DOWN: Port 1/0/3 link down", "192.168.1.4"),
@@ -634,7 +642,7 @@ with tab1:
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         f_vendor = st.selectbox("ベンダー", ["すべて", "Cisco IOS/IOS-XE", "Cisco NX-OS",
-                                              "富士通 Si-R", "富士通 IPCOM",
+                                              "富士通 Si-R", "富士通 IPCOM", "富士通 SR-S",
                                               "APRESIA ApresiaLight",
                                               "RHEL/Linux", "Windows", "Generic/不明"])
     with col2:
@@ -1597,6 +1605,7 @@ with tab4:
         with c3:
             cfg_vendor = st.selectbox("ベンダー", [
                 "Cisco IOS/IOS-XE", "Cisco NX-OS", "富士通 Si-R",
+                "富士通 IPCOM", "富士通 SR-S",
                 "APRESIA", "RHEL/Linux", "Windows", "その他"
             ])
 

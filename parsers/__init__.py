@@ -1,4 +1,4 @@
-from parsers import cisco_ios, cisco_nxos, fujitsu_sir, fujitsu_ipcom, apresia, rhel, windows
+from parsers import cisco_ios, cisco_nxos, fujitsu_sir, fujitsu_ipcom, fujitsu_srs, apresia, rhel, windows
 import re
 
 SEVERITY_MAP = {
@@ -12,6 +12,7 @@ PARSERS = [
     ("Cisco IOS/IOS-XE", cisco_ios),
     ("Cisco NX-OS",      cisco_nxos),
     ("富士通 IPCOM",      fujitsu_ipcom),  # IPCOM を Si-R より先に（共通プロセス名の衝突を回避）
+    ("富士通 SR-S",       fujitsu_srs),    # SR-S 固有プロセス(l2loopd/mstpd/protocol)で判定
     ("富士通 Si-R",       fujitsu_sir),
     ("APRESIA",          apresia),
     ("Windows",          windows),
