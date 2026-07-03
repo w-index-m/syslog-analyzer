@@ -877,11 +877,11 @@ snmp-server trap enable
                     st.caption("詳細は「📊 品質ルーブリック」タブで確認できます")
 
             st.markdown("---")
-            st.markdown("#### 📍 ルーティングテーブル取得（SNMP Walk）")
-            st.caption("ipRouteTable(RFC1213)をSNMP Walkで自動取得します。")
+            st.markdown("#### 📍 ルーティングテーブル取得")
             rt_col1, rt_col2 = st.columns([1, 3])
             with rt_col1:
-                if st.button("📍 ルーティングテーブル取得", key="fetch_rt"):
+                st.caption("SNMP Walk（MIB: ipRouteTable）")
+                if st.button("📍 SNMP で取得", key="fetch_rt"):
                     with st.spinner(f"{sel_ip} のルーティングテーブルをWalk中..."):
                         dev = next((d for d in devices if d["ip"] == sel_ip), {})
                         try:
@@ -892,16 +892,45 @@ snmp-server trap enable
                             if routes:
                                 st.success(f"{len(routes)} 件のルートを取得しました")
                             else:
-                                st.warning("ルートが取得できませんでした（機器の到達性・コミュニティを確認してください）")
+                                st.warning("ルートが取得できませんでした")
                         except Exception as e:
                             st.error(f"取得エラー: {e}")
                     st.rerun()
+
+                st.caption("RESTCONF（IOS-XE 専用・高速）")
+                if st.button("⚡ RESTCONF で取得", key="fetch_rt_restconf"):
+                    import restconf_client as rc_ui
+                    rc_dev = rc_ui.get_device(sel_ip)
+                    if not rc_dev:
+                        st.warning("このIPのRESTCONFデバイスが未登録です（下のEPCパネルで登録してください）")
+                    else:
+                        with st.spinner(f"{sel_ip} にRESTCONFでルーティングテーブルを問い合わせ中..."):
+                            client = rc_ui.RestconfClient(
+                                sel_ip, rc_dev["username"], rc_dev["password"],
+                                rc_dev.get("port", 443), bool(rc_dev.get("verify_ssl"))
+                            )
+                            rc_routes = client.get_routing_table()
+                        if rc_routes:
+                            st.success(f"✅ RESTCONF: {len(rc_routes)} 件のルートを取得しました（SNMPより高速）")
+                            st.session_state[f"rc_routes_{sel_ip}"] = rc_routes
+                        else:
+                            st.error("RESTCONF でルートを取得できませんでした（機器設定を確認してください）")
+
             with rt_col2:
-                rt_rows = snmp_poller.get_routing_table(sel_ip)
-                if rt_rows:
-                    df_rt = pd.DataFrame(rt_rows)[["dest","mask","nexthop","route_type","proto","fetched_at"]]
-                    df_rt.columns = ["宛先","マスク","ネクストホップ","タイプ","プロトコル","取得時刻"]
-                    st.dataframe(df_rt, use_container_width=True, hide_index=True)
+                # RESTCONF 取得結果を優先表示
+                rc_routes_key = f"rc_routes_{sel_ip}"
+                if rc_routes_key in st.session_state:
+                    rc_rt = st.session_state[rc_routes_key]
+                    st.caption("📡 RESTCONF 取得結果")
+                    df_rc = pd.DataFrame(rc_rt)[["dest","mask","nexthop","proto","metric"]]
+                    df_rc.columns = ["宛先","マスク","ネクストホップ","プロトコル","メトリック"]
+                    st.dataframe(df_rc, use_container_width=True, hide_index=True)
+                else:
+                    rt_rows = snmp_poller.get_routing_table(sel_ip)
+                    if rt_rows:
+                        df_rt = pd.DataFrame(rt_rows)[["dest","mask","nexthop","route_type","proto","fetched_at"]]
+                        df_rt.columns = ["宛先","マスク","ネクストホップ","タイプ","プロトコル","取得時刻"]
+                        st.dataframe(df_rt, use_container_width=True, hide_index=True)
                 else:
                     st.caption("ルーティングテーブルなし（上のボタンで取得してください）")
         else:
@@ -1008,7 +1037,83 @@ snmp-server trap enable
                 else:
                     st.caption("ルーティング照合：SNMPポーリングタブで「📍 ルーティングテーブル取得」を実行するか、「機器コンフィグ」タブにコンフィグを登録してください。")
 
-            # ── ④ AI自動原因推定 ──
+            # ── ④ EPC 自動トリガー設定・手動制御 ──
+            import restconf_client as rc_epc
+            with st.expander("📦 EPC（パケットキャプチャ）自動トリガー設定", expanded=False):
+                st.caption("ICMP Redirect が急増したとき、Catalyst に自動で `monitor capture` を起動します。")
+
+                epc_dev = rc_epc.get_device(sel_icmp_ip)
+                with st.form(f"restconf_form_{sel_icmp_ip}"):
+                    st.markdown("**RESTCONF 認証情報**")
+                    fc1, fc2 = st.columns(2)
+                    with fc1:
+                        f_user = st.text_input("ユーザー名", value=epc_dev["username"] if epc_dev else "")
+                        f_iface = st.text_input("EPC キャプチャ対象インターフェース",
+                                                value=epc_dev.get("epc_interface","") if epc_dev else "",
+                                                placeholder="GigabitEthernet1/0/1")
+                        f_threshold = st.number_input("自動起動閾値（redirects/poll）",
+                                                      min_value=1, max_value=500,
+                                                      value=epc_dev.get("epc_threshold",10) if epc_dev else 10)
+                    with fc2:
+                        f_pass = st.text_input("パスワード", type="password",
+                                               value="" if epc_dev else "")
+                        f_duration = st.number_input("キャプチャ時間（秒）",
+                                                     min_value=10, max_value=3600,
+                                                     value=epc_dev.get("epc_duration_sec",60) if epc_dev else 60)
+                        f_auto = st.checkbox("ICMP Redirect 急増時に自動起動",
+                                             value=bool(epc_dev.get("epc_auto_trigger")) if epc_dev else False)
+                    if st.form_submit_button("💾 保存"):
+                        if f_user and f_pass:
+                            rc_epc.add_device(
+                                sel_icmp_ip, f_user, f_pass, 443, False,
+                                f_iface, f_auto, f_threshold, f_duration
+                            )
+                            st.success("✅ RESTCONF デバイス設定を保存しました")
+                        else:
+                            st.error("ユーザー名とパスワードを入力してください")
+
+                st.markdown("**手動 EPC 操作**")
+                epc_cols = st.columns(3)
+                is_cap = rc_epc.is_capturing(sel_icmp_ip)
+                with epc_cols[0]:
+                    if st.button("▶ EPC 開始", key=f"epc_start_{sel_icmp_ip}",
+                                 disabled=is_cap or not epc_dev):
+                        res = rc_epc.manual_start_epc(sel_icmp_ip)
+                        if res["ok"]:
+                            st.success(f"✅ キャプチャ開始: {res['capture_name']} ({res['duration_sec']}秒後に自動停止)")
+                        else:
+                            st.error(res.get("error", "起動失敗"))
+                with epc_cols[1]:
+                    if st.button("■ EPC 停止＋エクスポート", key=f"epc_stop_{sel_icmp_ip}",
+                                 disabled=not is_cap):
+                        res = rc_epc.manual_stop_epc(sel_icmp_ip)
+                        if res["ok"]:
+                            st.success(f"✅ 停止＆エクスポート: {res.get('pcap_flash_path','')}")
+                        else:
+                            st.error(res.get("error", "停止失敗"))
+                with epc_cols[2]:
+                    cap_status = "🔴 キャプチャ中" if is_cap else "⚫ 待機中"
+                    st.metric("EPC 状態", cap_status)
+
+                epc_events = rc_epc.get_epc_events(sel_icmp_ip, limit=10)
+                if epc_events:
+                    st.markdown("**EPC イベント履歴**")
+                    df_epc = pd.DataFrame(epc_events)[["triggered_at","trigger_reason","capture_name","status","pcap_flash_path"]]
+                    df_epc.columns = ["日時","トリガー理由","キャプチャ名","状態","pcapパス"]
+                    st.dataframe(df_epc, use_container_width=True, hide_index=True)
+                else:
+                    st.caption("EPC イベント履歴なし")
+
+                with st.expander("💡 IOS-XE 側の事前設定（コピペ用）"):
+                    st.code("""conf t
+ ip http server
+ ip http secure-server
+ ip http authentication local
+ restconf
+ username admin privilege 15 secret YourPassword
+end""", language="text")
+
+            # ── ⑤ AI自動原因推定 ──
             st.markdown("**🤖 AI自動原因推定**")
             llm_ok = analyzer.check_claude_available() or analyzer.check_ollama_available()
             if llm_ok:

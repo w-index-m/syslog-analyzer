@@ -694,6 +694,8 @@ def _poller_loop():
                     port=dev.get("port", 161),
                     llm_mode="none"  # バックグラウンドではLLMは呼ばない
                 )
+                # ICMP Redirect → EPC 自動トリガー確認
+                _check_epc_trigger(dev["ip"])
             except Exception as e:
                 print(f"[Poller] {dev['ip']}: {e}")
                 with sqlite3.connect(DB_PATH) as conn:
@@ -705,6 +707,23 @@ def _poller_loop():
         # 最短インターバル分だけ待機
         intervals = [d.get("interval_sec", 60) for d in devices] if devices else [60]
         time.sleep(min(intervals) if intervals else 60)
+
+def _check_epc_trigger(ip: str):
+    """直近の ICMP Redirect 差分を見て、閾値超過なら EPC 自動起動を依頼"""
+    try:
+        import restconf_client as rc
+        rows = get_icmp_redirect_latest()
+        for row in rows:
+            if row.get("source_ip") != ip:
+                continue
+            if row.get("oid_name") != "icmpOutRedirects":
+                continue
+            diff = row.get("diff")
+            if diff is not None:
+                rc.check_and_trigger_epc(ip, int(diff))
+    except Exception as e:
+        print(f"[EPC Trigger check] {ip}: {e}")
+
 
 def start_poller():
     global _poller_thread, _poller_running

@@ -28,6 +28,7 @@ import db
 import health_engine as he
 import snmp_poller
 import analyzer
+import restconf_client as rc
 from parsers import parse_syslog
 
 app = FastAPI(
@@ -277,3 +278,89 @@ def add_snmp_device(req: PollRequest):
 def remove_snmp_device(ip: str):
     snmp_poller.remove_device(ip)
     return {"status": "removed", "ip": ip}
+
+
+# ─────────────────────────────────────────
+# RESTCONF / EPC
+# ─────────────────────────────────────────
+
+class RestconfDeviceRequest(BaseModel):
+    ip: str
+    username: str
+    password: str
+    port: int = 443
+    verify_ssl: bool = False
+    epc_interface: str = ""
+    epc_auto_trigger: bool = False
+    epc_threshold: int = 10
+    epc_duration_sec: int = 60
+
+
+@app.get("/api/restconf/devices")
+def list_restconf_devices():
+    devs = rc.get_devices()
+    # パスワードはマスク
+    for d in devs:
+        d["password"] = "***"
+    return {"devices": devs}
+
+
+@app.post("/api/restconf/devices", status_code=201)
+def add_restconf_device(req: RestconfDeviceRequest):
+    rc.add_device(
+        req.ip, req.username, req.password, req.port, req.verify_ssl,
+        req.epc_interface, req.epc_auto_trigger, req.epc_threshold, req.epc_duration_sec
+    )
+    return {"status": "added", "ip": req.ip}
+
+
+@app.delete("/api/restconf/devices/{ip}")
+def remove_restconf_device(ip: str):
+    rc.remove_device(ip)
+    return {"status": "removed", "ip": ip}
+
+
+@app.get("/api/restconf/routes/{ip}")
+def get_routes_restconf(ip: str):
+    """RESTCONF でルーティングテーブルを取得（SNMP Walk より高速）"""
+    dev = rc.get_device(ip)
+    if not dev:
+        raise HTTPException(status_code=404, detail="RESTCONF デバイス未登録")
+    client = rc.RestconfClient(
+        ip, dev["username"], dev["password"],
+        dev.get("port", 443), bool(dev.get("verify_ssl"))
+    )
+    routes = client.get_routing_table()
+    return {"ip": ip, "count": len(routes), "routes": routes}
+
+
+class EpcRequest(BaseModel):
+    ip: str
+    capture_name: Optional[str] = None
+    duration_sec: Optional[int] = None
+
+
+@app.post("/api/restconf/epc/start")
+def epc_start(req: EpcRequest):
+    result = rc.manual_start_epc(req.ip, req.capture_name, req.duration_sec)
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result.get("error"))
+    return result
+
+
+@app.post("/api/restconf/epc/stop")
+def epc_stop(req: EpcRequest):
+    result = rc.manual_stop_epc(req.ip)
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result.get("error"))
+    return result
+
+
+@app.get("/api/restconf/epc/events")
+def get_epc_events(ip: Optional[str] = None, limit: int = 20):
+    return {"events": rc.get_epc_events(ip=ip, limit=limit)}
+
+
+@app.get("/api/restconf/epc/status/{ip}")
+def get_epc_status(ip: str):
+    return {"ip": ip, "capturing": rc.is_capturing(ip)}
