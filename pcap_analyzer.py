@@ -408,7 +408,14 @@ def analyze_pcap(data: bytes) -> dict:
                     t = icmp.type
                     result["icmp_summary"][t] = result["icmp_summary"].get(t, 0) + 1
                     if t == ICMP_REDIRECT:
-                        try:   gw = _ip_str(icmp.data.gw)
+                        try:
+                            gw_raw = icmp.data.gw
+                            # dpkt parses Redirect.gw as an integer
+                            if isinstance(gw_raw, int):
+                                import struct as _struct
+                                gw = socket.inet_ntoa(_struct.pack(">I", gw_raw))
+                            else:
+                                gw = _ip_str(gw_raw)
                         except Exception:
                             try:   gw = _ip_str(bytes(icmp.data)[:4])
                             except Exception: gw = "?"

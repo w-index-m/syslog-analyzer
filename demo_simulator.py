@@ -416,11 +416,11 @@ def _pcap_icmp_redirect() -> bytes:
             dst=socket.inet_aton(random.choice(EXT_IPS)),
             p=dpkt.ip.IP_PROTO_TCP,
         )
-        inner_udp = struct.pack("!HHH", 12345, 80, 0)  # 最初8バイト相当
-        icmp_data = dpkt.icmp.ICMP.Unreach(
-            data=socket.inet_aton(gw_ip) + bytes(inner_ip)[:20] + inner_udp
-        )
-        icmp = dpkt.icmp.ICMP(type=5, code=1, data=icmp_data)
+        inner_tcp_hdr = struct.pack("!HHI", 12345, 80, 0)  # src/dst port + seq (8 bytes)
+        # ICMP Redirect data: 4-byte gateway IP + original IP header + 8-byte original payload
+        icmp_raw = socket.inet_aton(gw_ip) + bytes(inner_ip)[:20] + inner_tcp_hdr[:8]
+        icmp = dpkt.icmp.ICMP(type=5, code=1)
+        icmp.data = icmp_raw
         ip = dpkt.ip.IP(src=socket.inet_aton(ROUTER1),
                         dst=socket.inet_aton(client),
                         p=dpkt.ip.IP_PROTO_ICMP, data=icmp)

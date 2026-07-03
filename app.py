@@ -323,7 +323,7 @@ with st.sidebar:
     st.markdown("### 🧪 テストログ投入")
     test_vendor = st.selectbox("ベンダー", [
         "Cisco IOS/IOS-XE", "Cisco NX-OS", "富士通 Si-R",
-        "APRESIA", "RHEL/Linux", "Windows"
+        "NEC IPCOM", "APRESIA", "RHEL/Linux", "Windows"
     ])
     if st.button("📨 テストログ送信", use_container_width=True):
         _inject_test_log(test_vendor)
@@ -356,6 +356,16 @@ TEST_LOGS = {
         ("<22>Jun 30 10:00:00 SiR-G120 siRd[123]: INFO PPP line up (BRI0) remote=203.0.113.1", "192.168.1.3"),
         ("<19>Jun 30 10:01:00 SiR-G120 siRd[123]: ERR PPP line down (BRI0) reason=LCP timeout", "192.168.1.3"),
         ("<22>Jun 30 10:02:00 SiR-G120 ospfd[456]: INFO OSPF neighbor 10.1.1.2 state changed to Full", "192.168.1.3"),
+        ("<165>Jun 30 10:03:00 SiRbx001 iked[100]: INFO IKE SA established peer=203.0.113.5 tunnel=vpn0", "192.168.1.3"),
+        ("<163>Jun 30 10:04:00 SiRbx001 bgpd[200]: ERR BGP neighbor 10.0.0.1 Down Hold Timer Expired", "192.168.1.3"),
+        ("<165>Jun 30 10:05:00 SiR-G200 sshd[500]: WARN Failed password for admin from 203.0.113.100 port 52341", "192.168.1.3"),
+    ],
+    "NEC IPCOM": [
+        ("<165>Jun 30 10:00:00 ipcom-ex01 ipf[1234]: [DENY] TCP 192.168.100.50:54321->10.0.0.1:22", "192.168.1.7"),
+        ("<166>Jun 30 10:01:00 ipcom-ex01 ifmgr[100]: IF GigabitEthernet0 link down", "192.168.1.7"),
+        ("<165>Jun 30 10:02:00 ipcom-ex01 iked[200]: INFO IKE SA established peer=203.0.113.1", "192.168.1.7"),
+        ("<163>Jun 30 10:03:00 ipcom-ex01 bgpd[300]: BGP neighbor 10.0.0.2 Down: Hold Timer Expired", "192.168.1.7"),
+        ("<165>Jun 30 10:04:00 ipcom-ex01 natd[400]: NAT session table full, dropping new connection", "192.168.1.7"),
     ],
     "APRESIA": [
         ("<131>Jun 30 10:00:00 apresia01 LINK_DOWN: Port 1/0/3 link down", "192.168.1.4"),
@@ -624,7 +634,8 @@ with tab1:
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         f_vendor = st.selectbox("ベンダー", ["すべて", "Cisco IOS/IOS-XE", "Cisco NX-OS",
-                                              "富士通 Si-R", "APRESIA ApresiaLight",
+                                              "富士通 Si-R", "NEC IPCOM",
+                                              "APRESIA ApresiaLight",
                                               "RHEL/Linux", "Windows", "Generic/不明"])
     with col2:
         f_severity = st.selectbox("重要度", ["すべて", "EMERGENCY", "ALERT", "CRITICAL",
