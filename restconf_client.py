@@ -3,6 +3,7 @@ Cisco IOS-XE RESTCONF クライアント
 - ルーティングテーブル取得（SNMP Walk より高速）
 - EPC（monitor capture）のリモート起動・停止・エクスポート
 - ICMP Redirect 急増時の EPC 自動トリガー
+- EPC pcap ファイルの SCP ダウンロード
 
 IOS-XE 側の事前設定:
     conf t
@@ -10,6 +11,7 @@ IOS-XE 側の事前設定:
      ip http secure-server
      ip http authentication local
      restconf
+     ip scp server enable        ← pcap ダウンロード用
     end
 """
 import os
@@ -381,3 +383,101 @@ def manual_stop_epc(ip: str) -> dict:
 def is_capturing(ip: str) -> bool:
     with _epc_lock:
         return ip in _epc_active
+
+
+# ─────────────────────────────────────────
+# SCP で pcap ファイルをダウンロード
+# ─────────────────────────────────────────
+
+_UPLOADS_DIR = Path(__file__).parent / "uploads"
+
+
+def download_pcap_via_scp(ip: str, username: str, password: str,
+                           flash_path: str) -> tuple[bytes | None, str]:
+    """
+    IOS-XE の flash から SCP 経由で pcap ファイルをダウンロードする。
+
+    IOS-XE 側の設定が必要:
+        ip scp server enable
+
+    戻り値: (pcapバイト列, エラーメッセージ)
+    """
+    try:
+        import paramiko
+        from scp import SCPClient
+    except ImportError:
+        return None, "paramiko/scp が未インストールです。`pip install paramiko scp` を実行してください。"
+
+    # "flash:/epc_xxx.pcap" → "epc_xxx.pcap"
+    clean = flash_path.replace("flash:", "").replace("/", "").strip()
+    if not clean:
+        return None, f"不正な flash パス: {flash_path}"
+
+    _UPLOADS_DIR.mkdir(exist_ok=True)
+    local_path = _UPLOADS_DIR / clean
+
+    # IOS-XE SCP でダウンロードするパス候補（デバイスにより異なる）
+    remote_candidates = [
+        f"flash:/{clean}",
+        f"/{clean}",
+        clean,
+    ]
+
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        ssh.connect(
+            ip, username=username, password=password,
+            look_for_keys=False, allow_agent=False,
+            timeout=15, banner_timeout=15,
+        )
+        last_err = ""
+        for remote_path in remote_candidates:
+            try:
+                with SCPClient(ssh.get_transport()) as scp:
+                    scp.get(remote_path, str(local_path))
+                if local_path.exists() and local_path.stat().st_size > 0:
+                    data = local_path.read_bytes()
+                    return data, ""
+            except Exception as e:
+                last_err = str(e)
+                continue
+        return None, f"SCP ダウンロード失敗（試行パス: {remote_candidates}）: {last_err}"
+    except Exception as e:
+        return None, f"SSH 接続エラー: {e}"
+    finally:
+        ssh.close()
+
+
+def list_flash_pcaps(ip: str, username: str, password: str) -> list[str]:
+    """
+    IOS-XE の flash にある .pcap ファイル一覧を SSH で取得する。
+    """
+    try:
+        import paramiko
+    except ImportError:
+        return []
+
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        ssh.connect(
+            ip, username=username, password=password,
+            look_for_keys=False, allow_agent=False,
+            timeout=10, banner_timeout=10,
+        )
+        _, stdout, _ = ssh.exec_command("dir flash: | include .pcap")
+        output = stdout.read().decode("utf-8", errors="replace")
+        files = []
+        for line in output.splitlines():
+            parts = line.strip().split()
+            # "dir flash:" の出力: "  1   -rw-  12345  Jun 30 ...  epc_xxx.pcap"
+            for part in parts:
+                if part.endswith(".pcap"):
+                    files.append(f"flash:/{part}")
+        return files
+    except Exception as e:
+        print(f"[list_flash_pcaps] {ip}: {e}")
+        return []
+    finally:
+        ssh.close()

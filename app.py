@@ -1104,12 +1104,94 @@ snmp-server trap enable
                 else:
                     st.caption("EPC イベント履歴なし")
 
+                st.markdown("---")
+                st.markdown("**📥 pcap ダウンロード＆即時解析**")
+                st.caption("Catalyst の flash から SCP で pcap を取得してそのまま解析します。（IOS-XE 側: `ip scp server enable` が必要）")
+
+                dl_ip   = sel_icmp_ip
+                dl_user = epc_dev["username"] if epc_dev else ""
+                dl_col1, dl_col2 = st.columns(2)
+                with dl_col1:
+                    dl_user_in = st.text_input("ユーザー名", value=dl_user, key="dl_user")
+                    dl_pass_in = st.text_input("パスワード", type="password", key="dl_pass")
+                with dl_col2:
+                    # flash にある pcap 一覧を取得するボタン
+                    if st.button("🔍 flash の pcap 一覧を取得", key="list_pcap"):
+                        if dl_user_in and dl_pass_in:
+                            with st.spinner(f"{dl_ip} に SSH 接続中..."):
+                                found = rc_epc.list_flash_pcaps(dl_ip, dl_user_in, dl_pass_in)
+                            if found:
+                                st.session_state[f"flash_pcaps_{dl_ip}"] = found
+                                st.success(f"{len(found)} 件の pcap を検出しました")
+                            else:
+                                st.warning("pcap ファイルが見つかりませんでした（`ip scp server enable` を確認してください）")
+                        else:
+                            st.error("ユーザー名とパスワードを入力してください")
+
+                    # 一覧から選択 or 手動入力
+                    flash_list = st.session_state.get(f"flash_pcaps_{dl_ip}", [])
+                    # EPC イベント履歴からもパスを収集
+                    hist_paths = [e.get("pcap_flash_path","") for e in epc_events if e.get("pcap_flash_path")]
+                    all_options = list(dict.fromkeys(flash_list + hist_paths))  # 重複除去
+
+                    if all_options:
+                        dl_file = st.selectbox("ダウンロードするファイル", all_options, key="dl_file_sel")
+                    else:
+                        dl_file = st.text_input("flash パス（例: flash:/epc_xxx.pcap）", key="dl_file_manual")
+
+                if st.button("⬇ ダウンロードして解析", key="dl_and_analyze", type="primary",
+                             disabled=not (dl_user_in and dl_pass_in and dl_file)):
+                    with st.spinner(f"SCP でダウンロード中: {dl_ip}:{dl_file}"):
+                        pcap_bytes, err = rc_epc.download_pcap_via_scp(
+                            dl_ip, dl_user_in, dl_pass_in, dl_file
+                        )
+                    if pcap_bytes:
+                        st.success(f"✅ ダウンロード完了 ({len(pcap_bytes):,} bytes)")
+                        with st.spinner("pcap を解析中..."):
+                            import pcap_analyzer
+                            pcap_result = pcap_analyzer.analyze_pcap(pcap_bytes)
+                        # 解析結果を表示
+                        st.markdown("#### 📊 pcap 解析結果")
+                        summary = pcap_result.get("summary", {})
+                        sr1, sr2, sr3, sr4 = st.columns(4)
+                        sr1.metric("総パケット数", summary.get("total_packets", 0))
+                        sr2.metric("ICMP Redirect", summary.get("icmp_redirects", 0))
+                        sr3.metric("TCP RST", summary.get("tcp_rst", 0))
+                        sr4.metric("キャプチャ時間", f"{summary.get('duration_sec',0):.1f}s")
+
+                        redirects = pcap_result.get("icmp_redirects", [])
+                        if redirects:
+                            st.markdown(f"**🔀 ICMP Redirect ({len(redirects)} 件)**")
+                            df_rd = pd.DataFrame(redirects)
+                            st.dataframe(df_rd, use_container_width=True, hide_index=True)
+
+                        rip_pkts = pcap_result.get("rip_packets", [])
+                        if rip_pkts:
+                            st.markdown(f"**🗺️ RIP パケット ({len(rip_pkts)} 件)**")
+                            st.dataframe(pd.DataFrame(rip_pkts), use_container_width=True, hide_index=True)
+
+                        arp_issues = pcap_result.get("arp_anomalies", [])
+                        if arp_issues:
+                            st.markdown(f"**⚠️ ARP 異常 ({len(arp_issues)} 件)**")
+                            st.dataframe(pd.DataFrame(arp_issues), use_container_width=True, hide_index=True)
+
+                        # ダウンロードボタン（ローカル保存用）
+                        st.download_button(
+                            "💾 pcap をローカルに保存",
+                            data=pcap_bytes,
+                            file_name=dl_file.split("/")[-1],
+                            mime="application/octet-stream",
+                        )
+                    else:
+                        st.error(f"ダウンロード失敗: {err}")
+
                 with st.expander("💡 IOS-XE 側の事前設定（コピペ用）"):
                     st.code("""conf t
  ip http server
  ip http secure-server
  ip http authentication local
  restconf
+ ip scp server enable
  username admin privilege 15 secret YourPassword
 end""", language="text")
 
