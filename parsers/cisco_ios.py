@@ -45,6 +45,18 @@ def parse(raw: str, source_ip: str) -> dict | None:
     # 重要なニーモニックにタグ追加
     if any(k in mnemonic for k in ["DOWN", "FAIL", "ERR", "DUPLEX", "LOOP"]):
         tags.append("障害候補")
+    # ループ検知（Catalyst LoopDetect / keepalive loopback / err-disable loopback）
+    _mn = mnemonic.upper()
+    _msg_up = (message or "").upper()
+    if ("LOOP_BACK_DETECTED" in _mn or "LOOPDETECT" in _mn
+            or "LOOPBACK" in _mn or "LOOP" in _mn
+            or "LOOP-BACK DETECTED" in _msg_up or "LOOP DETECTED" in _msg_up
+            or ("ERR_DISABLE" in _mn and "LOOP" in _msg_up)):
+        tags.append("ループ検知")
+        if "障害候補" not in tags:
+            tags.append("障害候補")
+    if "ERR_DISABLE" in _mn or "ERRDISABLE" in _mn:
+        tags.append("err-disable")
     if "CONFIG" in mnemonic:
         tags.append("設定変更")
     if "AUTH" in mnemonic or "LOGIN" in mnemonic:

@@ -39,29 +39,37 @@ PRI_SEVERITY = {
     4: "WARNING", 5: "NOTICE", 6: "INFO", 7: "DEBUG",
 }
 
-# SR-S 固有のプロセス（デーモン）名。メッセージ集の実プロセス名に限定。
-# ── 他ベンダーと衝突しにくい固有性の高いもの
+# SR-S 固有のプロセス（デーモン）名。
+# 注意: Si-R(ルーター) と SR-S(L2スイッチ) は同じベース OS でプロセス名の多くを
+#       共有する。そこで「SR-S だけが持つ」プロセス/機能に限定して確定判定する。
+# ── SR-S 排他プロセス（Si-R には存在しない L2 ループ検出デーモン）
 SRS_UNIQUE_PROCS = {
-    "l2loopd", "l2nsm", "mstpd", "sshlogin", "conftryd", "devscand",
-    "nodemanagerd", "nodemgr_infod", "nodemgr_land", "nodemgr_logd",
-    "nodemgr_wland", "aaad", "aaa_radiusd", "dhcp6relay", "dhcp6sd",
-    "mountd", "cmdexec",
+    "l2loopd", "l2nsm", "nodemanagerd", "nodemgr_infod", "nodemgr_land",
+    "nodemgr_logd", "nodemgr_wland",
 }
-# ── SR-S でよく使われるが汎用的な名前（ホスト名 or 固有メッセージと併用で判定）
+# ── SR-S / Si-R 共有プロセス（単独では判定不可。SR-S ホスト名との併用でのみ確定）
 SRS_GENERIC_PROCS = {
-    "protocol", "logon", "telnetd", "sshd", "ftpd", "httpd", "authd",
-    "enabled", "init", "nsm", "dhcpd",
+    "protocol", "logon", "telnetd", "sshd", "sshlogin", "ftpd", "httpd",
+    "authd", "aaad", "aaa_radiusd", "enabled", "init", "nsm", "dhcpd",
+    "mstpd", "conftryd", "devscand", "mountd",
+}
+
+# Si-R 固有（ルーター）プロセス。これらがあれば SR-S ではなく Si-R。
+SIR_EXCLUSIVE_PROCS = {
+    "isakmp", "bgpd", "ospfd", "ospf6d", "ripd", "rip6d", "dvpnsd",
+    "ngnd", "v6plusd", "cmodemctl", "cmodemsd", "proxydns", "dhcpcd",
+    "dhcp6cd", "pimsmd", "icmpwatchd", "track_congestiond", "pppoe",
+    "pkid", "trackd", "musbd", "infoexcd",
 }
 
 # SR-S 機種名・ホスト名キーワード
 SRS_HOST_KEYWORDS = ["sr-s", "srs"]
 
-# SR-S 固有のメッセージ本文シグネチャ（このベンダー特有の言い回し）
+# SR-S 排他のメッセージ本文シグネチャ（Si-R には存在しない言い回しに限定）
+# 注意: STP(topology change/root bridge)・MACテーブルフラッシュは Si-R とも共有するため
+#       検出シグネチャには含めない（それらは SR-S ホスト名 or l2loopd と併用で判定）。
 SRS_MSG_SIGNATURES = [
-    "configuration testing protocol",       # ループ検出(CTP)
-    "mac learning entry moved",             # MACテーブルフラッシュ
-    "became new root bridge",               # STP
-    "topology change detected",             # STP
+    "configuration testing protocol",       # ループ検出(CTP) — SR-S 専用
 ]
 
 # syslog ヘッダ + "<process>: <message>" を分解
@@ -97,20 +105,22 @@ def _is_srs(raw: str) -> bool:
     # 他ベンダーとの明示的な衝突回避
     if "ipcom" in raw_lower or "ipf[" in raw_lower:
         return False
-    # 1) SR-S 固有メッセージシグネチャがあれば確定
+    # Si-R 固有ルータープロセスがあれば SR-S ではない（Si-R に譲る）
+    proc_m = re.search(r"(?:^|\s)([a-z][\w\-]*?):\s", raw_lower)
+    proc = proc_m.group(1) if proc_m else ""
+    if proc in SIR_EXCLUSIVE_PROCS:
+        return False
+    # 1) SR-S 固有メッセージシグネチャ（ループ検出 CTP）があれば確定
     for sig in SRS_MSG_SIGNATURES:
         if sig in raw_lower:
             return True
-    # 2) SR-S 固有プロセス名（process:）があれば確定
-    for proc in SRS_UNIQUE_PROCS:
-        if re.search(rf"(?:^|\s){re.escape(proc)}:\s", raw_lower):
-            return True
-    # 3) 汎用プロセス名は、SR-S ホスト名キーワードと併用の場合のみ確定
+    # 2) SR-S 排他プロセス名（l2loopd 等）があれば確定
+    if proc in SRS_UNIQUE_PROCS:
+        return True
+    # 3) 共有プロセス名は、SR-S ホスト名キーワードと併用の場合のみ確定
     has_host_kw = any(k in raw_lower for k in SRS_HOST_KEYWORDS)
-    if has_host_kw:
-        for proc in SRS_GENERIC_PROCS:
-            if re.search(rf"(?:^|\s){re.escape(proc)}:\s", raw_lower):
-                return True
+    if has_host_kw and proc in SRS_GENERIC_PROCS:
+        return True
     return False
 
 

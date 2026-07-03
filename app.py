@@ -353,12 +353,15 @@ TEST_LOGS = {
         ("<131>2024 Jun 30 10:01:00 JST nexus01 %VPC-3-VPC_PEER_KEEP_ALIVE_RECV_FAIL: In domain 10, vPC peer keep-alive receive has failed", "192.168.1.2"),
     ],
     "富士通 Si-R": [
-        ("<22>Jun 30 10:00:00 SiR-G120 siRd[123]: INFO PPP line up (BRI0) remote=203.0.113.1", "192.168.1.3"),
-        ("<19>Jun 30 10:01:00 SiR-G120 siRd[123]: ERR PPP line down (BRI0) reason=LCP timeout", "192.168.1.3"),
-        ("<22>Jun 30 10:02:00 SiR-G120 ospfd[456]: INFO OSPF neighbor 10.1.1.2 state changed to Full", "192.168.1.3"),
-        ("<165>Jun 30 10:03:00 SiRbx001 iked[100]: INFO IKE SA established peer=203.0.113.5 tunnel=vpn0", "192.168.1.3"),
-        ("<163>Jun 30 10:04:00 SiRbx001 bgpd[200]: ERR BGP neighbor 10.0.0.1 Down Hold Timer Expired", "192.168.1.3"),
-        ("<165>Jun 30 10:05:00 SiR-G200 sshd[500]: WARN Failed password for admin from 203.0.113.100 port 52341", "192.168.1.3"),
+        # Si-R G12x/G21x メッセージ集の実メッセージ形式に準拠
+        ("<22>Jun 30 10:00:00 SiR-G210 protocol: ether 1 1 link up", "192.168.1.3"),
+        ("<19>Jun 30 10:01:00 SiR-G210 protocol: ether 1 3 link down", "192.168.1.3"),
+        ("<22>Jun 30 10:02:00 SiR-G210 protocol: [line0] ch1 disconnected by peer", "192.168.1.3"),
+        ("<163>Jun 30 10:03:00 SiR-G210 isakmp: DPD watching host is down. [203.0.113.1]", "192.168.1.3"),
+        ("<163>Jun 30 10:04:00 SiR-G210 bgpd: 10.0.0.1 recv NOTIFICATION 6/2 (Cease/Administrative Shutdown)", "192.168.1.3"),
+        ("<163>Jun 30 10:05:00 SiR-G210 nsm: vrrp master router down detection. lan0 vrid1 [192.168.1.1] #3", "192.168.1.3"),
+        ("<165>Jun 30 10:06:00 SiR-G210 cmodemctl: [WWAN1] PIN code error. modem0 (PUK required)", "192.168.1.3"),
+        ("<165>Jun 30 10:07:00 SiR-G210 sshlogin: failed login admin on ssh 1 from 203.0.113.100", "192.168.1.3"),
     ],
     "富士通 IPCOM": [
         ("<165>Jun 30 10:00:00 ipcom-ex01 ipf[1234]: [DENY] TCP 192.168.100.50:54321->10.0.0.1:22", "192.168.1.7"),
