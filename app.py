@@ -736,6 +736,7 @@ def _llm_analyze_show_log(logs: list, mode: str,
     """
     import json as _json
     lines = []
+    vendors_present = set()
     for lg in logs[:200]:
         tags = lg.get("tags")
         if isinstance(tags, str):
@@ -745,9 +746,31 @@ def _llm_analyze_show_log(logs: list, mode: str,
                 tags = []
         tagstr = ",".join(t for t in (tags or [])
                           if not t.startswith(("src:", "loop_port", "from:", "to:", "mac:")))
-        lines.append(f"[{lg.get('severity','INFO')}] {lg.get('vendor','')} "
+        v = lg.get("vendor", "")
+        if v:
+            vendors_present.add(v)
+        lines.append(f"[{lg.get('severity','INFO')}] {v} "
                      f"{lg.get('message','')}  <{tagstr}>")
     ctx = "\n".join(lines) if lines else "(ログなし)"
+
+    # ベンダー別の重点確認事項（検出されたベンダーのみ追加）
+    _vendor_checks = []
+    if any("F5" in v or "BIG-IP" in v for v in vendors_present):
+        _vendor_checks.append(
+            "・F5 BIG-IP: プールメンバーの監視状態(down/available)と可用数、仮想サーバの状態、"
+            "HA(冗長化)の同期状況(In Sync/Not In Sync)とActive/Standby、SSL証明書の有効期限、"
+            "TMMメモリ/CPU使用率、コネクション数の急増を重点的に確認する。")
+    if any("Palo Alto" in v for v in vendors_present):
+        _vendor_checks.append(
+            "・Palo Alto: 脅威(THREAT)ログのseverityとaction(drop/reset=防御成功、alertのみ=通過中で要確認)、"
+            "HA状態(suspended/non-functional/sync)、ライセンス/サブスクリプション期限、"
+            "セッション使用率、GlobalProtect接続状況、ポリシーでの拒否/許可傾向を重点的に確認する。")
+    if any("Cisco" in v for v in vendors_present):
+        _vendor_checks.append(
+            "・Cisco: インターフェースのリンク状態とエラーカウンタ、STP(トポロジ変更/ループ検知/BPDU異常)、"
+            "OSPF/BGP/HSRP/VRRP等の隣接・冗長状態、CPU/メモリ使用率、ライセンスレベル、"
+            "セキュリティ(ACL拒否ログ/認証失敗/ポートセキュリティ違反/err-disable)を重点的に確認する。")
+    vendor_check_block = ("\n" + "\n".join(_vendor_checks) + "\n") if _vendor_checks else ""
 
     # 長すぎる config / interface は切り詰め（トークン節約）
     def _clip(s, n):
@@ -770,6 +793,8 @@ def _llm_analyze_show_log(logs: list, mode: str,
         "   ・%PNP-* は未設定機のゼロタッチ(PnP)動作。PnPサーバ不在時の alarm は想定内\n"
         "   ・'administratively down' は shutdown 設定によるもので障害ではない\n"
         "   ・notconnect はケーブル未接続、'Not Present' は SFP等モジュール未実装\n"
+        "   ・F5: 'monitor status up' への遷移は正常復旧。意図したメンテナンス中のmemberダウンは想定内\n"
+        "   ・Palo Alto: action=allow のTRAFFICログは正常通信。THREATでaction=dropは防御成功（障害ではない）\n"
     )
     user = (
         "同一機器の以下の出力を突き合わせて解析してください。次の構成で回答します。\n\n"
@@ -786,9 +811,11 @@ def _llm_analyze_show_log(logs: list, mode: str,
         "8. 【エラー/破棄/インターフェース品質】入出力エラー・破棄・デュプレックス不一致・CRC等\n"
         "9. 【設定・運用上の問題】未設定・セキュリティ・ライセンス・冗長性など（該当箇所を引用）\n"
         "10.【ログと設定の相関】ログの事象を設定/状態で説明できるか（例: Vlan down ↔ interface Vlan1 shutdown）\n"
-        "11.【推奨アクション】優先度順に、実行コマンド（show系の追加確認コマンド含む）付きで\n\n"
+        "11.【推奨アクション】優先度順に、実行コマンド（show系の追加確認コマンド含む）付きで\n"
+        f"{vendor_check_block}"
         "※各項目、提供データに該当が無ければ『該当データなし』と明記し、想像で埋めないこと。\n"
-        "※show ip route / show processes cpu / show interfaces counters 等が貼られていれば併せて解析すること。\n\n"
+        "※show ip route / show processes cpu / show interfaces counters / "
+        "tmsh show ltm pool / show high-availability state 等が貼られていれば併せて解析すること。\n\n"
         f"────── show logging（解析済み {len(lines)}件）──────\n{ctx}\n\n"
         f"────── show running-config ──────\n{cfg if cfg else '(未提供)'}\n\n"
         f"────── show interface status ──────\n{intf if intf else '(未提供)'}\n\n"

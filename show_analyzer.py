@@ -13,11 +13,19 @@ LLM 解析（analyzer.ask_llm）を併用する。
 """
 import re
 
-# コマンドプロンプト + show コマンドのエコー行
-#   例: "Switch#show logging" / "Router>show run" / "SW1#sh int status"
-_PROMPT_CMD_RE = re.compile(r"^\s*([\w\-\.]+)\s*[#>]\s*(sh(?:ow)?\b.*)$", re.IGNORECASE)
-# 単なるプロンプト行（例 "Switch#"）
-_BARE_PROMPT_RE = re.compile(r"^\s*[\w\-\.]+\s*[#>]\s*$")
+# コマンドプロンプト + show/tmsh/request コマンドのエコー行
+#   Cisco:     "Switch#show logging" / "Router>show run"
+#   F5 tmsh:   "[root@bigip1:Active:In Sync] ~ # tmsh show sys hardware"
+#              "bigip1(cfg-sync Standalone)(Active)(tmos)# show ltm pool"
+#   Palo Alto: "admin@PA-FW> show system info" / "admin@PA-FW# show high-availability state"
+# 先頭のホスト名/プロンプト装飾は問わず、行内で最初に現れる # / > / $ の直後にある
+# show系コマンドだけを拾う（グループ1にコマンド本体）。
+_PROMPT_CMD_RE = re.compile(
+    r"^.*?[#>$]\s*((?:tmsh\s+)?(?:sh(?:ow)?|request\s+\S+|debug)\b.*)$",
+    re.IGNORECASE)
+# 単なるプロンプト行（例 "Switch#" / "admin@PA-FW>" / "[root@bigip1:Active:In Sync] ~ #"）
+# 行全体が「何らかのプロンプト装飾 + 末尾のプロンプト記号」だけで構成される場合にマッチ。
+_BARE_PROMPT_RE = re.compile(r"^.*[#>$]\s*$")
 
 
 def _classify_command(cmd: str) -> str:
@@ -25,6 +33,26 @@ def _classify_command(cmd: str) -> str:
     c = cmd.lower()
     if re.search(r"\blogg", c):
         return "logging"
+    # ── F5 BIG-IP 固有 ──
+    if re.search(r"\bltm\s+pool\b|\bpool\b.*\bmember", c):
+        return "f5_pool"
+    if re.search(r"\bltm\s+virtual\b", c):
+        return "f5_virtual"
+    if re.search(r"sys\s+license|\blicense\b", c) and "ltm" not in c:
+        return "license"
+    if re.search(r"ssl-cert|certificate|\bcert\b", c):
+        return "cert"
+    # ── HA/冗長状態（F5・Palo Alto 共通） ──
+    if re.search(r"high-availability|ha-status|failover|\bha\b", c):
+        return "ha_status"
+    # ── Palo Alto 固有 ──
+    if re.search(r"session\s+(info|all)", c):
+        return "panos_session"
+    if re.search(r"\bthreat\b|wildfire", c):
+        return "panos_threat"
+    if re.search(r"system\s+info|system\s+state|system\s+resources", c):
+        return "system_info"
+    # ── 汎用 ──
     if re.search(r"\brun|\bstart|\bconfig", c):
         return "config"
     if re.search(r"\bint\w*\s+status|\binterface.*status", c):
@@ -57,7 +85,7 @@ def split_sections(text: str) -> list[dict]:
             # 新しい show セクション開始
             if cur:
                 sections.append(cur)
-            cmd = m.group(2).strip()
+            cmd = m.group(1).strip()
             cur = {"cmd": cmd, "kind": _classify_command(cmd), "body": []}
             continue
         if _BARE_PROMPT_RE.match(line):
@@ -209,6 +237,93 @@ def _check_license(sections_text: str, anoms: list):
                     "不要なら (config)# license boot level ipbase で警告解消")
 
 
+# ── F5 BIG-IP 固有チェック ───────────────────────────────────────
+def _check_f5_pool(body: str, anoms: list):
+    """tmsh show/list ltm pool の出力からプール/メンバー異常を検出。"""
+    if not body:
+        return
+    low = body.lower()
+    # プール全体が利用不可
+    if re.search(r"available\s*:\s*none|0\s+of\s+\d+\s+members? available|no members available", low):
+        _add(anoms, "ERROR", "プール", "利用可能なプールメンバーが0（サービス停止の可能性）",
+             "available: none / 0 of N members available",
+             remedy="実サーバとヘルスモニターを確認: tmsh show ltm pool <pool> members detail、"
+                    "実サーバ側のサービス稼働状況を確認")
+    # メンバー単位のdown検出（行単位）
+    down_members = []
+    for l in body.splitlines():
+        ll = l.lower()
+        if re.search(r"\bstate\b.*\bdown\b|monitor.*down|session.*disabled", ll) and "member" not in ll:
+            down_members.append(l.strip())
+    if down_members:
+        _add(anoms, "WARNING", "プールメンバー", f"監視ダウン中のメンバーあり（{len(down_members)}件）",
+             down_members[0][:150],
+             remedy="tmsh show ltm pool <pool> members detail でヘルスチェック失敗理由を確認")
+
+
+def _check_f5_ha(body: str, anoms: list):
+    """F5 HA / 冗長構成の異常を検出（show ha-status 等）。"""
+    if not body:
+        return
+    low = body.lower()
+    if "standby" in low and "active" not in low:
+        _add(anoms, "NOTICE", "冗長化(HA)", "本機はStandby状態（正常なペア構成の可能性、Activeと併せて確認）",
+             "standby", remedy="ペア相手がActiveであることを確認: tmsh show sys ha-status")
+    if re.search(r"not\s+in\s+sync|out\s+of\s+sync|config\s+sync.*fail", low):
+        _add(anoms, "WARNING", "冗長化(HA)", "構成同期が取れていない（Not In Sync）",
+             "not in sync / config sync fail",
+             remedy="config sync を実行: tmsh run cm config-sync to-group <device-group> "
+                    "→ 差分原因を tmsh show cm sync-status で確認")
+    if re.search(r"failover.*(fail|error)|ha.*(disabled|fault)", low):
+        _add(anoms, "ERROR", "冗長化(HA)", "フェイルオーバー機構に異常（無効化/フォルト状態）",
+             "failover fail / ha fault",
+             remedy="ネットワークフェイルオーバー/HAグループ設定を確認: tmsh show sys ha-status detail")
+
+
+# ── Palo Alto (PAN-OS) 固有チェック ─────────────────────────────
+def _check_panos_ha(body: str, anoms: list):
+    """show high-availability state の異常を検出。"""
+    if not body:
+        return
+    low = body.lower()
+    if re.search(r"\bsuspended\b|non-functional|\bfault\b", low):
+        _add(anoms, "ERROR", "冗長化(HA)", "HAがsuspended/non-functional状態（保護されていない可能性）",
+             "suspended / non-functional",
+             remedy="HAステータス詳細を確認: show high-availability state → "
+                    "ハートビート/リンク監視/パスモニタの状態を確認")
+    if re.search(r"not\s+sync|synchronization.*fail", low):
+        _add(anoms, "WARNING", "冗長化(HA)", "HAペア間の設定同期が失敗", "not sync / synchronization fail",
+             remedy="設定を手動同期: > request high-availability sync-to-remote running-config")
+
+
+def _check_panos_license(body: str, anoms: list):
+    if not body:
+        return
+    low = body.lower()
+    if re.search(r"expired|expire[sd]?\s*:\s*yes", low):
+        _add(anoms, "WARNING", "ライセンス", "ライセンス/サブスクリプションが期限切れ",
+             "expired",
+             remedy="ライセンス状態を確認: > request license info、"
+                    "脅威防御/URLフィルタ等の更新が止まっていないか確認")
+
+
+def _check_panos_threat(body: str, anoms: list):
+    """show session info 等から高負荷/脅威傾向を検出。"""
+    if not body:
+        return
+    m = re.search(r"num-active\s*[:=]\s*(\d+)", body, re.IGNORECASE)
+    m2 = re.search(r"(?:num-max|session.*max)\s*[:=]\s*(\d+)", body, re.IGNORECASE)
+    if m and m2:
+        try:
+            active, maxs = int(m.group(1)), int(m2.group(1))
+            if maxs > 0 and active / maxs >= 0.9:
+                _add(anoms, "WARNING", "セッション", f"セッション使用率が高い（{active}/{maxs} ≈ {active/maxs*100:.0f}%）",
+                     f"num-active={active} num-max={maxs}",
+                     remedy="セッション上限の見直し、または不要なセッションタイムアウト短縮を検討")
+        except (ValueError, ZeroDivisionError):
+            pass
+
+
 def check_anomalies(sections: list) -> dict:
     """
     セクション群から異常性をチェック。
@@ -241,8 +356,22 @@ def check_anomalies(sections: list) -> dict:
             _check_intf_brief(s["body"], anoms)
         elif s["kind"] == "version":
             version_body = s["body"]
+        elif s["kind"] == "f5_pool":
+            _check_f5_pool(s["body"], anoms)
+            extra_parts.append(f"[F5 プール/メンバー状態: {s.get('cmd','')}]\n{s['body']}")
+        elif s["kind"] == "ha_status":
+            _check_f5_ha(s["body"], anoms)
+            _check_panos_ha(s["body"], anoms)
+            extra_parts.append(f"[HA/冗長状態: {s.get('cmd','')}]\n{s['body']}")
+        elif s["kind"] == "license":
+            _check_panos_license(s["body"], anoms)
+            extra_parts.append(f"[ライセンス情報: {s.get('cmd','')}]\n{s['body']}")
+        elif s["kind"] == "panos_session":
+            _check_panos_threat(s["body"], anoms)
+            extra_parts.append(f"[Palo Alto セッション状況: {s.get('cmd','')}]\n{s['body']}")
         else:
-            # interfaces / cpu / cdp / other 等は LLM 相関解析へ回す
+            # interfaces / cpu / cdp / f5_virtual / cert / panos_threat / system_info / other
+            # 等は専用チェックが無いため LLM 相関解析へ回す
             _hdr = _kind_ja.get(s["kind"], s.get("cmd", s["kind"]))
             extra_parts.append(f"[{_hdr}]\n{s['body']}")
 
