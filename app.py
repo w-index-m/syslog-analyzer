@@ -15,6 +15,53 @@ import vendor_recommendations as vendor_rec
 from parsers import parse_syslog
 
 # ─────────────────────────────────────────
+# ユーザー設定の永続化（APIキー・モデル等をローカル保存）
+#   git pull やアプリ再起動をしても再入力不要にする。
+#   保存先: リポジトリ直下 user_settings.json（.gitignore 済み・コミットされない）
+# ─────────────────────────────────────────
+import os as _os
+_SETTINGS_PATH = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "user_settings.json")
+
+def _load_user_settings():
+    try:
+        with open(_SETTINGS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_user_settings(data: dict):
+    try:
+        cur = _load_user_settings()
+        cur.update({k: v for k, v in data.items() if v is not None})
+        with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(cur, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"[settings] save error: {e}")
+        return False
+
+def _apply_saved_settings_once():
+    """起動時に一度だけ、保存済み設定を analyzer / os.environ に反映する。"""
+    if st.session_state.get("_settings_loaded"):
+        return
+    st.session_state["_settings_loaded"] = True
+    s = _load_user_settings()
+    if s.get("GEMINI_API_KEY"):
+        _os.environ["GEMINI_API_KEY"] = s["GEMINI_API_KEY"]
+        analyzer.GEMINI_API_KEY = s["GEMINI_API_KEY"]
+    if s.get("GROQ_API_KEY"):
+        _os.environ["GROQ_API_KEY"] = s["GROQ_API_KEY"]
+        analyzer.GROQ_API_KEY = s["GROQ_API_KEY"]
+    if s.get("ANTHROPIC_API_KEY"):
+        _os.environ["ANTHROPIC_API_KEY"] = s["ANTHROPIC_API_KEY"]
+        analyzer.ANTHROPIC_API_KEY = s["ANTHROPIC_API_KEY"]
+    if s.get("OLLAMA_MODEL"):
+        _os.environ["OLLAMA_MODEL"] = s["OLLAMA_MODEL"]
+        analyzer.OLLAMA_MODEL = s["OLLAMA_MODEL"]
+    if s.get("llm_mode"):
+        st.session_state["llm_mode"] = s["llm_mode"]
+
+# ─────────────────────────────────────────
 # ページ設定
 # ─────────────────────────────────────────
 st.set_page_config(
@@ -104,6 +151,8 @@ if "judge_enabled" not in st.session_state:
     st.session_state.judge_enabled = False
 if "llm_mode" not in st.session_state:
     st.session_state.llm_mode = "auto"
+# 保存済みのAPIキー・モデル・モードを起動時に一度だけ反映（再入力不要にする）
+_apply_saved_settings_once()
 if "syslog_port" not in st.session_state:
     st.session_state.syslog_port = 5140
 if "snmp_trap_port" not in st.session_state:
@@ -266,24 +315,40 @@ with st.sidebar:
         _rk = st.text_input("Groq API Key", type="password",
                              value=os.environ.get("GROQ_API_KEY",""),
                              help="console.groq.com で無料取得")
-        if st.button("適用", key="apply_api_keys"):
+        _c_apply, _c_clear = st.columns(2)
+        if _c_apply.button("適用して保存", key="apply_api_keys", use_container_width=True):
             if _gk:
                 os.environ["GEMINI_API_KEY"] = _gk
                 analyzer.GEMINI_API_KEY = _gk
             if _rk:
                 os.environ["GROQ_API_KEY"] = _rk
                 analyzer.GROQ_API_KEY = _rk
-            st.success("APIキーを更新しました")
+            # ローカルに保存（次回起動・git pull後も再入力不要）
+            _save_user_settings({"GEMINI_API_KEY": _gk or None, "GROQ_API_KEY": _rk or None})
+            st.success("APIキーを保存しました（次回以降は自動で読み込まれます）")
             st.rerun()
+        if _c_clear.button("保存キーを削除", key="clear_api_keys", use_container_width=True):
+            _save_user_settings({"GEMINI_API_KEY": "", "GROQ_API_KEY": ""})
+            os.environ.pop("GEMINI_API_KEY", None); analyzer.GEMINI_API_KEY = ""
+            os.environ.pop("GROQ_API_KEY", None);   analyzer.GROQ_API_KEY = ""
+            st.info("保存したキーを削除しました")
+            st.rerun()
+        st.caption("💾 保存先: user_settings.json（この端末内のみ・gitには含まれません）")
 
-    llm_mode = st.selectbox("解析モード", [
+    _mode_opts = [
         ("auto",   "🔄 自動 (Claude→Gemini→Groq→Ollama)"),
         ("gemini", "✨ Gemini（無料枠あり）"),
         ("groq",   "⚡ Groq（無料枠あり・高速）"),
         ("claude", "☁️  Claude APIのみ"),
         ("ollama", "🏠 Ollamaのみ（完全ローカル）"),
         ("none",   "⛔ AI解析なし（高速）"),
-    ], format_func=lambda x: x[1], index=0)
+    ]
+    _saved_mode = st.session_state.get("llm_mode", "auto")
+    _mode_idx = next((i for i, o in enumerate(_mode_opts) if o[0] == _saved_mode), 0)
+    llm_mode = st.selectbox("解析モード", _mode_opts,
+                            format_func=lambda x: x[1], index=_mode_idx)
+    if llm_mode[0] != st.session_state.get("llm_mode"):
+        _save_user_settings({"llm_mode": llm_mode[0]})  # 選んだモードを記憶
     st.session_state.llm_mode = llm_mode[0]
 
     if ollama_ok:
@@ -302,6 +367,7 @@ with st.sidebar:
         if _sel_model and _sel_model != analyzer.OLLAMA_MODEL:
             analyzer.OLLAMA_MODEL = _sel_model
             os.environ["OLLAMA_MODEL"] = _sel_model
+            _save_user_settings({"OLLAMA_MODEL": _sel_model})  # モデル選択を記憶
         st.caption(f"使用モデル: **{analyzer.OLLAMA_MODEL}**"
                    + ("" if _installed else "（未導入なら下でモデルを取得してください）"))
 
@@ -1375,6 +1441,23 @@ with tab_showlog:
 
     # ── 🤖 LLM による詳細解析（config / interface status 相関） ──
     st.markdown("### 🤖 LLM 詳細解析（設定・ポート状態と相関）")
+    # 使用エンジンの状態を明示（使えるか一目で分かるように）
+    _mode_now2 = st.session_state.get("llm_mode", "auto")
+    _eng_ok, _eng_name = analyzer.active_llm_engine(_mode_now2)
+    if _eng_ok:
+        st.markdown(
+            f"<div style='display:inline-block;background:#ecfdf3;border:1px solid #16a34a;"
+            f"border-radius:12px;padding:2px 12px;color:#166534;font-size:13px;'>"
+            f"🟢 LLM 使用可能: <b>{_eng_name}</b></div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"<div style='display:inline-block;background:#fef2f2;border:1px solid #dc2626;"
+            f"border-radius:12px;padding:2px 12px;color:#991b1b;font-size:13px;'>"
+            f"🔴 LLM 使用不可: <b>{_eng_name}</b>（下の案内を参照）</div>",
+            unsafe_allow_html=True,
+        )
     _has_cfg = bool(st.session_state.get("showlog_cfg", "").strip())
     _has_intf = bool(st.session_state.get("showlog_intf", "").strip())
     _ctx_parts = []

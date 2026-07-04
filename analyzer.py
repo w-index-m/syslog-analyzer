@@ -139,6 +139,33 @@ def start_ollama(wait_sec: int = 8) -> tuple[bool, str]:
             return True, "Ollama を起動しました。"
     return False, "Ollama を起動しましたが応答待ちがタイムアウトしました。数秒後に再読み込みしてください。"
 
+def active_llm_engine(mode: str = "auto") -> tuple[bool, str]:
+    """
+    指定モードで実際に使えるLLMエンジンを返す。
+    戻り値: (使用可能か, 表示名)  例: (True, "Ollama (gemma3:latest)")
+    """
+    def _ollama_label():
+        return f"Ollama ({OLLAMA_MODEL})"
+    avail = {
+        "claude": (check_claude_available, "Claude API"),
+        "gemini": (check_gemini_available, f"Gemini ({GEMINI_MODEL})"),
+        "groq":   (check_groq_available,   f"Groq ({GROQ_MODEL})"),
+        "ollama": (check_ollama_available, _ollama_label()),
+    }
+    if mode == "none":
+        return False, "AI解析なし"
+    if mode in avail:
+        chk, label = avail[mode]
+        label = label() if callable(label) else label
+        return (chk(), label)
+    # auto: 優先順に最初に使えるもの
+    for key in ("claude", "gemini", "groq", "ollama"):
+        chk, label = avail[key]
+        if chk():
+            return True, f"{label}（自動選択）"
+    return False, "利用可能なエンジンなし"
+
+
 def list_ollama_models() -> list:
     """Ollama に導入済みのモデル名一覧を返す（未起動時は空）。"""
     try:
