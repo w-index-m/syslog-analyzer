@@ -1396,10 +1396,53 @@ with tab_showlog:
         "**ログ解析＋設定・ポート状態の異常性チェック**を行います。"
     )
 
+    # ── ファイルをドラッグ＆ドロップでも解析可能に ─────────────
+    # .pcap/.pcapng/.cap は自動でパケット解析タブへ誘導、
+    # syslog/txt/log/cfg/conf はテキストとして読み込みここで解析する。
+    _up_file = st.file_uploader(
+        "📎 ファイルをドラッグ＆ドロップ（syslog/show出力のテキスト、または pcap/pcapng）",
+        type=["txt", "log", "cfg", "conf", "syslog", "pcap", "pcapng", "cap"],
+        key="show_log_file_upload",
+        help="テキストファイルはそのまま下の欄に読み込みます。pcap系は自動でパケット解析します。",
+    )
+    if _up_file is not None:
+        _up_name = _up_file.name.lower()
+        _up_bytes = _up_file.getvalue()
+        if _up_name.endswith((".pcap", ".pcapng", ".cap")):
+            # pcap系はここでそのまま解析（パケット解析タブと同じエンジン）
+            st.info(f"📦 pcapファイルを検出しました: {_up_file.name}（{len(_up_bytes):,} bytes）")
+            if st.button("📦 このpcapを解析する", key="show_log_pcap_analyze"):
+                import pcap_analyzer as _pa_up
+                with st.spinner("pcap を解析中…"):
+                    _pcap_res = _pa_up.analyze_pcap(_up_bytes)
+                st.session_state["_showlog_pcap_result"] = _pcap_res
+                st.session_state["_showlog_pcap_name"] = _up_file.name
+            _pres = st.session_state.get("_showlog_pcap_result")
+            if _pres and st.session_state.get("_showlog_pcap_name") == _up_file.name:
+                st.success(f"✅ 解析完了: 総パケット数 {_pres.get('total_packets', 0)}")
+                _pc1, _pc2, _pc3, _pc4 = st.columns(4)
+                _pc1.metric("ICMP Redirect", len(_pres.get("icmp_redirects", [])))
+                _pc2.metric("TCP問題", len(_pres.get("tcp_issues", [])))
+                _pc3.metric("VoIPストリーム", len(_pres.get("voip_streams", [])))
+                _pc4.metric("DNS異常", len(_pres.get("dns_issues", [])))
+                st.caption("詳細な内訳は「📦 パケット解析」タブと同じデータです。"
+                           "そちらのタブでも同じファイルをアップロードすると全項目を確認できます。")
+        else:
+            # テキスト系はそのまま下の貼り付け欄に読み込む
+            try:
+                _up_text = _up_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                _up_text = _up_bytes.decode("shift_jis", errors="replace")
+            if st.session_state.get("_showlog_last_upload") != _up_file.name:
+                st.session_state["show_log_text_tab"] = _up_text
+                st.session_state["_showlog_last_upload"] = _up_file.name
+                st.success(f"📄 {_up_file.name} を読み込みました（下の欄に反映済み）")
+                st.rerun()
+
     _sc1, _sc2 = st.columns([3, 1])
     with _sc1:
         _sl_text_tab = st.text_area(
-            "ここに show 系コマンドの出力をまとめて貼り付け",
+            "ここに show 系コマンドの出力をまとめて貼り付け（またはファイルをドラッグ）",
             height=340, key="show_log_text_tab",
             placeholder=(
                 "Switch#show logging\n"
