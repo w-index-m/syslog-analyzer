@@ -492,7 +492,8 @@ with st.sidebar:
     st.markdown("### 🧪 テストログ投入")
     test_vendor = st.selectbox("ベンダー", [
         "Cisco IOS/IOS-XE", "Cisco NX-OS", "富士通 Si-R",
-        "富士通 IPCOM", "富士通 SR-S", "APRESIA", "RHEL/Linux", "Windows"
+        "富士通 IPCOM", "富士通 SR-S", "F5 BIG-IP LTM", "Palo Alto",
+        "APRESIA", "RHEL/Linux", "Windows"
     ])
     if st.button("📨 テストログ送信", use_container_width=True):
         _inject_test_log(test_vendor)
@@ -530,7 +531,7 @@ with st.sidebar:
         st.success("クリアしました")
 
     st.markdown("---")
-    st.caption("v1.0 | Cisco/NX-OS/Si-R/IPCOM/SR-S/APRESIA/RHEL/Windows対応")
+    st.caption("v1.0 | Cisco/NX-OS/Si-R/IPCOM/SR-S/F5 BIG-IP/PaloAlto/APRESIA/RHEL/Windows対応")
 
 # ─────────────────────────────────────────
 # テストログ定義
@@ -570,6 +571,22 @@ TEST_LOGS = {
         ("<134>Jun 30 10:03:00 sw-srs01 mstpd: Topology Change detected", "192.168.1.8"),
         ("<134>Jun 30 10:04:00 sw-srs01 protocol: MAC learning entry moved from ether 1 to ether 2 [00:11:22:33:44:55 vid=10]", "192.168.1.8"),
         ("<134>Jun 30 10:05:00 sw-srs01 telnetd: failed login guest on telnet from 192.168.1.100", "192.168.1.8"),
+    ],
+    "F5 BIG-IP LTM": [
+        ("<133>Jun 30 10:00:00 bigip1 tmm[1234]: 01010028:4: Pool /Common/web_pool member /Common/10.0.0.11:80 monitor status down.", "192.168.1.20"),
+        ("<134>Jun 30 10:01:00 bigip1 tmm1[1234]: 01010221:5: Pool /Common/web_pool member /Common/10.0.0.11:80 monitor status up.", "192.168.1.20"),
+        ("<131>Jun 30 10:02:00 bigip1 tmm[1234]: 01010025:3: Pool /Common/web_pool now has no members available.", "192.168.1.20"),
+        ("<134>Jun 30 10:03:00 bigip1 tmm[1234]: 01340011:5: HA process failover: going standby.", "192.168.1.20"),
+        ("<133>Jun 30 10:04:00 bigip1 tmm[1234]: 01260009:4: SSL handshake failed / certificate expired for virtual /Common/vs_https.", "192.168.1.20"),
+        ("<131>Jun 30 10:05:00 bigip1 mcpd[1000]: 010719xx:3: Configuration sync failed: device group mismatch.", "192.168.1.20"),
+    ],
+    "Palo Alto": [
+        ("<14>Jun 30 10:00:00 PA-FW01 1,2026/06/30 10:00:00,001801000001,THREAT,vulnerability,2049,2026/06/30 10:00:00,203.0.113.9,10.0.0.5,,,allow-web,,,web-browsing,vsys1,untrust,trust,ae1,ae2,log-forward,,critical,,drop,,SQL Injection Attempt", "192.168.1.30"),
+        ("<14>Jun 30 10:01:00 PA-FW01 1,2026/06/30 10:01:00,001801000001,TRAFFIC,end,2049,,,10.0.0.5,203.0.113.1,,,allow-web,,,ssl,vsys1,trust,untrust,,,,allow", "192.168.1.30"),
+        ("<14>Jun 30 10:02:00 PA-FW01 1,2026/06/30 10:02:00,001801000001,TRAFFIC,deny,2049,,,10.0.0.9,8.8.8.8,,,block-dns,,,dns,vsys1,trust,untrust,,,,deny", "192.168.1.30"),
+        ("<14>Jun 30 10:03:00 PA-FW01 1,2026/06/30 10:03:00,001801000001,SYSTEM,general,0,,,,,,,high,HA1 link down, peer suspended", "192.168.1.30"),
+        ("<14>Jun 30 10:04:00 PA-FW01 1,2026/06/30 10:04:00,001801000001,CONFIG,0,0,,,,admin,commit,committed,succeeded", "192.168.1.30"),
+        ("<14>Jun 30 10:05:00 PA-FW01 1,2026/06/30 10:05:00,001801000001,SYSTEM,general,0,,,,,,,medium,Threat Prevention license expired", "192.168.1.30"),
     ],
     "APRESIA": [
         ("<131>Jun 30 10:00:00 apresia01 LINK_DOWN: Port 1/0/3 link down", "192.168.1.4"),
@@ -1012,6 +1029,7 @@ with tab1:
     with col1:
         f_vendor = st.selectbox("ベンダー", ["すべて", "Cisco IOS/IOS-XE", "Cisco NX-OS",
                                               "富士通 Si-R", "富士通 IPCOM", "富士通 SR-S",
+                                              "F5 BIG-IP LTM", "Palo Alto",
                                               "APRESIA ApresiaLight",
                                               "RHEL/Linux", "Windows", "Generic/不明"])
     with col2:

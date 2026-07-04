@@ -1,4 +1,5 @@
-from parsers import cisco_ios, cisco_nxos, fujitsu_sir, fujitsu_ipcom, fujitsu_srs, apresia, rhel, windows
+from parsers import (cisco_ios, cisco_nxos, fujitsu_sir, fujitsu_ipcom, fujitsu_srs,
+                     f5_bigip, paloalto, apresia, rhel, windows)
 import re
 
 SEVERITY_MAP = {
@@ -14,6 +15,8 @@ PARSERS = [
     ("富士通 IPCOM",      fujitsu_ipcom),  # IPCOM を Si-R より先に（共通プロセス名の衝突を回避）
     ("富士通 SR-S",       fujitsu_srs),    # SR-S 固有プロセス(l2loopd/mstpd/protocol)で判定
     ("富士通 Si-R",       fujitsu_sir),
+    ("Palo Alto",        paloalto),       # CSV+Type(TRAFFIC/THREAT等)で確定判定
+    ("F5 BIG-IP LTM",    f5_bigip),       # tmm/mcpd/msgID(xxxxxxxx:N:)で判定
     ("APRESIA",          apresia),
     ("Windows",          windows),
     ("RHEL/Linux",       rhel),
