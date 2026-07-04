@@ -151,6 +151,21 @@ class TFTPReceiveServer:
                 pass
 
 
+def guess_local_ip_for(target_ip: str) -> str:
+    """
+    target_ip（Cisco機器）への通信で使われるはずのローカルIPを推定する。
+    実際にパケットは送らず、OSの経路選択だけを利用する（UDP connect）。
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((target_ip, 1))
+        return s.getsockname()[0]
+    except OSError:
+        return ""
+    finally:
+        s.close()
+
+
 def fetch_running_config(ip: str, rw_community: str, tftp_server_ip: str,
                           version: str = "v2c", port: int = 161,
                           tftp_port: int = 69, timeout: int = 30) -> dict:

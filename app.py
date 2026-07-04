@@ -881,10 +881,13 @@ def _llm_analyze_show_log(logs: list, mode: str,
 
 
 def _llm_analyze_prtg(devices: list, latest_metrics: list, alerts: list,
-                      label_map: dict, mode: str) -> tuple[str, str]:
+                      label_map: dict, mode: str,
+                      running_configs: dict | None = None) -> tuple[str, str]:
     """
     PRTG風ダッシュボードの現況（デバイス状態・最新センサー値・超過アラート）を
     LLMに渡し、総合的な健全性診断レポートを生成する。
+    running_configs: {ip: config_text} が渡された場合、show running-config も
+    踏まえたコンフィグ是正点の指摘を追加で行う。
     戻り値: (レポート本文, モデル名)
     """
     # デバイス状態
@@ -915,14 +918,20 @@ def _llm_analyze_prtg(devices: list, latest_metrics: list, alerts: list,
                            f"{name} = {a.get('value','-')} {a.get('unit','')} ({a.get('recorded_at','')})")
     alert_ctx = "\n".join(alert_lines) if alert_lines else "(しきい値超過なし)"
 
+    # show running-config（SNMP/CISCO-CONFIG-COPY-MIB経由で取得済みのもの）
+    cfg_blocks = []
+    for _ip, _cfg in (running_configs or {}).items():
+        _host = next((d.get("hostname") for d in devices if d.get("ip") == _ip), None) or _ip
+        cfg_blocks.append(f"### {_host} ({_ip}) の running-config\n```\n{_cfg[:8000]}\n```")
+    cfg_ctx = "\n\n".join(cfg_blocks) if cfg_blocks else ""
+
     system = (
         "あなたはネットワーク運用監視(PRTG/Zabbix等)に精通した運用エンジニアです。"
         "SNMPポーリングで収集したデバイス状態・センサー値・アラートを分析し、"
         "日本語で事実ベースの診断を行います。"
         "提供データに無いことは推測せず「データなし」と明記してください。"
     )
-    user = (
-        "以下はネットワーク監視ダッシュボードの現在の状態です。次の構成で診断してください。\n\n"
+    sections = (
         "1. 【全体サマリ】監視対象デバイス数・状態・全体的な健全性を3行以内で。"
         "down/エラー/しきい値超過アラートが1件もない場合は、先頭に"
         "「🚀 現在異常はありません。順調に稼働しています」のように、"
@@ -931,12 +940,25 @@ def _llm_analyze_prtg(devices: list, latest_metrics: list, alerts: list,
         "3. 【リソース逼迫】CPU/メモリ/温度/セッション数など高負荷の兆候（しきい値超過を優先）\n"
         "4. 【トラフィック/帯域】帯域使用率が高いインターフェースや異常なエラーカウント\n"
         "5. 【重大アラート】しきい値超過(critical/warning)の内容と考えられる原因\n"
-        "6. 【推奨アクション】優先度順に、確認すべきコマンドや対処\n\n"
+        "6. 【推奨アクション】優先度順に、確認すべきコマンドや対処\n"
+    )
+    if cfg_ctx:
+        sections += (
+            "7. 【コンフィグ是正点】show running-configの内容を確認し、"
+            "セキュリティ・冗長性・運用上のベストプラクティスに照らして是正すべき点を指摘してください"
+            "（例: 未使用ACL/インターフェースの放置、暗号化されていないパスワード、"
+            "VTYへのACL未設定、NTP/ロギング未設定、デフォルトのSNMPコミュニティ名 等）。"
+            "問題が無ければ「特に是正すべき点はありません」と明記してください。\n"
+        )
+    user = (
+        "以下はネットワーク監視ダッシュボードの現在の状態です。次の構成で診断してください。\n\n"
+        f"{sections}\n"
         f"────── 登録デバイス ({len(devices)}台) ──────\n{dev_ctx}\n\n"
         f"────── 最新センサー値 ──────\n{sensor_ctx}\n\n"
         f"────── しきい値超過アラート ──────\n{alert_ctx}\n"
+        + (f"\n────── show running-config ──────\n{cfg_ctx}\n" if cfg_ctx else "")
     )
-    return analyzer.ask_llm(system, user, mode, max_tokens=2500)
+    return analyzer.ask_llm(system, user, mode, max_tokens=3000 if cfg_ctx else 2500)
 
 
 def _scoped_showlog_logs() -> list:
@@ -1953,6 +1975,53 @@ with tab_prtg:
         st.info("まだSNMPデータがありません。上の「⚙️ SNMP 設定」でデバイスを登録し、"
                 "「▶ ポーリング開始」を押すと、ここにゲージ・グラフが表示されます。")
     else:
+        # ── 📥 show running-config取得（SNMP/CISCO-CONFIG-COPY-MIB・実験的） ──
+        _prtg_running_configs = st.session_state.setdefault("_prtg_running_configs", {})
+        if not _prtg_cloud and _devices:
+            with st.expander("📥 show running-config を取得（SNMP経由・Cisco専用・実験的）"):
+                st.caption(
+                    "CISCO-CONFIG-COPY-MIB を使い、機器にTFTPでこのホストへ running-config を"
+                    "送信させて取得します。SNMPの**書き込み権限(RW)コミュニティ**と、"
+                    "このホストでのUDP/69バインド（root権限）が必要です。"
+                    "取得した内容はLLM総合診断に「コンフィグ是正点」として組み込まれます。"
+                )
+                _cfg_dev_opts = {f"{d.get('hostname') or d.get('ip')} ({d.get('ip')})": d.get("ip")
+                                 for d in _devices}
+                _ccc1, _ccc2 = st.columns(2)
+                with _ccc1:
+                    _cfg_sel_dev = st.selectbox("対象デバイス", list(_cfg_dev_opts.keys()), key="cfg_copy_dev")
+                    _cfg_target_ip = _cfg_dev_opts[_cfg_sel_dev]
+                with _ccc2:
+                    _cfg_rw_comm = st.text_input("SNMP書き込みコミュニティ(RW)", type="password",
+                                                 key="cfg_copy_rw_community")
+                _default_local_ip = ""
+                try:
+                    import cisco_config_copy as _ccc
+                    _default_local_ip = _ccc.guess_local_ip_for(_cfg_target_ip)
+                except Exception:
+                    pass
+                _cfg_tftp_ip = st.text_input(
+                    "このホストのIP（機器から見えるTFTP宛先アドレス）",
+                    value=_default_local_ip, key="cfg_copy_tftp_ip")
+                if st.button("📥 running-configを取得する", key="cfg_copy_btn"):
+                    if not _cfg_rw_comm or not _cfg_tftp_ip:
+                        st.error("書き込みコミュニティとホストIPの両方を入力してください。")
+                    else:
+                        import cisco_config_copy as _ccc
+                        with st.spinner(f"{_cfg_sel_dev} からrunning-configを取得中…（最大30秒）"):
+                            _cfg_res = _ccc.fetch_running_config(
+                                _cfg_target_ip, _cfg_rw_comm, _cfg_tftp_ip, timeout=30)
+                        if _cfg_res["ok"]:
+                            _prtg_running_configs[_cfg_target_ip] = _cfg_res["config_text"]
+                            st.success(f"✅ 取得成功（{len(_cfg_res['config_text']):,} 文字）")
+                        else:
+                            st.error(f"取得失敗: {_cfg_res['error']}")
+                if _prtg_running_configs:
+                    st.caption(f"取得済み: {len(_prtg_running_configs)}台分のrunning-configがLLM診断に含まれます。")
+                    for _cip, _ctext in _prtg_running_configs.items():
+                        with st.expander(f"プレビュー: {_cip}", expanded=False):
+                            st.code(_ctext[:3000], language="text")
+
         # ── 🤖 LLM 総合診断（最初に表示：まず結論を見せる） ──────
         st.markdown("### 🤖 LLM 総合診断")
         _prtg_llm_ok = (analyzer.check_claude_available() or analyzer.check_gemini_available()
@@ -1967,7 +2036,8 @@ with tab_prtg:
             if st.button("🤖 このダッシュボードをLLMで診断する", key="prtg_llm_btn",
                         type="primary", use_container_width=True):
                 with st.spinner("🤖 LLM がデバイス状態・センサー値・アラートを分析中…"):
-                    _prep, _pmdl = _llm_analyze_prtg(_devices, _latest, _alerts, _label_map, _prtg_mode)
+                    _prep, _pmdl = _llm_analyze_prtg(_devices, _latest, _alerts, _label_map, _prtg_mode,
+                                                     running_configs=_prtg_running_configs)
                 if _prep:
                     st.session_state["_prtg_llm_report"] = _prep
                     st.session_state["_prtg_llm_model"] = _pmdl
