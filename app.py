@@ -1379,7 +1379,8 @@ with tab_showlog:
                     _tags = _json_bd.loads(_tags)
                 except Exception:
                     _tags = []
-            _res = _bug.analyze_bug({"message": _msg, "tags": _tags},
+            _res = _bug.analyze_bug({"message": _msg, "tags": _tags,
+                                     "severity": _lg.get("severity", "")},
                                     _lg.get("raw", _msg))
             _judged.append((_lg, _res))
         _bc = {"bug": 0, "ops": 0, "info": 0}
@@ -1408,7 +1409,13 @@ with tab_showlog:
             if _v in ("bug", "ops"):
                 _conf = {"high": "🔴高", "medium": "🟠中", "low": "🟡低"}.get(_res.get("confidence"), "")
                 _reason = (f"<br><span style='color:{_col};font-size:12px;'>"
-                           f"▶ {_res['category']}: {_res['reason']} {_conf}</span>")
+                           f"▶ 判定理由: {_res['category']} — {_res['reason']} {_conf}</span>")
+            # 日本語の意味/アドバイスを付記（何を示すログか分かるように）
+            _adv = _bug.explain_log(_lg.get("message", ""))
+            _adv_html = ""
+            if _adv:
+                _adv_html = (f"<br><span style='color:#0f766e;font-size:12px;'>"
+                             f"💬 意味: {_adv}</span>")
             st.markdown(
                 f"<div class='log-card' style='border-left:4px solid {_col};'>"
                 f"<span style='background:{_col};color:#fff;padding:1px 8px;border-radius:10px;"
@@ -1418,6 +1425,7 @@ with tab_showlog:
                 f"<span style='color:#6b7280;font-size:12px;'>{_lg.get('hostname','')}</span><br>"
                 f"<span style='color:#374151;'>{_lg.get('message','')}</span>"
                 f"{_reason}"
+                f"{_adv_html}"
                 f"</div>",
                 unsafe_allow_html=True,
             )

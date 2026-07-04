@@ -84,14 +84,94 @@ def analyze_bug(parsed: dict, raw: str) -> dict:
                 return {"verdict": "bug", "category": "装置エラー",
                         "reason": f"Si-Rエラーコード: {label}", "confidence": "medium"}
 
-    # 3) 運用・設定起因のタグがあれば ops
+    # 3) ルーチンなインターフェース状態変化は「情報」に降格
+    #    - Vlan1(既定VLAN)/管理shutdown由来、または通知レベル(NOTICE/INFO)は想定内
+    sev = (parsed.get("severity") or "").upper()
+    msg_l = text.lower()
+    _iface_state = ("changed state to administratively down" in msg_l
+                    or "line protocol on interface" in msg_l
+                    or ("changed state to" in msg_l
+                        and ("up" in msg_l or "down" in msg_l)))
+    if _iface_state:
+        _routine = ("vlan1" in msg_l                                # 既定VLANのSVI
+                    or "administratively down" in msg_l             # 意図的shutdown
+                    or sev in ("NOTICE", "INFO", "DEBUG"))          # 通知レベル(Cisco sev5/6)
+        if _routine:
+            return {"verdict": "info", "category": "インターフェース状態",
+                    "reason": "リンク/プロトコルの状態変化（通知レベル・想定内）",
+                    "confidence": "low"}
+
+    # 4) 運用・設定起因のタグがあれば ops
     if any(t in OPS_TAG_HINTS for t in tags) or "障害候補" in tags:
         return {"verdict": "ops", "category": "運用・設定",
                 "reason": "設定/運用/環境起因の事象（想定内）", "confidence": "low"}
 
-    # 4) それ以外は情報
+    # 5) それ以外は情報
     return {"verdict": "info", "category": "情報", "reason": "正常/情報メッセージ",
             "confidence": "low"}
+
+
+# ── ログの意味・アドバイス（日本語） ──────────────────────────
+# (正規表現, 日本語の意味/アドバイス)
+_EXPLAIN_PATTERNS = [
+    # PnP（ゼロタッチ・プラグ&プレイ）
+    (r"pnp discovery started",
+     "プラグ&プレイ(自動設定)の探索を開始。未設定機が起動時に構成配布サーバを探す動作です。"),
+    (r"pnp discovery stopped",
+     "プラグ&プレイの探索を停止。手動設定(Config Wizard)に入った等で終了した合図で、異常ではありません。"),
+    (r"pnp tech summary.*saved with alarm",
+     "PnPサーバに到達できず技術情報をローカル保存(alarm付き)。PnPサーバを使わない環境なら想定内です。"),
+    (r"saving pnp tech summary",
+     "PnPの技術情報を保存中(数十秒)。処理が終わるまで待てば問題ありません。"),
+    (r"pnp_best_udi_update|pnp_cdp_update|best udi|device udi",
+     "装置固有ID(型番/シリアル)を認識。PnPやCDPで機器を識別する正常動作です。"),
+    # システム起動
+    (r"system restart|%sys-5-restart",
+     "装置が再起動したことの通知(通常の起動)。クラッシュではありません。直前に意図した再起動か確認を。"),
+    (r"read env variable.*license_boot_level",
+     "起動時に設定されたライセンス動作レベルを読み込み。情報ログです。"),
+    (r"console media-type",
+     "コンソールポートの種別(RJ45/USB)を表示。正常な起動情報です。"),
+    (r"extended sysid enabled",
+     "STPの拡張システムID機能が有効(既定動作)。VLAN毎のブリッジIDに使われます。異常ではありません。"),
+    # ライセンス
+    (r"no valid license found",
+     "有効なライセンスが無い状態。次回起動で機能レベルが下位(ipbase等)に降格する可能性。show license で確認し、必要なら適用を。"),
+    (r"license level|license_level",
+     "ライセンスの動作レベル情報。必要な機能に対して適切なレベルか確認してください。"),
+    # インターフェース状態
+    (r"line protocol on interface vlan1.*down",
+     "Vlan1(既定VLAN)のプロトコルがダウン。未使用/shutdown運用なら想定内。管理VLANを別に使うなら影響ありません。"),
+    (r"interface vlan1.*administratively down",
+     "Vlan1が管理的にshutdown。設定(shutdown)通りの状態で、意図的なら問題ありません。"),
+    (r"line protocol on interface.*down",
+     "該当インターフェースのプロトコルがダウン。対向未接続やshutdownが原因のことが多いです。使用中の回線なら要確認。"),
+    (r"changed state to administratively down",
+     "該当ポートが管理的にshutdown。設定によるもので、意図通りなら問題ありません。"),
+    (r"%link-3-updown.*down|changed state to down",
+     "物理ポートがダウン。ケーブル/対向機/SFPを確認してください(使用中ポートなら要対処)。"),
+    (r"changed state to up|%link-3-updown.*up",
+     "ポートがアップ(リンク確立)。正常な状態変化です。"),
+    # ルーティング/STP/認証（代表例）
+    (r"%ospf.*adjchg|ospf.*neighbor",
+     "OSPF隣接関係の状態変化。FULLなら確立、DOWN/LOADINGが続くなら要確認です。"),
+    (r"topology change",
+     "STPのトポロジ変更を検知。ポートのUP/DOWNやループ発生時に出ます。頻発するなら物理/冗長構成を確認。"),
+    (r"failed password|authentication failure|failed login",
+     "ログイン認証に失敗。総当たり攻撃の可能性もあるため、送信元IPと頻度を確認してください。"),
+]
+_EXPLAIN_COMPILED = [(re.compile(p, re.IGNORECASE), t) for p, t in _EXPLAIN_PATTERNS]
+
+
+def explain_log(message: str) -> str:
+    """
+    ログ本文から、日本語の意味/アドバイスを返す。該当が無ければ空文字。
+    """
+    msg = message or ""
+    for rx, text in _EXPLAIN_COMPILED:
+        if rx.search(msg):
+            return text
+    return ""
 
 
 def analyze_batch(logs: list[dict]) -> dict:
@@ -109,7 +189,8 @@ def analyze_batch(logs: list[dict]) -> dict:
                 tags = json.loads(tags)
             except Exception:
                 tags = []
-        parsed = {"message": lg.get("message", ""), "tags": tags}
+        parsed = {"message": lg.get("message", ""), "tags": tags,
+                  "severity": lg.get("severity", "")}
         res = analyze_bug(parsed, lg.get("raw", lg.get("message", "")))
         counts[res["verdict"]] += 1
         if res["verdict"] == "bug":
