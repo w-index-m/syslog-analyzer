@@ -10,6 +10,39 @@ GEMINI_MODEL      = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 GROQ_API_KEY      = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL        = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
+LAST_LLM_ERROR = ""  # 直近のLLM呼び出し失敗理由（UI表示用）
+
+# プロバイダの既定優先順位（auto時、および明示モード失敗時のフォールバック順）
+_PROVIDER_ORDER = ("claude", "gemini", "groq", "ollama")
+
+
+def _cascade_order(providers: dict, mode: str) -> list:
+    """
+    実行すべきプロバイダキーの順序を返す。
+    明示モード指定時は「そのプロバイダ→残りを優先度順」、
+    "auto"（または未知の値）なら優先度順に全プロバイダを試す。
+    これにより、無料枠切れ等で明示選択したプロバイダが失敗しても自動で次に回る。
+    """
+    order = [k for k in _PROVIDER_ORDER if k in providers]
+    if mode in providers:
+        return [mode] + [k for k in order if k != mode]
+    return order
+
+
+def _note_llm_error(provider: str, resp=None, exc: Exception = None):
+    """LAST_LLM_ERROR にプロバイダ別の分かりやすい失敗理由を記録する。"""
+    if resp is not None:
+        code = resp.status_code
+        if code == 429:
+            globals()["LAST_LLM_ERROR"] = (
+                f"{provider}: 無料枠(レート制限)を超過しました(429)。他のAIに自動フォールバックします。")
+        elif code in (401, 403):
+            globals()["LAST_LLM_ERROR"] = f"{provider}: APIキーが無効です({code})。キー設定を確認してください。"
+        else:
+            globals()["LAST_LLM_ERROR"] = f"{provider}: エラー(HTTP {code})"
+    elif exc is not None:
+        globals()["LAST_LLM_ERROR"] = f"{provider}: 通信エラー ({exc})"
+
 SYSTEM_PROMPT = """あなたはネットワーク機器のsyslogを解析する専門エンジニアです。
 以下のsyslogメッセージを日本語でわかりやすく説明してください。
 
@@ -71,13 +104,17 @@ def analyze_with_claude(parsed: dict, raw: str, config_context: str = "") -> tup
             },
             timeout=30
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            _note_llm_error("Claude", resp=resp)
+            print(f"[Claude API error] HTTP {resp.status_code}: {resp.text[:200]}")
+            return "", ""
         data = resp.json()
         text = data["content"][0]["text"].strip()
         # JSON整形
         text = text.replace("```json", "").replace("```", "").strip()
         return text, "claude-sonnet-4-6"
     except Exception as e:
+        _note_llm_error("Claude", exc=e)
         print(f"[Claude API error] {e}")
         return "", ""
 
@@ -243,10 +280,14 @@ def _call_gemini_raw(system: str, user: str, max_tokens: int = 800) -> tuple[str
             },
             timeout=30,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            _note_llm_error("Gemini", resp=resp)
+            print(f"[Gemini error] HTTP {resp.status_code}: {resp.text[:200]}")
+            return "", ""
         text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
         return text.replace("```json", "").replace("```", "").strip(), f"gemini/{GEMINI_MODEL}"
     except Exception as e:
+        _note_llm_error("Gemini", exc=e)
         print(f"[Gemini error] {e}")
         return "", ""
 
@@ -268,10 +309,14 @@ def _call_groq_raw(system: str, user: str, max_tokens: int = 800) -> tuple[str, 
             },
             timeout=30,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            _note_llm_error("Groq", resp=resp)
+            print(f"[Groq error] HTTP {resp.status_code}: {resp.text[:200]}")
+            return "", ""
         text = resp.json()["choices"][0]["message"]["content"].strip()
         return text.replace("```json", "").replace("```", "").strip(), f"groq/{GROQ_MODEL}"
     except Exception as e:
+        _note_llm_error("Groq", exc=e)
         print(f"[Groq error] {e}")
         return "", ""
 
@@ -282,13 +327,12 @@ def analyze_with_groq(parsed: dict, raw: str, config_context: str = "") -> tuple
     return _call_groq_raw(SYSTEM_PROMPT, _build_user_prompt(parsed, raw, config_context))
 
 
-LAST_LLM_ERROR = ""  # 直近のLLM呼び出し失敗理由（UI表示用）
-
-
 def ask_llm(system: str, user: str, mode: str = "auto", max_tokens: int = 1000) -> tuple[str, str]:
     """
     汎用LLM呼び出し。どのタブからでも使えるシンプルなインターフェース。
-    戻り値: (テキスト, モデル名)  失敗時は ("", "")
+    明示モード（例: "gemini"）を指定していても、そのプロバイダが失敗（無料枠切れ等）した場合は
+    自動で他のプロバイダにフォールバックする。
+    戻り値: (テキスト, モデル名)  全滅時は ("", "")
     """
     globals()["LAST_LLM_ERROR"] = ""
 
@@ -306,9 +350,12 @@ def ask_llm(system: str, user: str, mode: str = "auto", max_tokens: int = 1000) 
                       "messages": [{"role": "user", "content": user}]},
                 timeout=45,
             )
-            resp.raise_for_status()
+            if not resp.ok:
+                _note_llm_error("Claude", resp=resp)
+                return "", ""
             return resp.json()["content"][0]["text"].strip(), "claude-sonnet-4-6"
         except Exception as e:
+            _note_llm_error("Claude", exc=e)
             print(f"[ask_llm:Claude] {e}"); return "", ""
 
     def _ollama():
@@ -329,7 +376,9 @@ def ask_llm(system: str, user: str, mode: str = "auto", max_tokens: int = 1000) 
                     f"サイドバーで導入済みモデルを選択してください。")
                 print(f"[ask_llm:Ollama] model not found: {OLLAMA_MODEL}")
                 return "", ""
-            resp.raise_for_status()
+            if not resp.ok:
+                _note_llm_error("Ollama", resp=resp)
+                return "", ""
             return resp.json()["message"]["content"].strip(), f"ollama/{OLLAMA_MODEL}"
         except Exception as e:
             globals()["LAST_LLM_ERROR"] = f"Ollama接続エラー: {e}"
@@ -342,22 +391,22 @@ def ask_llm(system: str, user: str, mode: str = "auto", max_tokens: int = 1000) 
         return _call_groq_raw(system, user, max_tokens)
 
     providers = {"claude": _claude, "gemini": _gemini, "groq": _groq, "ollama": _ollama}
-    if mode in providers:
-        return providers[mode]()
-    for fn in (_claude, _gemini, _groq, _ollama):
-        text, model = fn()
+    for key in _cascade_order(providers, mode):
+        text, model = providers[key]()
         if text:
+            globals()["LAST_LLM_ERROR"] = ""  # 成功したので前段の失敗ログはクリア
             return text, model
     return "", ""
 
 def analyze(parsed: dict, raw: str, mode: str = "auto", config_context: str = "") -> tuple[str, str]:
     """
     mode: "auto"   = Claude → Gemini → Groq → Ollama の順に試行
-          "claude" = Claude のみ
-          "gemini" = Gemini のみ
-          "groq"   = Groq のみ
-          "ollama" = Ollama のみ（完全ローカル）
+          "claude" = Claude 優先（失敗時は他へ自動フォールバック）
+          "gemini" = Gemini 優先（同上）
+          "groq"   = Groq 優先（同上）
+          "ollama" = Ollama 優先（同上）
           "none"   = AI解析なし
+    無料枠切れ等で明示選択したプロバイダが失敗しても、自動で他のプロバイダに回る。
     """
     if mode == "none":
         return "", "なし"
@@ -369,14 +418,11 @@ def analyze(parsed: dict, raw: str, mode: str = "auto", config_context: str = ""
         "ollama": lambda: analyze_with_ollama(parsed, raw, config_context),
     }
 
-    if mode in _providers:
-        explanation, model = _providers[mode]()
-    else:  # auto
-        explanation, model = "", ""
-        for key in ("claude", "gemini", "groq", "ollama"):
-            explanation, model = _providers[key]()
-            if explanation:
-                break
+    explanation, model = "", ""
+    for key in _cascade_order(_providers, mode):
+        explanation, model = _providers[key]()
+        if explanation:
+            break
 
     if not explanation:
         explanation = json.dumps(_rule_based_explain(parsed), ensure_ascii=False)
@@ -607,14 +653,11 @@ def judge_quality(parsed: dict, raw: str, ai_explanation: str, mode: str = "auto
         "ollama": lambda: judge_with_ollama(parsed, raw, ai_explanation, config_context),
     }
 
-    if mode in _providers:
-        result = _providers[mode]()
-    else:  # auto
-        result = None
-        for key in ("claude", "gemini", "groq", "ollama"):
-            result = _providers[key]()
-            if result:
-                break
+    result = None
+    for key in _cascade_order(_providers, mode):
+        result = _providers[key]()
+        if result:
+            break
 
     return result or _rule_based_judge(parsed, ai_explanation)
 
@@ -808,14 +851,11 @@ def diagnose_health(device_health, recent_logs, mode="auto", config_context=""):
         "ollama": lambda: diagnose_health_with_ollama(device_health, recent_logs, config_context),
     }
 
-    if mode in _providers:
-        result = _providers[mode]()
-    else:  # auto
-        result = None
-        for key in ("claude", "gemini", "groq", "ollama"):
-            result = _providers[key]()
-            if result:
-                break
+    result = None
+    for key in _cascade_order(_providers, mode):
+        result = _providers[key]()
+        if result:
+            break
 
     return result or _rule_based_health_diagnosis(device_health)
 
@@ -932,13 +972,10 @@ def diagnose_icmp_redirect(ip: str, snmp_data: list, redirect_logs: list,
         "groq": _call_groq,    "ollama": _call_ollama,
     }
     result = None
-    if mode in _icmp_providers:
-        result = _icmp_providers[mode]()
-    else:  # auto
-        for key in ("claude", "gemini", "groq", "ollama"):
-            result = _icmp_providers[key]()
-            if result:
-                break
+    for key in _cascade_order(_icmp_providers, mode):
+        result = _icmp_providers[key]()
+        if result:
+            break
     if not result:
         # ルールベースフォールバック
         result = {

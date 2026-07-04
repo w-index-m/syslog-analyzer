@@ -315,18 +315,24 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 🤖 AI解析エンジン")
+    _sidebar_cloud = _is_cloud_mode()
     claude_ok = analyzer.check_claude_available()
     gemini_ok = analyzer.check_gemini_available()
     groq_ok   = analyzer.check_groq_available()
 
-    # アプリ起動時に Ollama が未起動なら一度だけ自動起動を試みる
-    if not st.session_state.get("_ollama_autostart_tried"):
-        st.session_state["_ollama_autostart_tried"] = True
-        if not analyzer.check_ollama_available():
-            _ok, _msg = analyzer.start_ollama(wait_sec=8)
-            if _ok:
-                st.toast("🏠 Ollama を自動起動しました")
-    ollama_ok = analyzer.check_ollama_available()
+    if _sidebar_cloud:
+        # クラウド環境では localhost の Ollama には到達できないため、
+        # 自動起動の試行やステータス表示・起動ボタンを一切出さない
+        ollama_ok = False
+    else:
+        # アプリ起動時に Ollama が未起動なら一度だけ自動起動を試みる
+        if not st.session_state.get("_ollama_autostart_tried"):
+            st.session_state["_ollama_autostart_tried"] = True
+            if not analyzer.check_ollama_available():
+                _ok, _msg = analyzer.start_ollama(wait_sec=8)
+                if _ok:
+                    st.toast("🏠 Ollama を自動起動しました")
+        ollama_ok = analyzer.check_ollama_available()
 
     st.markdown(f"{'✅' if claude_ok else '❌'} Claude API "
                 f"({'APIキーあり' if claude_ok else 'ANTHROPIC_API_KEY未設定'})")
@@ -334,15 +340,19 @@ with st.sidebar:
                 f"({'APIキーあり' if gemini_ok else 'GEMINI_API_KEY未設定'})")
     st.markdown(f"{'✅' if groq_ok else '❌'} Groq "
                 f"({'APIキーあり' if groq_ok else 'GROQ_API_KEY未設定'})")
-    st.markdown(f"{'✅' if ollama_ok else '❌'} Ollama "
-                f"({'接続OK' if ollama_ok else 'localhost:11434 未起動'})")
-    if not ollama_ok:
-        if st.button("▶ Ollama を起動する", key="start_ollama_btn", use_container_width=True):
-            with st.spinner("Ollama を起動中…"):
-                _ok, _msg = analyzer.start_ollama(wait_sec=10)
-            (st.success if _ok else st.error)(_msg)
-            if _ok:
-                st.rerun()
+    if not _sidebar_cloud:
+        st.markdown(f"{'✅' if ollama_ok else '❌'} Ollama "
+                    f"({'接続OK' if ollama_ok else 'localhost:11434 未起動'})")
+        if not ollama_ok:
+            if st.button("▶ Ollama を起動する", key="start_ollama_btn", use_container_width=True):
+                with st.spinner("Ollama を起動中…"):
+                    _ok, _msg = analyzer.start_ollama(wait_sec=10)
+                (st.success if _ok else st.error)(_msg)
+                if _ok:
+                    st.rerun()
+    else:
+        st.caption("☁️ クラウド環境のため Ollama（ローカルLLM）は利用できません。"
+                   "Gemini / Groq をご利用ください。")
 
     with st.expander("🔑 APIキー設定", expanded=not (claude_ok or gemini_ok or groq_ok)):
         import os
@@ -372,15 +382,27 @@ with st.sidebar:
             st.rerun()
         st.caption(f"💾 保存先: {_SETTINGS_PATH}（この端末内のみ・git操作の影響を受けません）")
 
-    _mode_opts = [
-        ("auto",   "🔄 自動 (Claude→Gemini→Groq→Ollama)"),
-        ("gemini", "✨ Gemini（無料枠あり）"),
-        ("groq",   "⚡ Groq（無料枠あり・高速）"),
-        ("claude", "☁️  Claude APIのみ"),
-        ("ollama", "🏠 Ollamaのみ（完全ローカル）"),
-        ("none",   "⛔ AI解析なし（高速）"),
-    ]
+    if _sidebar_cloud:
+        # クラウドでは Ollama 到達不可のため選択肢から除外し、自動の説明も合わせる
+        _mode_opts = [
+            ("auto",   "🔄 自動 (Gemini→Groq→Claude)"),
+            ("gemini", "✨ Gemini（無料枠あり）"),
+            ("groq",   "⚡ Groq（無料枠あり・高速）"),
+            ("claude", "☁️  Claude APIのみ"),
+            ("none",   "⛔ AI解析なし（高速）"),
+        ]
+    else:
+        _mode_opts = [
+            ("auto",   "🔄 自動 (Claude→Gemini→Groq→Ollama)"),
+            ("gemini", "✨ Gemini（無料枠あり）"),
+            ("groq",   "⚡ Groq（無料枠あり・高速）"),
+            ("claude", "☁️  Claude APIのみ"),
+            ("ollama", "🏠 Ollamaのみ（完全ローカル）"),
+            ("none",   "⛔ AI解析なし（高速）"),
+        ]
     _saved_mode = st.session_state.get("llm_mode", "auto")
+    if _sidebar_cloud and _saved_mode == "ollama":
+        _saved_mode = "auto"  # クラウドで保存済みモードがollamaなら自動に読み替え
     _mode_idx = next((i for i, o in enumerate(_mode_opts) if o[0] == _saved_mode), 0)
     llm_mode = st.selectbox("解析モード", _mode_opts,
                             format_func=lambda x: x[1], index=_mode_idx)
