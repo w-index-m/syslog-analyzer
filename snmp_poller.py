@@ -22,8 +22,9 @@ POLL_OIDS = {
     "sysUpTime":     "1.3.6.1.2.1.1.3.0",
     "sysName":       "1.3.6.1.2.1.1.5.0",
     # CPU使用率 (Cisco)
-    "cpmCPUTotal5min":  "1.3.6.1.4.1.9.9.109.1.1.1.1.8.1",
+    "cpmCPUTotal5sec":  "1.3.6.1.4.1.9.9.109.1.1.1.1.6.1",
     "cpmCPUTotal1min":  "1.3.6.1.4.1.9.9.109.1.1.1.1.7.1",
+    "cpmCPUTotal5min":  "1.3.6.1.4.1.9.9.109.1.1.1.1.8.1",
     # メモリ (Cisco)
     "ciscoMemoryPoolUsed": "1.3.6.1.4.1.9.9.48.1.1.1.5.1",
     "ciscoMemoryPoolFree": "1.3.6.1.4.1.9.9.48.1.1.1.6.1",
@@ -50,6 +51,7 @@ COUNTER_OIDS = {
 
 # 閾値アラート設定
 THRESHOLDS = {
+    "cpmCPUTotal5sec": {"warning": 85, "critical": 95, "unit": "%", "label": "CPU使用率(5秒)"},
     "cpmCPUTotal5min": {"warning": 70, "critical": 90, "unit": "%", "label": "CPU使用率(5分)"},
     "cpmCPUTotal1min": {"warning": 80, "critical": 95, "unit": "%", "label": "CPU使用率(1分)"},
     "ciscoEnvMonTemperatureStatusValue": {"warning": 60, "critical": 75, "unit": "℃", "label": "温度"},
@@ -73,7 +75,7 @@ VENDOR_MIBS = {
         "enterprise": "1.3.6.1.4.1.9",
         "keywords": ["cisco", "ios", "nx-os", "catalyst", "nexus"],
         "oids": {
-            "cpmCPUTotal5sec":  ("1.3.6.1.4.1.9.9.109.1.1.1.1.6.1", "%", "CPU使用率(5秒)", 85, 95),
+            # cpmCPUTotal5sec は POLL_OIDS で汎用収集済みのためここでは重複させない
             "ciscoMemoryPoolUsed": ("1.3.6.1.4.1.9.9.48.1.1.1.5.1", "bytes", "メモリ使用量", None, None),
             "ciscoMemoryPoolFree": ("1.3.6.1.4.1.9.9.48.1.1.1.6.1", "bytes", "メモリ空き", None, None),
             "ciscoEnvMonFanState":    ("1.3.6.1.4.1.9.9.13.1.4.1.3.1", "", "ファン状態(1=正常)", None, None),
@@ -373,7 +375,8 @@ def poll_device(ip: str, community: str = "public",
             print(f"[Poller:Memory] {ip}: {_me}")
 
         # ── CPU使用率（汎用フォールバック）: Cisco系OIDが取れない機器向け ──
-        if "cpmCPUTotal5min" not in results and "cpmCPUTotal1min" not in results:
+        if not any(k in results for k in
+                   ("cpmCPUTotal5sec", "cpmCPUTotal1min", "cpmCPUTotal5min")):
             hr_cpu = _poll_hr_cpu_pct(ip, community, port, version)
             if hr_cpu is not None:
                 th = THRESHOLDS["hrCpuLoad"]

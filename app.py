@@ -2029,7 +2029,8 @@ with tab_prtg:
             _gc1, _gc2, _gc3 = st.columns([2, 2, 1])
             _dev_opts = {f"{d.get('hostname') or d.get('ip')} ({d.get('ip')})": d.get("ip") for d in _devices}
             _sel_dev = _gc1.selectbox("デバイス", list(_dev_opts.keys()), key="prtg_dev")
-            _metric_opts = ["ifInOctets.1", "ifOutOctets.1", "cpmCPUTotal5min", "cpmCPUTotal1min",
+            _metric_opts = ["ifInOctets.1", "ifOutOctets.1",
+                            "cpmCPUTotal5sec", "cpmCPUTotal1min", "cpmCPUTotal5min",
                             "memory_used_pct", "hrCpuLoad",
                             "ciscoEnvMonTemperatureStatusValue", "ifInErrors.1"]
             _sel_metric = _gc2.selectbox("指標", _metric_opts,
