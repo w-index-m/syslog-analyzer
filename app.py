@@ -1653,8 +1653,10 @@ with tab_prtg:
                        disabled=_prtg_cloud):
             if _pd_ip.strip():
                 with st.spinner(f"{_pd_ip} を SNMP Walk で探索中…"):
-                    st.session_state["_prtg_discover"] = snmp_poller.discover_device(
+                    _dres = snmp_poller.discover_device(
                         _pd_ip.strip(), _pd_comm.strip() or "public", _pd_ver)
+                    _dres["_ip"] = _pd_ip.strip()
+                    st.session_state["_prtg_discover"] = _dres
             else:
                 st.error("IPアドレスを入力してください")
         if _pb1.button("➕ デバイス追加", use_container_width=True, key="prtg_add_dev"):
@@ -1673,11 +1675,26 @@ with tab_prtg:
                 st.caption(f"sysDescr: {(_sys.get('sysDescr','') or '')[:120]}")
                 _ifs = _disc.get("interfaces", [])
                 if _ifs:
-                    st.caption(f"インターフェース {len(_ifs)} 個を検出（up={sum(1 for i in _ifs if i['status']=='up')}）")
-                    import pandas as _pd_disc
-                    _dfi = _pd_disc.DataFrame(_ifs)[["index", "name", "descr", "status"]]
-                    _dfi.columns = ["ifIndex", "名前", "説明", "状態"]
-                    st.dataframe(_dfi, use_container_width=True, hide_index=True, height=200)
+                    st.caption(f"インターフェース {len(_ifs)} 個を検出（up={sum(1 for i in _ifs if i['status']=='up')}）。"
+                               "監視したいIFを選んで登録すると、自動でトラフィック/使用率を収集します。")
+                    # 検出IFから監視対象を選択（手動OID入力は不要）
+                    _disc_ip = _disc.get("_ip") or _pd_ip.strip()
+                    _opt_labels = {f"[{i['index']}] {i['name']} ({i['status']})": i for i in _ifs}
+                    # 既に監視中のIFを既定選択に
+                    _already = {m["ifindex"]: m for m in snmp_poller.get_monitored_interfaces(_disc_ip)}
+                    _default = [lbl for lbl, i in _opt_labels.items() if str(i["index"]) in _already]
+                    _sel_ifs = st.multiselect("監視対象インターフェース", list(_opt_labels.keys()),
+                                              default=_default, key="prtg_sel_ifs")
+                    if st.button("✅ 選択したIFを監視登録", key="prtg_reg_ifs", type="primary"):
+                        _chosen = [{"index": _opt_labels[l]["index"], "name": _opt_labels[l]["name"]}
+                                   for l in _sel_ifs]
+                        # デバイス未登録なら合わせて登録
+                        if _disc_ip and _disc_ip not in [d["ip"] for d in snmp_poller.get_devices()]:
+                            snmp_poller.add_device(_disc_ip, _pd_comm.strip() or "public", _pd_ver, 161, int(_pd_int))
+                        snmp_poller.set_monitored_interfaces(_disc_ip, _chosen)
+                        st.success(f"{len(_chosen)} 個のインターフェースを監視登録しました。"
+                                   "ポーリング開始でトラフィック収集が始まります。")
+                        st.rerun()
             else:
                 st.error(f"❌ {_disc.get('error','応答なし')}")
         if not st.session_state.get("snmp_poller_started"):

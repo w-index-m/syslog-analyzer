@@ -87,6 +87,18 @@ def _init_snmp_tables():
                 last_status TEXT DEFAULT 'unknown'
             )
         """)
+        # 監視対象インターフェース（SNMP Walk で選んだIFを登録）
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS snmp_monitored_ifs (
+                ip TEXT NOT NULL,
+                ifindex TEXT NOT NULL,
+                ifname TEXT,
+                last_in_oct TEXT,
+                last_out_oct TEXT,
+                last_ts TEXT,
+                PRIMARY KEY (ip, ifindex)
+            )
+        """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_snmp_ip ON snmp_metrics(source_ip)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_snmp_time ON snmp_metrics(recorded_at DESC)")
         conn.commit()
@@ -439,6 +451,118 @@ _IF_OPER_OID   = "1.3.6.1.2.1.2.2.1.8"       # ifOperStatus (1=up,2=down)
 _IF_ALIAS_OID  = "1.3.6.1.2.1.31.1.1.1.18"   # ifAlias
 
 
+# 監視対象IF収集用OID（インデックスを付けてGET）
+_OID_IF_HC_IN   = "1.3.6.1.2.1.31.1.1.1.6"    # ifHCInOctets
+_OID_IF_HC_OUT  = "1.3.6.1.2.1.31.1.1.1.10"   # ifHCOutOctets
+_OID_IF_INOCT   = "1.3.6.1.2.1.2.2.1.10"      # ifInOctets(32bit fallback)
+_OID_IF_OUTOCT  = "1.3.6.1.2.1.2.2.1.16"
+_OID_IF_HISPEED = "1.3.6.1.2.1.31.1.1.1.15"   # ifHighSpeed(Mbps)
+_OID_IF_OPER2   = "1.3.6.1.2.1.2.2.1.8"       # ifOperStatus
+_OID_IF_INERR2  = "1.3.6.1.2.1.2.2.1.14"      # ifInErrors
+
+
+def set_monitored_interfaces(ip: str, interfaces: list):
+    """
+    監視対象インターフェースを登録する。
+    interfaces: [{"index": str, "name": str}, ...]（既存はこのIP分を置換）
+    """
+    _init_snmp_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM snmp_monitored_ifs WHERE ip=?", (ip,))
+        for itf in interfaces:
+            conn.execute(
+                "INSERT OR REPLACE INTO snmp_monitored_ifs (ip, ifindex, ifname) VALUES (?,?,?)",
+                (ip, str(itf.get("index")), itf.get("name", "")))
+        conn.commit()
+
+
+def get_monitored_interfaces(ip: str = None) -> list:
+    _init_snmp_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        if ip:
+            rows = conn.execute("SELECT * FROM snmp_monitored_ifs WHERE ip=?", (ip,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM snmp_monitored_ifs").fetchall()
+        return [dict(r) for r in rows]
+
+
+def poll_monitored_interfaces(ip: str, community: str = "public",
+                              version: str = "v2c", port: int = 161,
+                              hostname: str = None):
+    """
+    登録済みの監視対象IFについて、送受信オクテットをGETし、
+    前回値との差分から bps・帯域使用率を算出して snmp_metrics に保存する。
+    （Walkで選んだIFをそのまま自動ポーリングする＝手動OID入力不要）
+    """
+    ifs = get_monitored_interfaces(ip)
+    if not ifs:
+        return
+    now = datetime.now()
+    now_iso = now.isoformat()
+    host = hostname or snmp_get(ip, community, "1.3.6.1.2.1.1.5.0", port, version) or ip
+    with sqlite3.connect(DB_PATH, check_same_thread=False) as conn:
+        for mif in ifs:
+            idx = mif["ifindex"]
+            name = mif.get("ifname") or f"if{idx}"
+            in_oct  = snmp_get(ip, community, f"{_OID_IF_HC_IN}.{idx}", port, version) \
+                      or snmp_get(ip, community, f"{_OID_IF_INOCT}.{idx}", port, version)
+            out_oct = snmp_get(ip, community, f"{_OID_IF_HC_OUT}.{idx}", port, version) \
+                      or snmp_get(ip, community, f"{_OID_IF_OUTOCT}.{idx}", port, version)
+            oper = snmp_get(ip, community, f"{_OID_IF_OPER2}.{idx}", port, version)
+            hispeed = snmp_get(ip, community, f"{_OID_IF_HISPEED}.{idx}", port, version)  # Mbps
+            inerr = snmp_get(ip, community, f"{_OID_IF_INERR2}.{idx}", port, version)
+
+            # 状態メトリクス
+            status = "up" if str(oper).strip() == "1" else ("down" if str(oper).strip() == "2" else "?")
+            _lbl = f"{name}"
+            def _save(oid_name, value, unit, alert="none"):
+                conn.execute("""INSERT INTO snmp_metrics
+                    (recorded_at, source_ip, hostname, oid_name, oid, value, unit, alert_level)
+                    VALUES (?,?,?,?,?,?,?,?)""",
+                    (now_iso, ip, f"{host} {name}", oid_name, f"if{idx}", value, unit, alert))
+
+            # 差分から bps を計算
+            prev = conn.execute(
+                "SELECT last_in_oct, last_out_oct, last_ts FROM snmp_monitored_ifs WHERE ip=? AND ifindex=?",
+                (ip, idx)).fetchone()
+            in_bps = out_bps = util = None
+            if prev and prev[2] and in_oct is not None and out_oct is not None:
+                try:
+                    dt = (now - datetime.fromisoformat(prev[2])).total_seconds()
+                    if dt > 0:
+                        din = (int(in_oct) - int(prev[0])) if prev[0] is not None else 0
+                        dout = (int(out_oct) - int(prev[1])) if prev[1] is not None else 0
+                        if din >= 0:
+                            in_bps = round(din * 8 / dt)
+                        if dout >= 0:
+                            out_bps = round(dout * 8 / dt)
+                        speed_bps = (int(hispeed) * 1_000_000) if hispeed else 0
+                        if speed_bps > 0 and in_bps is not None and out_bps is not None:
+                            util = round(max(in_bps, out_bps) / speed_bps * 100, 1)
+                except (ValueError, TypeError):
+                    pass
+
+            # メトリクス保存（グラフ/ゲージ用）
+            if in_bps is not None:
+                _save(f"if{idx}_in_bps", in_bps, "bps")
+            if out_bps is not None:
+                _save(f"if{idx}_out_bps", out_bps, "bps")
+            if util is not None:
+                alert = "critical" if util >= 90 else ("warning" if util >= 70 else "none")
+                _save(f"if{idx}_util", util, "%", alert)
+            if inerr is not None:
+                _save(f"if{idx}_inerrors", inerr, "errors")
+            _save(f"if{idx}_status", status, "", "critical" if status == "down" else "none")
+
+            # 次回差分用に今回値を保存
+            conn.execute("UPDATE snmp_monitored_ifs SET last_in_oct=?, last_out_oct=?, last_ts=? WHERE ip=? AND ifindex=?",
+                         (str(in_oct) if in_oct is not None else None,
+                          str(out_oct) if out_oct is not None else None,
+                          now_iso, ip, idx))
+        conn.commit()
+
+
 def discover_device(ip: str, community: str = "public",
                     version: str = "v2c", port: int = 161) -> dict:
     """
@@ -741,6 +865,14 @@ def _poller_loop():
                     version=dev.get("version", "v2c"),
                     port=dev.get("port", 161),
                     llm_mode="none"  # バックグラウンドではLLMは呼ばない
+                )
+                # 監視対象IF（Walkで選んだIF）のトラフィック/使用率を収集
+                poll_monitored_interfaces(
+                    ip=dev["ip"],
+                    community=dev.get("community", "public"),
+                    version=dev.get("version", "v2c"),
+                    port=dev.get("port", 161),
+                    hostname=dev.get("hostname"),
                 )
                 # ICMP Redirect → EPC 自動トリガー確認
                 _check_epc_trigger(dev["ip"])
