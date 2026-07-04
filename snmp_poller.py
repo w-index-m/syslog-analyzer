@@ -237,6 +237,44 @@ def snmp_get(ip: str, community: str, oid: str, port: int = 161,
         return None
 
 
+async def _snmp_set_async(ip: str, community: str, varbinds: list, port: int, version: str):
+    from pysnmp.hlapi.v3arch.asyncio import (
+        set_cmd, SnmpEngine, CommunityData, UdpTransportTarget,
+        ContextData, ObjectType, ObjectIdentity
+    )
+    ver_map = {"v1": 0, "v2c": 1}
+    mp_model = ver_map.get(version, 1)
+    target = await UdpTransportTarget.create((ip, port), timeout=3, retries=1)
+    obj_types = [ObjectType(ObjectIdentity(oid), value) for oid, value in varbinds]
+    error_indication, error_status, error_index, var_binds = await set_cmd(
+        SnmpEngine(),
+        CommunityData(community, mpModel=mp_model),
+        target,
+        ContextData(),
+        *obj_types
+    )
+    if error_indication:
+        return False, str(error_indication)
+    if error_status:
+        return False, error_status.prettyPrint()
+    return True, None
+
+
+def snmp_set(ip: str, community: str, varbinds: list, port: int = 161,
+             version: str = "v2c") -> tuple[bool, str | None]:
+    """
+    複数OIDへのSNMP SETを1つのPDUでまとめて実行する（同期ラッパー）。
+    varbinds: [(oid, pysnmpの値オブジェクト), ...] 例: [(oid, Integer32(1))]
+    書き込み権限のあるコミュニティ（RW）が必要。
+    戻り値: (成功したか, エラーメッセージ or None)
+    """
+    try:
+        return _run_async(_snmp_set_async(ip, community, varbinds, port, version))
+    except Exception as e:
+        print(f"[SNMP SET] {ip}: {e}")
+        return False, str(e)
+
+
 def _poll_hr_cpu_pct(ip: str, community: str, port: int, version: str) -> float | None:
     """HOST-RESOURCES-MIB hrProcessorLoad の平均値を返す（Cisco専用CPUが取れない機器向け）。"""
     try:
