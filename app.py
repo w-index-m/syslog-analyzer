@@ -2029,7 +2029,8 @@ with tab_prtg:
             _gc1, _gc2, _gc3 = st.columns([2, 2, 1])
             _dev_opts = {f"{d.get('hostname') or d.get('ip')} ({d.get('ip')})": d.get("ip") for d in _devices}
             _sel_dev = _gc1.selectbox("デバイス", list(_dev_opts.keys()), key="prtg_dev")
-            _metric_opts = ["ifInOctets.1", "ifOutOctets.1", "cpmCPUTotal5min",
+            _metric_opts = ["ifInOctets.1", "ifOutOctets.1", "cpmCPUTotal5min", "cpmCPUTotal1min",
+                            "memory_used_pct", "hrCpuLoad",
                             "ciscoEnvMonTemperatureStatusValue", "ifInErrors.1"]
             _sel_metric = _gc2.selectbox("指標", _metric_opts,
                                          format_func=lambda k: _label_map.get(k, k), key="prtg_metric")
@@ -2065,6 +2066,34 @@ with tab_prtg:
                     f"</div>", unsafe_allow_html=True)
         else:
             st.success("現在しきい値を超過しているセンサーはありません。")
+
+        # ── ⑥ 取得した生SNMPデータ（全項目・一覧表） ──────────────
+        with st.expander("🔍 SNMPポーリングで取得できた全項目（生データ）", expanded=False):
+            st.caption("ゲージ/信号機に出ていない項目も含め、ポーリングで実際に取得できた全OIDの最新値を一覧できます。")
+            _seen_raw = set()
+            _raw_rows = []
+            for _m in _latest:
+                _key = (_m.get("source_ip"), _m.get("oid_name"))
+                if _key in _seen_raw:
+                    continue
+                _seen_raw.add(_key)
+                _raw_rows.append({
+                    "デバイス": _m.get("hostname") or _m.get("source_ip"),
+                    "IP": _m.get("source_ip"),
+                    "OID名": _m.get("oid_name"),
+                    "項目名": _label_map.get(_m.get("oid_name"), _m.get("oid_name")),
+                    "値": _m.get("value"),
+                    "単位": _m.get("unit") or "",
+                    "状態": _m.get("alert_level") or "none",
+                    "OID": _m.get("oid"),
+                    "取得日時": _m.get("recorded_at"),
+                })
+            if _raw_rows:
+                _df_raw = pd.DataFrame(_raw_rows).sort_values(["デバイス", "OID名"])
+                st.dataframe(_df_raw, use_container_width=True, hide_index=True)
+                st.caption(f"{len(_raw_rows)} 項目を表示中（直近ポーリング分・最大300件の範囲内）")
+            else:
+                st.caption("まだデータがありません。ポーリングを開始すると表示されます。")
 
         # ── 🤖 LLM でこのダッシュボードを総合診断 ──────────────
         st.markdown("### 🤖 LLM 総合診断")

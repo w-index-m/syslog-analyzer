@@ -55,7 +55,16 @@ THRESHOLDS = {
     "ciscoEnvMonTemperatureStatusValue": {"warning": 60, "critical": 75, "unit": "℃", "label": "温度"},
     "ifInErrors.1":    {"warning": 10, "critical": 100, "unit": "errors", "label": "受信エラー"},
     "ifOutErrors.1":   {"warning": 10, "critical": 100, "unit": "errors", "label": "送信エラー"},
+    "memory_used_pct": {"warning": 75, "critical": 90, "unit": "%", "label": "メモリ使用率"},
+    "hrCpuLoad":       {"warning": 80, "critical": 95, "unit": "%", "label": "CPU使用率(汎用)"},
 }
+
+# ── HOST-RESOURCES-MIB（汎用フォールバック：Cisco以外の機器でもCPU/メモリを取得） ──
+_HR_CPU_TABLE_OID     = "1.3.6.1.2.1.25.3.3.1.2"   # hrProcessorLoad（CPUごとのテーブル）
+_HR_STORAGE_DESCR_OID = "1.3.6.1.2.1.25.2.3.1.3"   # hrStorageDescr（テーブル）
+_HR_STORAGE_SIZE_OID  = "1.3.6.1.2.1.25.2.3.1.5"   # hrStorageSize
+_HR_STORAGE_USED_OID  = "1.3.6.1.2.1.25.2.3.1.6"   # hrStorageUsed
+_HR_MEMORY_KEYWORDS = ("physical memory", "real memory", "ram")
 
 # ── ベンダー固有 MIB（enterprise番号で自動判別して収集） ──────────
 #   各エントリ: oid_name -> (oid, unit, label, warn, crit)  warn/crit は None 可
@@ -214,6 +223,39 @@ def snmp_get(ip: str, community: str, oid: str, port: int = 161,
         return None
 
 
+def _poll_hr_cpu_pct(ip: str, community: str, port: int, version: str) -> float | None:
+    """HOST-RESOURCES-MIB hrProcessorLoad の平均値を返す（Cisco専用CPUが取れない機器向け）。"""
+    try:
+        loads = snmp_walk(ip, community, _HR_CPU_TABLE_OID, port, version, max_rows=16)
+        vals = [float(v) for v in loads.values() if v is not None]
+        if not vals:
+            return None
+        return round(sum(vals) / len(vals), 1)
+    except Exception:
+        return None
+
+
+def _poll_hr_memory_pct(ip: str, community: str, port: int, version: str) -> float | None:
+    """HOST-RESOURCES-MIB hrStorageTable から物理メモリ使用率を返す（Cisco専用メモリが取れない機器向け）。"""
+    try:
+        descrs = snmp_walk(ip, community, _HR_STORAGE_DESCR_OID, port, version, max_rows=32)
+        mem_idx = None
+        for idx, descr in descrs.items():
+            if any(kw in (descr or "").lower() for kw in _HR_MEMORY_KEYWORDS):
+                mem_idx = idx
+                break
+        if mem_idx is None:
+            return None
+        size = snmp_get(ip, community, f"{_HR_STORAGE_SIZE_OID}.{mem_idx}", port, version)
+        used = snmp_get(ip, community, f"{_HR_STORAGE_USED_OID}.{mem_idx}", port, version)
+        size_f, used_f = float(size), float(used)
+        if size_f <= 0:
+            return None
+        return round(used_f / size_f * 100, 1)
+    except Exception:
+        return None
+
+
 def poll_device(ip: str, community: str = "public",
                 version: str = "v2c", port: int = 161) -> dict:
     """
@@ -303,6 +345,47 @@ def poll_device(ip: str, community: str = "public",
                 results["_vendor"] = _vendor
         except Exception as _ve:
             print(f"[Poller:VendorMIB] {ip}: {_ve}")
+
+        # ── メモリ使用率（%）を算出してゲージ表示できるように保存 ──
+        #   Cisco機種は ciscoMemoryPoolUsed/Free から算出、それ以外は
+        #   HOST-RESOURCES-MIB(hrStorageTable) にフォールバックして汎用取得する。
+        try:
+            mem_pct = None
+            mu, mf = results.get("ciscoMemoryPoolUsed"), results.get("ciscoMemoryPoolFree")
+            if mu is not None and mf is not None:
+                mu_f, mf_f = float(mu), float(mf)
+                if mu_f + mf_f > 0:
+                    mem_pct = round(mu_f / (mu_f + mf_f) * 100, 1)
+            if mem_pct is None:
+                mem_pct = _poll_hr_memory_pct(ip, community, port, version)
+            if mem_pct is not None:
+                th = THRESHOLDS["memory_used_pct"]
+                mem_alert = "critical" if mem_pct >= th["critical"] else (
+                    "warning" if mem_pct >= th["warning"] else "none")
+                conn.execute("""
+                    INSERT INTO snmp_metrics
+                    (recorded_at, source_ip, hostname, oid_name, oid, value, unit, alert_level)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (recorded_at, ip, hostname or ip, "memory_used_pct", "derived",
+                      mem_pct, "%", mem_alert))
+                results["memory_used_pct"] = mem_pct
+        except (TypeError, ValueError) as _me:
+            print(f"[Poller:Memory] {ip}: {_me}")
+
+        # ── CPU使用率（汎用フォールバック）: Cisco系OIDが取れない機器向け ──
+        if "cpmCPUTotal5min" not in results and "cpmCPUTotal1min" not in results:
+            hr_cpu = _poll_hr_cpu_pct(ip, community, port, version)
+            if hr_cpu is not None:
+                th = THRESHOLDS["hrCpuLoad"]
+                cpu_alert = "critical" if hr_cpu >= th["critical"] else (
+                    "warning" if hr_cpu >= th["warning"] else "none")
+                conn.execute("""
+                    INSERT INTO snmp_metrics
+                    (recorded_at, source_ip, hostname, oid_name, oid, value, unit, alert_level)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (recorded_at, ip, hostname or ip, "hrCpuLoad", _HR_CPU_TABLE_OID,
+                      hr_cpu, "%", cpu_alert))
+                results["hrCpuLoad"] = hr_cpu
 
         # デバイステーブルを更新
         conn.execute("""

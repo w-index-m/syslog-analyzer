@@ -106,6 +106,7 @@ _GAUGE_SPECS = {
     "cpmCPUTotal5sec": {"max": 100, "warn": 85, "crit": 95, "unit": "%", "label": "CPU(5秒)"},
     "ciscoEnvMonTemperatureStatusValue": {"max": 100, "warn": 60, "crit": 75, "unit": "℃", "label": "温度"},
     "memory_used_pct": {"max": 100, "warn": 75, "crit": 90, "unit": "%", "label": "メモリ使用率"},
+    "hrCpuLoad": {"max": 100, "warn": 80, "crit": 95, "unit": "%", "label": "CPU使用率(汎用)"},
     "bandwidth_util_pct": {"max": 100, "warn": 70, "crit": 90, "unit": "%", "label": "帯域使用率"},
     # Palo Alto 固有
     "panSessionUtilization":  {"max": 100, "warn": 80, "crit": 90, "unit": "%", "label": "セッション使用率"},
