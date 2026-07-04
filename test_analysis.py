@@ -10,6 +10,7 @@
   5. ループ検知（SR-S l2loopd / Catalyst LoopDetect / APRESIA LOOP_DETECT）
   6. IPCOM / Si-R / SR-S のメッセージ解析（実メッセージのタグ付け）
   7. pcap 統計（VoIP MOS, TCP SYN 未応答, Top Talkers 送信元別集計）
+  8. バグ判定解析（show log からソフト/ハード不具合を検出・運用設定と区別）
 
 実行:  python3 test_analysis.py
 """
@@ -223,6 +224,36 @@ def test_pcap_stats():
           f"max_ports={max_ports}")
 
 
+def test_bug_analysis():
+    print("\n【8】バグ判定解析（show log からの不具合検出）")
+    import bug_analyzer as bug
+    cases = [
+        ("bug",  "%SYS-2-MALLOCFAIL: Memory allocation of 65536 bytes failed", [], "メモリ枯渇→バグ"),
+        ("bug",  "%SYS-3-CPUHOG: Task ran for 2000ms, process = IP Input", [], "CPUハング→バグ"),
+        ("bug",  "Software-forced crash, PC 0x601abc", [], "クラッシュ→バグ"),
+        ("bug",  "same message repeated 5000 times", [], "メッセージ暴走→バグ"),
+        ("bug",  "system reset busy.", ["対処:装置交換が必要"], "Si-R装置交換→バグ"),
+        ("ops",  "%LINK-3-UPDOWN: Interface Gi1/0/1, changed state to down", ["リンクDOWN", "障害候補"], "リンクDOWN→運用"),
+        ("ops",  "failed login admin on ssh from 203.0.113.1", ["認証失敗"], "認証失敗→運用"),
+        ("info", "Configured from console by admin", [], "設定変更→情報"),
+    ]
+    for expect, msg, tags, name in cases:
+        r = bug.analyze_bug({"message": msg, "tags": tags}, msg)
+        check(name, r["verdict"] == expect, f"got={r['verdict']} ({r['category']})")
+
+    # バッチ集計: バグと運用が正しく仕分けされる
+    logs = [
+        {"vendor": "Cisco", "hostname": "r1", "message": "%SYS-2-MALLOCFAIL: alloc failed",
+         "raw": "%SYS-2-MALLOCFAIL: alloc failed", "tags": "[]"},
+        {"vendor": "Cisco", "hostname": "r1", "message": "%LINK-3-UPDOWN: Gi1 down",
+         "raw": "%LINK-3-UPDOWN: Gi1 down", "tags": '["リンクDOWN"]'},
+    ]
+    res = bug.analyze_batch(logs)
+    check("バッチ集計: バグ1件/運用1件に仕分け",
+          res["counts"]["bug"] == 1 and res["counts"]["ops"] == 1,
+          f"counts={res['counts']}")
+
+
 def main():
     db.init_db()
     test_parsers()
@@ -232,6 +263,7 @@ def main():
     test_loop_detection()
     test_vendor_messages()
     test_pcap_stats()
+    test_bug_analysis()
 
     print("\n" + "=" * 55)
     print(f"  結果: {PASS} PASS / {FAIL} FAIL")
