@@ -1094,7 +1094,7 @@ with tab_health:
     with col_run2:
         run_llm = st.checkbox("LLM診断を含める", value=False,
                               help="各機器をLLMが総合診断します（時間とAPI呼び出しが増えます）")
-        if st.button("🔄 品質チェック実行", use_container_width=True):
+        if st.button("🤖 品質チェック実行", use_container_width=True, type="primary"):
             devices = snmp_poller.get_devices()
             if not devices:
                 st.warning("SNMPデバイスが登録されていません。SNMPモニタータブで登録してください。")
@@ -1323,7 +1323,8 @@ with tab1:
                 elif st.session_state.llm_mode != "none":
                     col_a, col_b = st.columns([1, 4])
                     with col_a:
-                        if st.button("🤖 AI解析", key=f"analyze_{log['id']}"):
+                        if st.button("🤖 AI解析", key=f"analyze_{log['id']}",
+                                    type="primary", use_container_width=True):
                             with st.spinner("解析中..."):
                                 raw = log.get("raw","")
                                 from parsers import parse_syslog as ps
@@ -1353,7 +1354,7 @@ with tab1:
         with _batch_col2:
             _batch_btn = st.button("🤖 一括 AI 分析", key="batch_llm_run",
                                    disabled=not _batch_llm_ok,
-                                   use_container_width=True)
+                                   use_container_width=True, type="primary")
         if not _batch_llm_ok:
             st.caption("一括 AI 分析はサイドバーの「🔑 APIキー設定」でいずれかのLLMを設定してから使用してください。")
 
@@ -1543,7 +1544,7 @@ with tab_showlog:
         _sl_src_tab = st.text_input("送信元IP/ホスト", value="pasted-device",
                                     key="show_log_src_tab",
                                     help="貼り付けたログの送信元として記録されます")
-        _sl_go_tab = st.button("🔍 解析（取り込み＋異常＋LLM）", use_container_width=True,
+        _sl_go_tab = st.button("🤖 解析（取り込み＋異常＋LLM）", use_container_width=True,
                                key="show_log_ingest_tab", type="primary")
         _sl_auto_llm = st.checkbox("解析時にLLMまで自動実行", value=True,
                                    key="show_log_auto_llm",
@@ -1823,8 +1824,8 @@ with tab_showlog:
             st.caption("🤖 取り込み後、自動でLLM詳細解析を実行しました。")
             _run_showlog_llm()
         # 手動再実行ボタン（やり直したいとき）
-        if st.button("🔁 LLM で再解析する", key="showlog_llm",
-                     use_container_width=True):
+        if st.button("🤖 LLM で再解析する", key="showlog_llm",
+                     use_container_width=True, type="primary"):
             _run_showlog_llm()
     if st.session_state.get("_showlog_llm_report"):
         st.markdown(
@@ -2812,7 +2813,8 @@ end""", language="text")
             st.markdown("**🤖 AI自動原因推定**")
             llm_ok = analyzer.check_claude_available() or analyzer.check_gemini_available() or analyzer.check_groq_available() or analyzer.check_ollama_available()
             if llm_ok:
-                if st.button("🔍 ICMP redirect根本原因をAIで診断", key="icmp_ai_diag"):
+                if st.button("🤖 ICMP redirect根本原因をAIで診断", key="icmp_ai_diag",
+                            type="primary", use_container_width=True):
                     with st.spinner("AIがICMP redirect原因を分析中..."):
                         dev_snmp = [r for r in icmp_rows if r["source_ip"] == sel_icmp_ip]
                         dev_logs = [l for l in redirect_logs if l.get("source_ip") == sel_icmp_ip]
@@ -3290,7 +3292,7 @@ with tab_netflow:
             _nf_llm_ok = (analyzer.check_claude_available() or analyzer.check_gemini_available()
                           or analyzer.check_groq_available() or analyzer.check_ollama_available())
             if st.button("🤖 AI分析", key="nf_ddos_ai", disabled=not _nf_llm_ok,
-                         use_container_width=True):
+                         use_container_width=True, type="primary"):
                 _nf_sum2 = _nfc2.get_summary(_nf_hours)
                 _nf_ai_ctx = (
                     f"NetFlow集計期間: 過去{_nf_hours}時間\n"
@@ -3550,8 +3552,9 @@ with tab_pcap:
             _ai_col1.markdown("### 🤖 pcap 総合 AI 診断")
             _ai_col1.caption("TCP / DNS / DHCP / HTTP / TLS / VoIP / ICMP / ARP の全解析結果を LLM に投げて根本原因を推定します。")
             with _ai_col2:
-                _pcap_ai_btn = st.button("🔍 AI診断実行", key="pcap_ai_diag_main",
-                                         disabled=not _llm_ok, use_container_width=True)
+                _pcap_ai_btn = st.button("🤖 AI診断実行", key="pcap_ai_diag_main",
+                                         disabled=not _llm_ok, use_container_width=True,
+                                         type="primary")
             if not _llm_ok:
                 st.caption("AI診断を使うにはサイドバーの「🔑 APIキー設定」でClaude / Gemini / Groqのいずれかを設定してください。")
 
@@ -3706,7 +3709,8 @@ with tab_pcap:
 
                 llm_ok = analyzer.check_claude_available() or analyzer.check_gemini_available() or analyzer.check_groq_available() or analyzer.check_ollama_available()
                 if llm_ok:
-                    if st.button("🔍 統合AI診断を実行", key="pcap_ai_diag"):
+                    if st.button("🤖 統合AI診断を実行", key="pcap_ai_diag",
+                                type="primary", use_container_width=True):
                         # ルーターIPを自動検出
                         router_ips = df_red["router_ip"].unique().tolist()
                         sel_router = router_ips[0] if router_ips else ""
