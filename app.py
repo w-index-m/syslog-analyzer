@@ -1730,6 +1730,11 @@ with tab_prtg:
     _label_map = {}
     for _k, _v in {**snmp_poller.THRESHOLDS, **snmp_poller.COUNTER_OIDS}.items():
         _label_map[_k] = _v.get("label", _k)
+    # ベンダー固有MIB(Cisco/PaloAlto/F5)のラベルも表示に反映
+    try:
+        _label_map.update(snmp_poller.vendor_metric_labels())
+    except Exception:
+        pass
 
     if not _devices and not _latest:
         st.info("まだSNMPデータがありません。上の「⚙️ SNMP 設定」でデバイスを登録し、"

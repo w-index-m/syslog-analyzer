@@ -57,6 +57,66 @@ THRESHOLDS = {
     "ifOutErrors.1":   {"warning": 10, "critical": 100, "unit": "errors", "label": "送信エラー"},
 }
 
+# ── ベンダー固有 MIB（enterprise番号で自動判別して収集） ──────────
+#   各エントリ: oid_name -> (oid, unit, label, warn, crit)  warn/crit は None 可
+VENDOR_MIBS = {
+    "Cisco": {
+        "enterprise": "1.3.6.1.4.1.9",
+        "keywords": ["cisco", "ios", "nx-os", "catalyst", "nexus"],
+        "oids": {
+            "cpmCPUTotal5sec":  ("1.3.6.1.4.1.9.9.109.1.1.1.1.6.1", "%", "CPU使用率(5秒)", 85, 95),
+            "ciscoMemoryPoolUsed": ("1.3.6.1.4.1.9.9.48.1.1.1.5.1", "bytes", "メモリ使用量", None, None),
+            "ciscoMemoryPoolFree": ("1.3.6.1.4.1.9.9.48.1.1.1.6.1", "bytes", "メモリ空き", None, None),
+            "ciscoEnvMonFanState":    ("1.3.6.1.4.1.9.9.13.1.4.1.3.1", "", "ファン状態(1=正常)", None, None),
+            "ciscoEnvMonSupplyState": ("1.3.6.1.4.1.9.9.13.1.5.1.3.1", "", "電源状態(1=正常)", None, None),
+        },
+    },
+    "Palo Alto": {
+        "enterprise": "1.3.6.1.4.1.25461",
+        "keywords": ["palo alto", "pan-os", "panorama"],
+        "oids": {
+            "panSessionUtilization": ("1.3.6.1.4.1.25461.2.1.2.3.1.0", "%", "セッション使用率", 80, 90),
+            "panSessionActive":      ("1.3.6.1.4.1.25461.2.1.2.3.3.0", "sessions", "アクティブセッション数", None, None),
+            "panSessionMax":         ("1.3.6.1.4.1.25461.2.1.2.3.2.0", "sessions", "最大セッション数", None, None),
+            "panSessionSslProxyUtil":("1.3.6.1.4.1.25461.2.1.2.3.4.0", "%", "SSL復号セッション使用率", 80, 90),
+            "panGPGatewayUtilPct":   ("1.3.6.1.4.1.25461.2.1.2.5.1.3.0", "%", "GlobalProtect使用率", 80, 90),
+        },
+    },
+    "F5 BIG-IP": {
+        "enterprise": "1.3.6.1.4.1.3375",
+        "keywords": ["big-ip", "bigip", "f5 networks", "tmos"],
+        "oids": {
+            "sysStatClientCurConns": ("1.3.6.1.4.1.3375.2.1.1.2.1.8.0", "conns", "現在のクライアント接続数", None, None),
+            "sysStatServerCurConns": ("1.3.6.1.4.1.3375.2.1.1.2.1.15.0", "conns", "現在のサーバ接続数", None, None),
+            "sysGlobalTmmStatMemoryUsed":  ("1.3.6.1.4.1.3375.2.1.1.2.21.28.0", "bytes", "TMMメモリ使用量", None, None),
+            "sysGlobalTmmStatMemoryTotal": ("1.3.6.1.4.1.3375.2.1.1.2.21.29.0", "bytes", "TMMメモリ総量", None, None),
+            "sysGlobalHostCpuUsageRatio":  ("1.3.6.1.4.1.3375.2.1.1.2.20.35.0", "%", "ホストCPU使用率", 80, 95),
+        },
+    },
+}
+
+
+def vendor_metric_labels() -> dict:
+    """ベンダーMIBの oid_name -> 日本語ラベル を返す（UI表示用）。"""
+    out = {}
+    for spec in VENDOR_MIBS.values():
+        for name, (oid, unit, label, w, c) in spec["oids"].items():
+            out[name] = label
+    return out
+
+
+def _detect_vendor(sysobjectid: str, sysdescr: str) -> str | None:
+    """sysObjectID(enterprise番号) または sysDescr からベンダーを判別。"""
+    oid = sysobjectid or ""
+    for vendor, spec in VENDOR_MIBS.items():
+        if oid.startswith(spec["enterprise"]):
+            return vendor
+    low = (sysdescr or "").lower()
+    for vendor, spec in VENDOR_MIBS.items():
+        if any(k in low for k in spec["keywords"]):
+            return vendor
+    return None
+
 
 def _init_snmp_tables():
     with sqlite3.connect(DB_PATH, check_same_thread=False) as conn:
@@ -214,6 +274,35 @@ def poll_device(ip: str, community: str = "public",
                 (recorded_at, source_ip, hostname, oid_name, oid, value, unit, alert_level)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (recorded_at, ip, hostname or ip, oid_name, oid, value, unit, alert_level))
+
+        # ── ベンダー固有MIBの収集（sysObjectID/sysDescrで自動判別） ──
+        try:
+            _sysoid = snmp_get(ip, community, "1.3.6.1.2.1.1.2.0", port, version)
+            _vendor = _detect_vendor(_sysoid, results.get("sysDescr", ""))
+            if _vendor and _vendor in VENDOR_MIBS:
+                for v_name, (v_oid, v_unit, v_label, v_warn, v_crit) in VENDOR_MIBS[_vendor]["oids"].items():
+                    v_val = snmp_get(ip, community, v_oid, port, version)
+                    if v_val is None:
+                        continue
+                    v_alert = "none"
+                    if v_warn is not None:
+                        try:
+                            fv = float(v_val)
+                            if fv >= v_crit:
+                                v_alert = "critical"
+                            elif fv >= v_warn:
+                                v_alert = "warning"
+                        except (ValueError, TypeError):
+                            pass
+                    results[v_name] = v_val
+                    conn.execute("""
+                        INSERT INTO snmp_metrics
+                        (recorded_at, source_ip, hostname, oid_name, oid, value, unit, alert_level)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (recorded_at, ip, hostname or ip, v_name, v_oid, v_val, v_unit, v_alert))
+                results["_vendor"] = _vendor
+        except Exception as _ve:
+            print(f"[Poller:VendorMIB] {ip}: {_ve}")
 
         # デバイステーブルを更新
         conn.execute("""

@@ -100,14 +100,27 @@ def svg_gauge(value, vmax, label="", unit="", warn=None, crit=None,
 
 # oid_name → ゲージ仕様（最大値・しきい値・単位・表示名）
 _GAUGE_SPECS = {
+    # 汎用
     "cpmCPUTotal5min": {"max": 100, "warn": 70, "crit": 90, "unit": "%", "label": "CPU(5分)"},
     "cpmCPUTotal1min": {"max": 100, "warn": 80, "crit": 95, "unit": "%", "label": "CPU(1分)"},
+    "cpmCPUTotal5sec": {"max": 100, "warn": 85, "crit": 95, "unit": "%", "label": "CPU(5秒)"},
     "ciscoEnvMonTemperatureStatusValue": {"max": 100, "warn": 60, "crit": 75, "unit": "℃", "label": "温度"},
     "memory_used_pct": {"max": 100, "warn": 75, "crit": 90, "unit": "%", "label": "メモリ使用率"},
     "bandwidth_util_pct": {"max": 100, "warn": 70, "crit": 90, "unit": "%", "label": "帯域使用率"},
+    # Palo Alto 固有
+    "panSessionUtilization":  {"max": 100, "warn": 80, "crit": 90, "unit": "%", "label": "セッション使用率"},
+    "panSessionSslProxyUtil": {"max": 100, "warn": 80, "crit": 90, "unit": "%", "label": "SSL復号使用率"},
+    "panGPGatewayUtilPct":    {"max": 100, "warn": 80, "crit": 90, "unit": "%", "label": "GP使用率"},
+    # F5 BIG-IP 固有
+    "sysGlobalHostCpuUsageRatio": {"max": 100, "warn": 80, "crit": 95, "unit": "%", "label": "ホストCPU"},
 }
 
 
 def gauge_spec_for(oid_name: str):
     """ゲージ表示すべき指標なら仕様を返す。対象外なら None。"""
-    return _GAUGE_SPECS.get(oid_name)
+    if oid_name in _GAUGE_SPECS:
+        return _GAUGE_SPECS[oid_name]
+    # 登録IFの使用率(if{N}_util)もゲージ表示
+    if oid_name and oid_name.startswith("if") and oid_name.endswith("_util"):
+        return {"max": 100, "warn": 70, "crit": 90, "unit": "%", "label": oid_name}
+    return None
