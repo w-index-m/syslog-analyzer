@@ -1022,6 +1022,18 @@ def _rule_based_health_diagnosis(device_health):
 _PCAP_SYSTEM_PROMPT = """あなたはパケットキャプチャ（pcap）を分析するネットワークエンジニアです。
 提供されるpcap解析サマリーを読み、ネットワーク上の問題を日本語で診断してください。
 
+【TCP再送・PSHフラグの判断基準（重要）】
+- PSH（プッシュ）フラグは、アプリケーションがデータを即座に上位層へ渡すよう要求する
+  正常なTCP動作であり、単独で出現しても問題ではありません。他の異常兆候が無い限り
+  問題として扱わないでください。
+- TCP再送（retransmission）は、無線/VPN/インターネット経由の通信では一定数発生するのが
+  通常です。目安として、キャプチャ全体の再送率(retrans_rate_pct)が概ね1%未満であれば
+  正常範囲内と判断してください。1〜3%程度は「要注意」、3%を超える、または特定の
+  1フローに再送が集中している（接続が実質的に停滞している）場合は「問題あり」として
+  具体的な原因（輻輳・回線品質・相手ホストの応答遅延など）を推定してください。
+- 再送やPSHについて言及する場合は、上記の基準に照らして「問題かどうか」を明言し、
+  正常範囲内であればpositive_findingsに、問題があればtop_issuesに分類してください。
+
 必ずJSON形式で以下の構造で返してください:
 {
   "overall_health": "正常|要注意|問題あり|重大",
@@ -1051,6 +1063,7 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
     dns_s        = r.get("dns_summary", {})
     tls_s        = r.get("tls_summary", {})
 
+    retrans_s = r.get("tcp_retrans_summary", {})
     lines = [
         f"キャプチャ期間: {r.get('capture_start','')} 〜 {r.get('capture_end','')}",
         f"総パケット数: {r.get('total_packets', 0):,}",
@@ -1061,7 +1074,9 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
         "",
         "【TCP】",
         f"  問題フロー: {len(r.get('tcp_issues', []))} 件",
-        f"  再送多発: {len(r.get('tcp_retransmissions', []))} フロー",
+        f"  再送多発: {len(r.get('tcp_retransmissions', []))} フロー"
+        f"（総再送回数 {retrans_s.get('total_retrans', 0)} / 全体の {retrans_s.get('retrans_rate_pct', 0)}%"
+        f" ※判断基準は上記システム指示を参照）",
         f"  SYN未応答（接続失敗）: {len(r.get('tcp_syn_no_synack', []))} フロー",
         f"  ゼロウィンドウ: {len(r.get('tcp_zero_window', []))} フロー",
     ]
@@ -1203,12 +1218,10 @@ def diagnose_pcap(pcap_result: dict, mode: str = "auto") -> dict:
     providers = {"claude": _call_claude, "gemini": _call_gemini,
                  "groq": _call_groq, "ollama": _call_ollama}
 
-    if mode in providers:
-        result = providers[mode]()
-    else:
-        result = None
-        for fn in (_call_claude, _call_gemini, _call_groq, _call_ollama):
-            result = fn()
+    result = None
+    if mode != "none":
+        for key in _cascade_order(providers, mode):
+            result = providers[key]()
             if result:
                 break
 

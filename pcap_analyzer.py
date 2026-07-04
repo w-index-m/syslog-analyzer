@@ -313,6 +313,7 @@ def analyze_pcap(data: bytes) -> dict:
         arp_anomalies       ARP 重複/変化
         tcp_issues          TCP 問題 (RST多発・再送・接続失敗・ゼロウィンドウ)
         tcp_retransmissions TCP 再送多発フロー
+        tcp_retrans_summary 再送率サマリー(total_retrans/flows_affected/total_packets/retrans_rate_pct)
         tcp_syn_no_synack   SYN 未応答（接続失敗）
         tcp_zero_window     TCP ゼロウィンドウ発生フロー
         ip_fragments        IP フラグメント発生フロー
@@ -701,6 +702,16 @@ def analyze_pcap(data: bytes) -> dict:
                 "type": "再送多発", "src": src, "dst": dst, "src_port": sp, "dst_port": dp,
                 "count": cnt, "description": entry["description"],
             })
+
+    # 再送率サマリー（LLMが「問題あり/正常範囲内」を定量的に判断できるように）
+    _total_retrans = sum(tcp_retrans_count.values())
+    result["tcp_retrans_summary"] = {
+        "total_retrans": _total_retrans,
+        "flows_affected": len([c for c in tcp_retrans_count.values() if c >= 3]),
+        "total_packets": result["total_packets"],
+        "retrans_rate_pct": (round(_total_retrans / result["total_packets"] * 100, 3)
+                             if result["total_packets"] else 0),
+    }
 
     # SYN 未応答
     cap_end = max(timestamps) if timestamps else 0
