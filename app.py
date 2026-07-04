@@ -232,6 +232,14 @@ with st.sidebar:
     claude_ok = analyzer.check_claude_available()
     gemini_ok = analyzer.check_gemini_available()
     groq_ok   = analyzer.check_groq_available()
+
+    # アプリ起動時に Ollama が未起動なら一度だけ自動起動を試みる
+    if not st.session_state.get("_ollama_autostart_tried"):
+        st.session_state["_ollama_autostart_tried"] = True
+        if not analyzer.check_ollama_available():
+            _ok, _msg = analyzer.start_ollama(wait_sec=8)
+            if _ok:
+                st.toast("🏠 Ollama を自動起動しました")
     ollama_ok = analyzer.check_ollama_available()
 
     st.markdown(f"{'✅' if claude_ok else '❌'} Claude API "
@@ -242,6 +250,13 @@ with st.sidebar:
                 f"({'APIキーあり' if groq_ok else 'GROQ_API_KEY未設定'})")
     st.markdown(f"{'✅' if ollama_ok else '❌'} Ollama "
                 f"({'接続OK' if ollama_ok else 'localhost:11434 未起動'})")
+    if not ollama_ok:
+        if st.button("▶ Ollama を起動する", key="start_ollama_btn", use_container_width=True):
+            with st.spinner("Ollama を起動中…"):
+                _ok, _msg = analyzer.start_ollama(wait_sec=10)
+            (st.success if _ok else st.error)(_msg)
+            if _ok:
+                st.rerun()
 
     with st.expander("🔑 APIキー設定", expanded=not (claude_ok or gemini_ok or groq_ok)):
         import os

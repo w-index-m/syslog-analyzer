@@ -112,6 +112,33 @@ def check_ollama_available() -> bool:
     except:
         return False
 
+def start_ollama(wait_sec: int = 8) -> tuple[bool, str]:
+    """
+    Ollama サーバが未起動なら `ollama serve` を起動する。
+    戻り値: (起動できたか, メッセージ)
+    """
+    import subprocess, time, platform
+    if check_ollama_available():
+        return True, "Ollama は既に起動しています。"
+    try:
+        kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        if platform.system() == "Windows":
+            # 新しいコンソールを開かず、独立プロセスとして起動
+            kwargs["creationflags"] = 0x00000008 | 0x00000200  # DETACHED|NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen(["ollama", "serve"], **kwargs)
+    except FileNotFoundError:
+        return False, "ollama コマンドが見つかりません。Ollama をインストールしてください（https://ollama.com）。"
+    except Exception as e:
+        return False, f"Ollama 起動に失敗: {e}"
+    # 起動待ち
+    for _ in range(max(1, wait_sec)):
+        time.sleep(1)
+        if check_ollama_available():
+            return True, "Ollama を起動しました。"
+    return False, "Ollama を起動しましたが応答待ちがタイムアウトしました。数秒後に再読み込みしてください。"
+
 def list_ollama_models() -> list:
     """Ollama に導入済みのモデル名一覧を返す（未起動時は空）。"""
     try:
