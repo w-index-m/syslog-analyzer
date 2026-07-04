@@ -112,6 +112,16 @@ def check_ollama_available() -> bool:
     except:
         return False
 
+def list_ollama_models() -> list:
+    """Ollama に導入済みのモデル名一覧を返す（未起動時は空）。"""
+    try:
+        r = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=3)
+        if r.status_code == 200:
+            return [m.get("name", "") for m in r.json().get("models", []) if m.get("name")]
+    except Exception:
+        pass
+    return []
+
 def check_claude_available() -> bool:
     return bool(ANTHROPIC_API_KEY)
 
@@ -177,11 +187,16 @@ def analyze_with_groq(parsed: dict, raw: str, config_context: str = "") -> tuple
     return _call_groq_raw(SYSTEM_PROMPT, _build_user_prompt(parsed, raw, config_context))
 
 
+LAST_LLM_ERROR = ""  # 直近のLLM呼び出し失敗理由（UI表示用）
+
+
 def ask_llm(system: str, user: str, mode: str = "auto", max_tokens: int = 1000) -> tuple[str, str]:
     """
     汎用LLM呼び出し。どのタブからでも使えるシンプルなインターフェース。
     戻り値: (テキスト, モデル名)  失敗時は ("", "")
     """
+    globals()["LAST_LLM_ERROR"] = ""
+
     def _claude():
         if not ANTHROPIC_API_KEY:
             return "", ""
@@ -209,11 +224,20 @@ def ask_llm(system: str, user: str, mode: str = "auto", max_tokens: int = 1000) 
                       "messages": [{"role": "system", "content": system},
                                    {"role": "user",   "content": user}],
                       "stream": False, "options": {"temperature": 0.2}},
-                timeout=120,
+                timeout=180,
             )
+            if resp.status_code == 404 or "not found" in (resp.text or "").lower():
+                # モデル未導入が最頻の原因
+                globals()["LAST_LLM_ERROR"] = (
+                    f"Ollamaにモデル '{OLLAMA_MODEL}' が見つかりません。"
+                    f"`ollama pull {OLLAMA_MODEL}` で取得するか、"
+                    f"サイドバーで導入済みモデルを選択してください。")
+                print(f"[ask_llm:Ollama] model not found: {OLLAMA_MODEL}")
+                return "", ""
             resp.raise_for_status()
             return resp.json()["message"]["content"].strip(), f"ollama/{OLLAMA_MODEL}"
         except Exception as e:
+            globals()["LAST_LLM_ERROR"] = f"Ollama接続エラー: {e}"
             print(f"[ask_llm:Ollama] {e}"); return "", ""
 
     def _gemini():

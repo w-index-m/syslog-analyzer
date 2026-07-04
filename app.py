@@ -273,9 +273,22 @@ with st.sidebar:
 
     if ollama_ok:
         import os
-        current_model = os.environ.get("OLLAMA_MODEL", "llama3")
-        st.text_input("Ollamaモデル名", value=current_model,
-                      help="ollama pull llama3 などで取得したモデル名")
+        _installed = analyzer.list_ollama_models()
+        _cur_model = os.environ.get("OLLAMA_MODEL", analyzer.OLLAMA_MODEL)
+        if _installed:
+            # 導入済みモデルから選択（現在値が一覧に無ければ先頭を既定に）
+            _idx = _installed.index(_cur_model) if _cur_model in _installed else 0
+            _sel_model = st.selectbox("Ollamaモデル（導入済み）", _installed, index=_idx,
+                                      help="ローカルにpull済みのモデルから選択")
+        else:
+            _sel_model = st.text_input("Ollamaモデル名", value=_cur_model,
+                                       help="例: gemma3 / llama3 / qwen2.5 など")
+        # 選択したモデルを analyzer に反映（これが無いと既定のllama3のまま失敗する）
+        if _sel_model and _sel_model != analyzer.OLLAMA_MODEL:
+            analyzer.OLLAMA_MODEL = _sel_model
+            os.environ["OLLAMA_MODEL"] = _sel_model
+        st.caption(f"使用モデル: **{analyzer.OLLAMA_MODEL}**"
+                   + ("" if _installed else "（Ollamaに導入済みか ollama list で確認してください）"))
 
     st.session_state.auto_analyze = st.checkbox("受信ログを自動AI解析", value=True)
     st.session_state.judge_enabled = st.checkbox(
@@ -1351,7 +1364,8 @@ with tab_showlog:
                 st.session_state["_showlog_llm_model"] = _mdl
                 st.session_state["_showlog_llm_done_ids"] = _cur_ids
             else:
-                st.error("LLM 解析に失敗しました。APIキー設定・ネットワークをご確認ください。")
+                _err = getattr(analyzer, "LAST_LLM_ERROR", "") or "APIキー設定・ネットワークをご確認ください。"
+                st.error(f"LLM 解析に失敗しました。{_err}")
 
         # 自動実行: 新しい取り込みバッチがあり、まだ解析していなければ即実行（バッチ毎に1回）
         if _auto_on and _cur_ids and _cur_ids != _done_ids:
