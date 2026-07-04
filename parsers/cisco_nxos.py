@@ -20,9 +20,25 @@ NXOS_PATTERN = re.compile(
     r":\s*(.*)"                                               # message
 )
 
+# NX-OS 年先頭タイムスタンプ（例: "2024 Jun 30 10:00:00 JST"）
+NXOS_TIMESTAMP = re.compile(r"\d{4}\s+\w{3}\s+\d+\s+[\d:]+")
+
+# NX-OS 固有ファシリティ（IOS/IOS-XE には無いもの）
+NXOS_FACILITIES = {
+    "VPC", "ETH_PORT_CHANNEL", "ETHPORT", "MODULE", "PLATFORM", "VSHD",
+    "VDC_MGR", "FEATURE_MGR", "SATCTRL", "NOHMS", "CARDCLIENT", "IPQOSMGR",
+    "ASCII_CFG", "PFMA", "SYSMGR", "PORT_CHANNEL", "MTS", "MCM", "FWM",
+}
+
+
 def parse(raw: str, source_ip: str) -> dict | None:
     m = NXOS_PATTERN.search(raw)
     if not m:
+        return None
+    facility = m.group(4)
+    # NX-OS 確定条件: 年先頭タイムスタンプ or NX-OS 固有ファシリティのいずれか。
+    # これが無いものは IOS/IOS-XE に譲る（両者は %FAC-N-MNEM 形式が同一のため）。
+    if not (NXOS_TIMESTAMP.search(raw) or facility in NXOS_FACILITIES):
         return None
     pri, timestamp, hostname, facility, sev_digit, mnemonic, message = m.groups()
     severity_name = SEVERITY_MAP.get(sev_digit, "UNKNOWN")

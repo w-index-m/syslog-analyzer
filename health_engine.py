@@ -3,12 +3,13 @@
 SNMPメトリクスから機器ごとのヘルススコアを算出し、
 スループット・破棄・ブロードキャスト・CPU相関などを評価する。
 """
+import os
 import sqlite3
 import json
 from datetime import datetime
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "syslog.db"
+DB_PATH = Path(os.environ.get("DB_PATH", str(Path(__file__).parent / "syslog.db")))
 
 # ─────────────────────────────────────────
 # 拡張SNMP収集対象OID（スループット・Cisco輻輳系）
@@ -40,6 +41,8 @@ EXTENDED_OIDS = {
     # Cisco メモリ
     "ciscoMemoryPoolUsed": "1.3.6.1.4.1.9.9.48.1.1.1.5.1",
     "ciscoMemoryPoolFree": "1.3.6.1.4.1.9.9.48.1.1.1.6.1",
+    # Cisco 環境モニター（温度）
+    "ciscoEnvMonTemperatureStatusValue": "1.3.6.1.4.1.9.9.13.1.3.1.3.1",
     # Cisco バッファ・インターフェースリセット
     "locIfResets":       "1.3.6.1.4.1.9.2.2.1.1.17.1",
 }
@@ -57,6 +60,7 @@ HEALTH_THRESHOLDS = {
     "error_pct":       {"warning": 0.01, "critical": 0.1, "unit": "%"},
     # スループットが期待値を下回る場合（健全性低下）
     "throughput_low_pct": {"warning": 30, "critical": 10, "unit": "%"},
+    "temperature_celsius": {"warning": 60, "critical": 75, "unit": "℃"},
 }
 
 
@@ -257,6 +261,20 @@ def evaluate_device_health(source_ip: str, hostname: str,
             score -= 8
             issues.append({"level": "warning", "category": "メモリ",
                           "msg": f"メモリ使用率が高め: {mem_pct}%"})
+
+    # ── 温度評価（Cisco ciscoEnvMonTemperatureStatusValue）──
+    temp_c = _to_float(snmp_metrics.get("ciscoEnvMonTemperatureStatusValue"))
+    if temp_c is not None:
+        metrics_summary["temperature_celsius"] = temp_c
+        th = HEALTH_THRESHOLDS["temperature_celsius"]
+        if temp_c >= th["critical"]:
+            score -= 20
+            issues.append({"level": "critical", "category": "温度",
+                          "msg": f"筐体温度が危険水準: {temp_c}℃ (冷却障害の疑い)"})
+        elif temp_c >= th["warning"]:
+            score -= 8
+            issues.append({"level": "warning", "category": "温度",
+                          "msg": f"筐体温度が高め: {temp_c}℃"})
 
     # ── インターフェース別評価 ──
     if_issues_count = 0

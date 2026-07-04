@@ -3,3 +3,4 @@ __pycache__/
 syslog.db
 venv/
 .venv/
+user_settings.json

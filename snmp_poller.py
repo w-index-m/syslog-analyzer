@@ -3,6 +3,7 @@ SNMP Poller
 ネットワーク機器に定期的にSNMP GETを送信してテレメトリデータを収集する
 対象MIB: IF-MIB, ENTITY-MIB, HOST-RESOURCES-MIB, Cisco/Fujitsu固有MIB
 """
+import os
 import threading
 import time
 import sqlite3
@@ -10,7 +11,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "syslog.db"
+DB_PATH = Path(os.environ.get("DB_PATH", str(Path(__file__).parent / "syslog.db")))
 
 # ─────────────────────────────────────────
 # 収集対象OID定義
@@ -56,6 +57,66 @@ THRESHOLDS = {
     "ifOutErrors.1":   {"warning": 10, "critical": 100, "unit": "errors", "label": "送信エラー"},
 }
 
+# ── ベンダー固有 MIB（enterprise番号で自動判別して収集） ──────────
+#   各エントリ: oid_name -> (oid, unit, label, warn, crit)  warn/crit は None 可
+VENDOR_MIBS = {
+    "Cisco": {
+        "enterprise": "1.3.6.1.4.1.9",
+        "keywords": ["cisco", "ios", "nx-os", "catalyst", "nexus"],
+        "oids": {
+            "cpmCPUTotal5sec":  ("1.3.6.1.4.1.9.9.109.1.1.1.1.6.1", "%", "CPU使用率(5秒)", 85, 95),
+            "ciscoMemoryPoolUsed": ("1.3.6.1.4.1.9.9.48.1.1.1.5.1", "bytes", "メモリ使用量", None, None),
+            "ciscoMemoryPoolFree": ("1.3.6.1.4.1.9.9.48.1.1.1.6.1", "bytes", "メモリ空き", None, None),
+            "ciscoEnvMonFanState":    ("1.3.6.1.4.1.9.9.13.1.4.1.3.1", "", "ファン状態(1=正常)", None, None),
+            "ciscoEnvMonSupplyState": ("1.3.6.1.4.1.9.9.13.1.5.1.3.1", "", "電源状態(1=正常)", None, None),
+        },
+    },
+    "Palo Alto": {
+        "enterprise": "1.3.6.1.4.1.25461",
+        "keywords": ["palo alto", "pan-os", "panorama"],
+        "oids": {
+            "panSessionUtilization": ("1.3.6.1.4.1.25461.2.1.2.3.1.0", "%", "セッション使用率", 80, 90),
+            "panSessionActive":      ("1.3.6.1.4.1.25461.2.1.2.3.3.0", "sessions", "アクティブセッション数", None, None),
+            "panSessionMax":         ("1.3.6.1.4.1.25461.2.1.2.3.2.0", "sessions", "最大セッション数", None, None),
+            "panSessionSslProxyUtil":("1.3.6.1.4.1.25461.2.1.2.3.4.0", "%", "SSL復号セッション使用率", 80, 90),
+            "panGPGatewayUtilPct":   ("1.3.6.1.4.1.25461.2.1.2.5.1.3.0", "%", "GlobalProtect使用率", 80, 90),
+        },
+    },
+    "F5 BIG-IP": {
+        "enterprise": "1.3.6.1.4.1.3375",
+        "keywords": ["big-ip", "bigip", "f5 networks", "tmos"],
+        "oids": {
+            "sysStatClientCurConns": ("1.3.6.1.4.1.3375.2.1.1.2.1.8.0", "conns", "現在のクライアント接続数", None, None),
+            "sysStatServerCurConns": ("1.3.6.1.4.1.3375.2.1.1.2.1.15.0", "conns", "現在のサーバ接続数", None, None),
+            "sysGlobalTmmStatMemoryUsed":  ("1.3.6.1.4.1.3375.2.1.1.2.21.28.0", "bytes", "TMMメモリ使用量", None, None),
+            "sysGlobalTmmStatMemoryTotal": ("1.3.6.1.4.1.3375.2.1.1.2.21.29.0", "bytes", "TMMメモリ総量", None, None),
+            "sysGlobalHostCpuUsageRatio":  ("1.3.6.1.4.1.3375.2.1.1.2.20.35.0", "%", "ホストCPU使用率", 80, 95),
+        },
+    },
+}
+
+
+def vendor_metric_labels() -> dict:
+    """ベンダーMIBの oid_name -> 日本語ラベル を返す（UI表示用）。"""
+    out = {}
+    for spec in VENDOR_MIBS.values():
+        for name, (oid, unit, label, w, c) in spec["oids"].items():
+            out[name] = label
+    return out
+
+
+def _detect_vendor(sysobjectid: str, sysdescr: str) -> str | None:
+    """sysObjectID(enterprise番号) または sysDescr からベンダーを判別。"""
+    oid = sysobjectid or ""
+    for vendor, spec in VENDOR_MIBS.items():
+        if oid.startswith(spec["enterprise"]):
+            return vendor
+    low = (sysdescr or "").lower()
+    for vendor, spec in VENDOR_MIBS.items():
+        if any(k in low for k in spec["keywords"]):
+            return vendor
+    return None
+
 
 def _init_snmp_tables():
     with sqlite3.connect(DB_PATH, check_same_thread=False) as conn:
@@ -84,6 +145,18 @@ def _init_snmp_tables():
                 interval_sec INTEGER DEFAULT 60,
                 last_polled TEXT,
                 last_status TEXT DEFAULT 'unknown'
+            )
+        """)
+        # 監視対象インターフェース（SNMP Walk で選んだIFを登録）
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS snmp_monitored_ifs (
+                ip TEXT NOT NULL,
+                ifindex TEXT NOT NULL,
+                ifname TEXT,
+                last_in_oct TEXT,
+                last_out_oct TEXT,
+                last_ts TEXT,
+                PRIMARY KEY (ip, ifindex)
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_snmp_ip ON snmp_metrics(source_ip)")
@@ -202,6 +275,35 @@ def poll_device(ip: str, community: str = "public",
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (recorded_at, ip, hostname or ip, oid_name, oid, value, unit, alert_level))
 
+        # ── ベンダー固有MIBの収集（sysObjectID/sysDescrで自動判別） ──
+        try:
+            _sysoid = snmp_get(ip, community, "1.3.6.1.2.1.1.2.0", port, version)
+            _vendor = _detect_vendor(_sysoid, results.get("sysDescr", ""))
+            if _vendor and _vendor in VENDOR_MIBS:
+                for v_name, (v_oid, v_unit, v_label, v_warn, v_crit) in VENDOR_MIBS[_vendor]["oids"].items():
+                    v_val = snmp_get(ip, community, v_oid, port, version)
+                    if v_val is None:
+                        continue
+                    v_alert = "none"
+                    if v_warn is not None:
+                        try:
+                            fv = float(v_val)
+                            if fv >= v_crit:
+                                v_alert = "critical"
+                            elif fv >= v_warn:
+                                v_alert = "warning"
+                        except (ValueError, TypeError):
+                            pass
+                    results[v_name] = v_val
+                    conn.execute("""
+                        INSERT INTO snmp_metrics
+                        (recorded_at, source_ip, hostname, oid_name, oid, value, unit, alert_level)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (recorded_at, ip, hostname or ip, v_name, v_oid, v_val, v_unit, v_alert))
+                results["_vendor"] = _vendor
+        except Exception as _ve:
+            print(f"[Poller:VendorMIB] {ip}: {_ve}")
+
         # デバイステーブルを更新
         conn.execute("""
             INSERT INTO snmp_devices (ip, hostname, community, version, port, last_polled, last_status)
@@ -294,7 +396,8 @@ def poll_device_health(ip: str, community: str = "public",
     # システムメトリクス（スカラOID）をGET
     snmp_metrics = {}
     for name in ["cpmCPUTotal5min", "cpmCPUTotal1min", "cpmCPUTotal5sec",
-                 "ciscoMemoryPoolUsed", "ciscoMemoryPoolFree"]:
+                 "ciscoMemoryPoolUsed", "ciscoMemoryPoolFree",
+                 "ciscoEnvMonTemperatureStatusValue"]:
         oid = he.EXTENDED_OIDS.get(name)
         if oid:
             val = snmp_get(ip, community, oid, port, version)
@@ -424,6 +527,166 @@ def remove_device(ip: str):
         conn.commit()
 
 
+# 探索(ディスカバリ)用OID
+_DISCOVER_OIDS = {
+    "sysDescr":  "1.3.6.1.2.1.1.1.0",
+    "sysName":   "1.3.6.1.2.1.1.5.0",
+    "sysObjectID": "1.3.6.1.2.1.1.2.0",
+    "sysLocation": "1.3.6.1.2.1.1.6.0",
+}
+_IF_DESCR_OID  = "1.3.6.1.2.1.2.2.1.2"       # ifDescr
+_IF_NAME_OID   = "1.3.6.1.2.1.31.1.1.1.1"    # ifName
+_IF_OPER_OID   = "1.3.6.1.2.1.2.2.1.8"       # ifOperStatus (1=up,2=down)
+_IF_ALIAS_OID  = "1.3.6.1.2.1.31.1.1.1.18"   # ifAlias
+
+
+# 監視対象IF収集用OID（インデックスを付けてGET）
+_OID_IF_HC_IN   = "1.3.6.1.2.1.31.1.1.1.6"    # ifHCInOctets
+_OID_IF_HC_OUT  = "1.3.6.1.2.1.31.1.1.1.10"   # ifHCOutOctets
+_OID_IF_INOCT   = "1.3.6.1.2.1.2.2.1.10"      # ifInOctets(32bit fallback)
+_OID_IF_OUTOCT  = "1.3.6.1.2.1.2.2.1.16"
+_OID_IF_HISPEED = "1.3.6.1.2.1.31.1.1.1.15"   # ifHighSpeed(Mbps)
+_OID_IF_OPER2   = "1.3.6.1.2.1.2.2.1.8"       # ifOperStatus
+_OID_IF_INERR2  = "1.3.6.1.2.1.2.2.1.14"      # ifInErrors
+
+
+def set_monitored_interfaces(ip: str, interfaces: list):
+    """
+    監視対象インターフェースを登録する。
+    interfaces: [{"index": str, "name": str}, ...]（既存はこのIP分を置換）
+    """
+    _init_snmp_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM snmp_monitored_ifs WHERE ip=?", (ip,))
+        for itf in interfaces:
+            conn.execute(
+                "INSERT OR REPLACE INTO snmp_monitored_ifs (ip, ifindex, ifname) VALUES (?,?,?)",
+                (ip, str(itf.get("index")), itf.get("name", "")))
+        conn.commit()
+
+
+def get_monitored_interfaces(ip: str = None) -> list:
+    _init_snmp_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        if ip:
+            rows = conn.execute("SELECT * FROM snmp_monitored_ifs WHERE ip=?", (ip,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM snmp_monitored_ifs").fetchall()
+        return [dict(r) for r in rows]
+
+
+def poll_monitored_interfaces(ip: str, community: str = "public",
+                              version: str = "v2c", port: int = 161,
+                              hostname: str = None):
+    """
+    登録済みの監視対象IFについて、送受信オクテットをGETし、
+    前回値との差分から bps・帯域使用率を算出して snmp_metrics に保存する。
+    （Walkで選んだIFをそのまま自動ポーリングする＝手動OID入力不要）
+    """
+    ifs = get_monitored_interfaces(ip)
+    if not ifs:
+        return
+    now = datetime.now()
+    now_iso = now.isoformat()
+    host = hostname or snmp_get(ip, community, "1.3.6.1.2.1.1.5.0", port, version) or ip
+    with sqlite3.connect(DB_PATH, check_same_thread=False) as conn:
+        for mif in ifs:
+            idx = mif["ifindex"]
+            name = mif.get("ifname") or f"if{idx}"
+            in_oct  = snmp_get(ip, community, f"{_OID_IF_HC_IN}.{idx}", port, version) \
+                      or snmp_get(ip, community, f"{_OID_IF_INOCT}.{idx}", port, version)
+            out_oct = snmp_get(ip, community, f"{_OID_IF_HC_OUT}.{idx}", port, version) \
+                      or snmp_get(ip, community, f"{_OID_IF_OUTOCT}.{idx}", port, version)
+            oper = snmp_get(ip, community, f"{_OID_IF_OPER2}.{idx}", port, version)
+            hispeed = snmp_get(ip, community, f"{_OID_IF_HISPEED}.{idx}", port, version)  # Mbps
+            inerr = snmp_get(ip, community, f"{_OID_IF_INERR2}.{idx}", port, version)
+
+            # 状態メトリクス
+            status = "up" if str(oper).strip() == "1" else ("down" if str(oper).strip() == "2" else "?")
+            _lbl = f"{name}"
+            def _save(oid_name, value, unit, alert="none"):
+                conn.execute("""INSERT INTO snmp_metrics
+                    (recorded_at, source_ip, hostname, oid_name, oid, value, unit, alert_level)
+                    VALUES (?,?,?,?,?,?,?,?)""",
+                    (now_iso, ip, f"{host} {name}", oid_name, f"if{idx}", value, unit, alert))
+
+            # 差分から bps を計算
+            prev = conn.execute(
+                "SELECT last_in_oct, last_out_oct, last_ts FROM snmp_monitored_ifs WHERE ip=? AND ifindex=?",
+                (ip, idx)).fetchone()
+            in_bps = out_bps = util = None
+            if prev and prev[2] and in_oct is not None and out_oct is not None:
+                try:
+                    dt = (now - datetime.fromisoformat(prev[2])).total_seconds()
+                    if dt > 0:
+                        din = (int(in_oct) - int(prev[0])) if prev[0] is not None else 0
+                        dout = (int(out_oct) - int(prev[1])) if prev[1] is not None else 0
+                        if din >= 0:
+                            in_bps = round(din * 8 / dt)
+                        if dout >= 0:
+                            out_bps = round(dout * 8 / dt)
+                        speed_bps = (int(hispeed) * 1_000_000) if hispeed else 0
+                        if speed_bps > 0 and in_bps is not None and out_bps is not None:
+                            util = round(max(in_bps, out_bps) / speed_bps * 100, 1)
+                except (ValueError, TypeError):
+                    pass
+
+            # メトリクス保存（グラフ/ゲージ用）
+            if in_bps is not None:
+                _save(f"if{idx}_in_bps", in_bps, "bps")
+            if out_bps is not None:
+                _save(f"if{idx}_out_bps", out_bps, "bps")
+            if util is not None:
+                alert = "critical" if util >= 90 else ("warning" if util >= 70 else "none")
+                _save(f"if{idx}_util", util, "%", alert)
+            if inerr is not None:
+                _save(f"if{idx}_inerrors", inerr, "errors")
+            _save(f"if{idx}_status", status, "", "critical" if status == "down" else "none")
+
+            # 次回差分用に今回値を保存
+            conn.execute("UPDATE snmp_monitored_ifs SET last_in_oct=?, last_out_oct=?, last_ts=? WHERE ip=? AND ifindex=?",
+                         (str(in_oct) if in_oct is not None else None,
+                          str(out_oct) if out_oct is not None else None,
+                          now_iso, ip, idx))
+        conn.commit()
+
+
+def discover_device(ip: str, community: str = "public",
+                    version: str = "v2c", port: int = 161) -> dict:
+    """
+    SNMP Walk による機器探索（ディスカバリ）。
+    システム情報を GET し、インターフェース一覧を WALK で取得する。
+    戻り値: {"reachable": bool, "system": {...}, "interfaces": [{index,name,descr,status}], "error": str}
+    """
+    result = {"reachable": False, "system": {}, "interfaces": [], "error": ""}
+    # システム情報 GET
+    for name, oid in _DISCOVER_OIDS.items():
+        v = snmp_get(ip, community, oid, port, version)
+        if v is not None:
+            result["system"][name] = v
+            result["reachable"] = True
+    if not result["reachable"]:
+        result["error"] = "SNMP応答なし（IP/コミュニティ/バージョン/ポート/到達性を確認してください）"
+        return result
+    # インターフェース一覧 WALK（名前・説明・状態）
+    names  = snmp_walk(ip, community, _IF_NAME_OID, port, version, max_rows=200)
+    descrs = snmp_walk(ip, community, _IF_DESCR_OID, port, version, max_rows=200)
+    opers  = snmp_walk(ip, community, _IF_OPER_OID, port, version, max_rows=200)
+    idxs = sorted(set(list(names.keys()) + list(descrs.keys())),
+                  key=lambda x: int(x) if str(x).isdigit() else 0)
+    for idx in idxs:
+        st = str(opers.get(idx, "")).strip()
+        status = "up" if st == "1" else ("down" if st == "2" else st or "?")
+        result["interfaces"].append({
+            "index": idx,
+            "name": names.get(idx) or descrs.get(idx) or f"if{idx}",
+            "descr": descrs.get(idx, ""),
+            "status": status,
+        })
+    return result
+
+
 def get_alert_metrics() -> list[dict]:
     """閾値超過中のメトリクスを返す"""
     _init_snmp_tables()
@@ -505,6 +768,165 @@ def get_metric_trend(ip: str, oid_name: str, hours: int = 1) -> list[dict]:
 
 
 # ─────────────────────────────────────────
+# ルーティングテーブル取得（ipRouteTable Walk）
+# ─────────────────────────────────────────
+
+# ipRouteTable (RFC1213-MIB) OID
+_ROUTE_OIDS = {
+    "dest":    "1.3.6.1.2.1.4.21.1.1",   # ipRouteDest
+    "mask":    "1.3.6.1.2.1.4.21.1.11",  # ipRouteMask
+    "nexthop": "1.3.6.1.2.1.4.21.1.7",   # ipRouteNextHop
+    "type":    "1.3.6.1.2.1.4.21.1.8",   # ipRouteType (3=local, 4=remote)
+    "proto":   "1.3.6.1.2.1.4.21.1.9",   # ipRouteProto (1=other,2=local,3=netmgmt,9=ospf,13=bgp...)
+}
+_ROUTE_TYPE_MAP  = {"1": "other", "2": "reject", "3": "local",  "4": "remote"}
+_ROUTE_PROTO_MAP = {"1": "other", "2": "local",  "3": "static", "9": "ospf",
+                    "10": "isis", "13": "bgp",   "14": "eigrp"}
+
+
+def _init_routing_table():
+    with sqlite3.connect(DB_PATH, check_same_thread=False) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS snmp_routing_table (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                fetched_at TEXT NOT NULL,
+                source_ip  TEXT NOT NULL,
+                dest       TEXT NOT NULL,
+                mask       TEXT NOT NULL,
+                nexthop    TEXT NOT NULL,
+                route_type TEXT,
+                proto      TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rt_ip ON snmp_routing_table(source_ip)")
+        conn.commit()
+
+
+async def _snmp_walk_route_async(ip: str, community: str, base_oid: str,
+                                  port: int, version: str, max_rows: int = 300) -> dict:
+    """ipRouteTable系OIDをWALKし {インデックス(=宛先IP): 値} を返す。
+    インデックスはベースOID以降の数値サフィックス（例: "10.0.0.0"）。"""
+    from pysnmp.hlapi.v3arch.asyncio import (
+        next_cmd, SnmpEngine, CommunityData, UdpTransportTarget,
+        ContextData, ObjectType, ObjectIdentity
+    )
+    ver_map = {"v1": 0, "v2c": 1}
+    mp_model = ver_map.get(version, 1)
+    result = {}
+    target = await UdpTransportTarget.create((ip, port), timeout=5, retries=1)
+    engine = SnmpEngine()
+    auth = CommunityData(community, mpModel=mp_model)
+    ctx = ContextData()
+
+    current_var_binds = [ObjectType(ObjectIdentity(base_oid))]
+    rows = 0
+
+    while rows < max_rows:
+        err_ind, err_st, _, var_bind_table = await next_cmd(
+            engine, auth, target, ctx, *current_var_binds
+        )
+        if err_ind or err_st or not var_bind_table:
+            break
+
+        new_var_binds = []
+        stop = False
+        for var_bind in var_bind_table:
+            o, v = var_bind
+            # 数値OID文字列に変換（名前解決に依存しない）
+            numeric = ".".join(str(x) for x in o.asTuple())
+            if not numeric.startswith(base_oid + "."):
+                stop = True
+                break
+            val_str = str(v)
+            if val_str in ("No more variables left in this MIB View", ""):
+                stop = True
+                break
+            # ベースOID以降のサフィックスをキーにする
+            suffix = numeric[len(base_oid) + 1:]
+            result[suffix] = val_str
+            new_var_binds.append(ObjectType(o))
+        if stop or not new_var_binds:
+            break
+        current_var_binds = new_var_binds
+        rows += 1
+
+    return result
+
+
+def fetch_routing_table(ip: str, community: str = "public",
+                        version: str = "v2c", port: int = 161) -> list[dict]:
+    """SNMPウォークでルーティングテーブルを取得してDBに保存し、ルート一覧を返す。"""
+    _init_routing_table()
+
+    walked = {}
+    for key, oid in _ROUTE_OIDS.items():
+        try:
+            walked[key] = _run_async(
+                _snmp_walk_route_async(ip, community, oid, port, version)
+            )
+        except Exception as e:
+            print(f"[RoutingTable WALK] {ip} {key}: {e}")
+            walked[key] = {}
+
+    # インデックス（宛先IP）でマージ
+    fetched_at = datetime.now().isoformat()
+    routes = []
+    for idx in walked.get("dest", {}):
+        dest    = walked["dest"].get(idx, "")
+        mask    = walked["mask"].get(idx, "")
+        nexthop = walked["nexthop"].get(idx, "")
+        rtype   = _ROUTE_TYPE_MAP.get(walked["type"].get(idx, ""), "")
+        proto   = _ROUTE_PROTO_MAP.get(walked["proto"].get(idx, ""), "")
+        if dest:
+            routes.append({"dest": dest, "mask": mask, "nexthop": nexthop,
+                           "type": rtype, "proto": proto})
+
+    # DBに保存（旧データを削除して置き換え）
+    with sqlite3.connect(DB_PATH, check_same_thread=False) as conn:
+        conn.execute("DELETE FROM snmp_routing_table WHERE source_ip=?", (ip,))
+        for r in routes:
+            conn.execute("""
+                INSERT INTO snmp_routing_table
+                (fetched_at, source_ip, dest, mask, nexthop, route_type, proto)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (fetched_at, ip, r["dest"], r["mask"], r["nexthop"], r["type"], r["proto"]))
+        conn.commit()
+
+    return routes
+
+
+def get_routing_table(ip: str) -> list[dict]:
+    """DBに保存済みのルーティングテーブルを返す。"""
+    _init_routing_table()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(r) for r in conn.execute("""
+            SELECT dest, mask, nexthop, route_type, proto, fetched_at
+            FROM snmp_routing_table WHERE source_ip=?
+            ORDER BY dest
+        """, (ip,)).fetchall()]
+
+
+def route_lookup(ip: str, dest_ip: str) -> dict | None:
+    """宛先IPがルーティングテーブルに存在するか最長一致で探す。"""
+    import ipaddress
+    routes = get_routing_table(ip)
+    best = None
+    best_plen = -1
+    for r in routes:
+        try:
+            net = ipaddress.ip_network(f"{r['dest']}/{r['mask']}", strict=False)
+            if ipaddress.ip_address(dest_ip) in net:
+                plen = net.prefixlen
+                if plen > best_plen:
+                    best = r
+                    best_plen = plen
+        except Exception:
+            continue
+    return best
+
+
+# ─────────────────────────────────────────
 # バックグラウンドポーリングスレッド
 # ─────────────────────────────────────────
 _poller_thread = None
@@ -533,6 +955,16 @@ def _poller_loop():
                     port=dev.get("port", 161),
                     llm_mode="none"  # バックグラウンドではLLMは呼ばない
                 )
+                # 監視対象IF（Walkで選んだIF）のトラフィック/使用率を収集
+                poll_monitored_interfaces(
+                    ip=dev["ip"],
+                    community=dev.get("community", "public"),
+                    version=dev.get("version", "v2c"),
+                    port=dev.get("port", 161),
+                    hostname=dev.get("hostname"),
+                )
+                # ICMP Redirect → EPC 自動トリガー確認
+                _check_epc_trigger(dev["ip"])
             except Exception as e:
                 print(f"[Poller] {dev['ip']}: {e}")
                 with sqlite3.connect(DB_PATH) as conn:
@@ -544,6 +976,23 @@ def _poller_loop():
         # 最短インターバル分だけ待機
         intervals = [d.get("interval_sec", 60) for d in devices] if devices else [60]
         time.sleep(min(intervals) if intervals else 60)
+
+def _check_epc_trigger(ip: str):
+    """直近の ICMP Redirect 差分を見て、閾値超過なら EPC 自動起動を依頼"""
+    try:
+        import restconf_client as rc
+        rows = get_icmp_redirect_latest()
+        for row in rows:
+            if row.get("source_ip") != ip:
+                continue
+            if row.get("oid_name") != "icmpOutRedirects":
+                continue
+            diff = row.get("diff")
+            if diff is not None:
+                rc.check_and_trigger_epc(ip, int(diff))
+    except Exception as e:
+        print(f"[EPC Trigger check] {ip}: {e}")
+
 
 def start_poller():
     global _poller_thread, _poller_running

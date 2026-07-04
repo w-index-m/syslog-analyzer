@@ -1,4 +1,5 @@
-from parsers import cisco_ios, cisco_nxos, fujitsu_sir, apresia, rhel, windows
+from parsers import (cisco_ios, cisco_nxos, fujitsu_sir, fujitsu_ipcom, fujitsu_srs,
+                     f5_bigip, paloalto, apresia, rhel, windows)
 import re
 
 SEVERITY_MAP = {
@@ -9,9 +10,13 @@ SEVERITY_MAP = {
 # パーサーを優先順位順に並べる
 # 特定ベンダー固有キーワードを持つものを先に、汎用的なものを後に
 PARSERS = [
+    ("Cisco NX-OS",      cisco_nxos),     # NX-OS を IOS より先に（年先頭TS/固有facilityで確定判定）
     ("Cisco IOS/IOS-XE", cisco_ios),
-    ("Cisco NX-OS",      cisco_nxos),
+    ("富士通 IPCOM",      fujitsu_ipcom),  # IPCOM を Si-R より先に（共通プロセス名の衝突を回避）
+    ("富士通 SR-S",       fujitsu_srs),    # SR-S 固有プロセス(l2loopd/mstpd/protocol)で判定
     ("富士通 Si-R",       fujitsu_sir),
+    ("Palo Alto",        paloalto),       # CSV+Type(TRAFFIC/THREAT等)で確定判定
+    ("F5 BIG-IP LTM",    f5_bigip),       # tmm/mcpd/msgID(xxxxxxxx:N:)で判定
     ("APRESIA",          apresia),
     ("Windows",          windows),
     ("RHEL/Linux",       rhel),
