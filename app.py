@@ -775,6 +775,62 @@ def _llm_analyze_show_log(logs: list, mode: str,
     return analyzer.ask_llm(system, user, mode, max_tokens=3500)
 
 
+def _llm_analyze_prtg(devices: list, latest_metrics: list, alerts: list,
+                      label_map: dict, mode: str) -> tuple[str, str]:
+    """
+    PRTG風ダッシュボードの現況（デバイス状態・最新センサー値・超過アラート）を
+    LLMに渡し、総合的な健全性診断レポートを生成する。
+    戻り値: (レポート本文, モデル名)
+    """
+    # デバイス状態
+    dev_lines = []
+    for d in devices:
+        dev_lines.append(f"- {d.get('hostname') or d.get('ip')} ({d.get('ip')}): "
+                         f"状態={d.get('last_status','unknown')} 最終ポーリング={d.get('last_polled','-')}")
+    dev_ctx = "\n".join(dev_lines) if dev_lines else "(登録デバイスなし)"
+
+    # 最新センサー値（(ip, oid_name) ごとに最新1件）
+    seen = set()
+    sensor_lines = []
+    for m in latest_metrics:
+        key = (m.get("source_ip"), m.get("oid_name"))
+        if key in seen:
+            continue
+        seen.add(key)
+        name = label_map.get(m.get("oid_name"), m.get("oid_name"))
+        sensor_lines.append(f"- [{m.get('alert_level','none')}] {m.get('hostname') or m.get('source_ip')} "
+                            f"{name} = {m.get('value','-')} {m.get('unit','')}")
+    sensor_ctx = "\n".join(sensor_lines[:150]) if sensor_lines else "(センサーデータなし)"
+
+    # しきい値超過アラート
+    alert_lines = []
+    for a in alerts:
+        name = label_map.get(a.get("oid_name"), a.get("oid_name"))
+        alert_lines.append(f"- [{a.get('alert_level','')}] {a.get('hostname') or a.get('source_ip')} "
+                           f"{name} = {a.get('value','-')} {a.get('unit','')} ({a.get('recorded_at','')})")
+    alert_ctx = "\n".join(alert_lines) if alert_lines else "(しきい値超過なし)"
+
+    system = (
+        "あなたはネットワーク運用監視(PRTG/Zabbix等)に精通した運用エンジニアです。"
+        "SNMPポーリングで収集したデバイス状態・センサー値・アラートを分析し、"
+        "日本語で事実ベースの診断を行います。"
+        "提供データに無いことは推測せず「データなし」と明記してください。"
+    )
+    user = (
+        "以下はネットワーク監視ダッシュボードの現在の状態です。次の構成で診断してください。\n\n"
+        "1. 【全体サマリ】監視対象デバイス数・状態・全体的な健全性を3行以内で\n"
+        "2. 【デバイス状態】down/エラーの機器があれば個別に指摘\n"
+        "3. 【リソース逼迫】CPU/メモリ/温度/セッション数など高負荷の兆候（しきい値超過を優先）\n"
+        "4. 【トラフィック/帯域】帯域使用率が高いインターフェースや異常なエラーカウント\n"
+        "5. 【重大アラート】しきい値超過(critical/warning)の内容と考えられる原因\n"
+        "6. 【推奨アクション】優先度順に、確認すべきコマンドや対処\n\n"
+        f"────── 登録デバイス ({len(devices)}台) ──────\n{dev_ctx}\n\n"
+        f"────── 最新センサー値 ──────\n{sensor_ctx}\n\n"
+        f"────── しきい値超過アラート ──────\n{alert_ctx}\n"
+    )
+    return analyzer.ask_llm(system, user, mode, max_tokens=2500)
+
+
 def _scoped_showlog_logs() -> list:
     """
     show log解析タブの解析対象ログを返す。
@@ -1683,9 +1739,12 @@ with tab_prtg:
                     # 既に監視中のIFを既定選択に
                     _already = {m["ifindex"]: m for m in snmp_poller.get_monitored_interfaces(_disc_ip)}
                     _default = [lbl for lbl, i in _opt_labels.items() if str(i["index"]) in _already]
-                    _sel_ifs = st.multiselect("監視対象インターフェース", list(_opt_labels.keys()),
-                                              default=_default, key="prtg_sel_ifs")
-                    if st.button("✅ 選択したIFを監視登録", key="prtg_reg_ifs", type="primary"):
+                    # st.form で囲み、選択の度の全画面再描画（重いダッシュボード込み）を防止
+                    with st.form("prtg_if_select_form"):
+                        _sel_ifs = st.multiselect("監視対象インターフェース", list(_opt_labels.keys()),
+                                                  default=_default, key="prtg_sel_ifs")
+                        _submitted = st.form_submit_button("✅ 選択したIFを監視登録", type="primary")
+                    if _submitted:
                         _chosen = [{"index": _opt_labels[l]["index"], "name": _opt_labels[l]["name"]}
                                    for l in _sel_ifs]
                         # デバイス未登録なら合わせて登録
@@ -1857,6 +1916,33 @@ with tab_prtg:
                     f"</div>", unsafe_allow_html=True)
         else:
             st.success("現在しきい値を超過しているセンサーはありません。")
+
+        # ── 🤖 LLM でこのダッシュボードを総合診断 ──────────────
+        st.markdown("### 🤖 LLM 総合診断")
+        _prtg_llm_ok = (analyzer.check_claude_available() or analyzer.check_gemini_available()
+                        or analyzer.check_groq_available() or analyzer.check_ollama_available())
+        _prtg_mode = st.session_state.get("llm_mode", "auto")
+        if not _prtg_llm_ok:
+            st.warning("🔑 LLM APIキーが未設定です。サイドバー「🔑 APIキー設定」でGemini/Groqキーを設定するか、"
+                       "Ollamaを起動すると診断できます。")
+        elif _prtg_mode == "none":
+            st.info("解析モードが「⛔ AI解析なし」です。サイドバーでモードを切り替えてください。")
+        else:
+            if st.button("🤖 このダッシュボードをLLMで診断する", key="prtg_llm_btn",
+                        type="primary", use_container_width=True):
+                with st.spinner("🤖 LLM がデバイス状態・センサー値・アラートを分析中…"):
+                    _prep, _pmdl = _llm_analyze_prtg(_devices, _latest, _alerts, _label_map, _prtg_mode)
+                if _prep:
+                    st.session_state["_prtg_llm_report"] = _prep
+                    st.session_state["_prtg_llm_model"] = _pmdl
+                else:
+                    st.error("LLM診断に失敗しました。APIキー設定・ネットワークをご確認ください。")
+        if st.session_state.get("_prtg_llm_report"):
+            st.markdown(
+                f"<div class='ai-explanation'>{st.session_state['_prtg_llm_report']}</div>",
+                unsafe_allow_html=True,
+            )
+            st.caption(f"モデル: {st.session_state.get('_prtg_llm_model','')}")
 
 # ═══════════════════════════════════════════
 # TAB2: テレメトリダッシュボード
