@@ -92,6 +92,40 @@ def _is_cloud_mode() -> bool:
     return False
 
 # ─────────────────────────────────────────
+# クラウド公開時のアップロード制限（管理者ログインで解除）
+#   管理者ID/パスワードは Streamlit Cloud の secrets.toml（[ADMIN_ID]/[ADMIN_PASSWORD]）
+#   またはローカル環境変数 ADMIN_ID / ADMIN_PASSWORD で設定する（リポジトリには含めない）。
+# ─────────────────────────────────────────
+MAX_UPLOAD_MB_GUEST = 5
+
+def _get_admin_credentials() -> tuple:
+    try:
+        admin_id = str(st.secrets.get("ADMIN_ID", ""))
+        admin_pw = str(st.secrets.get("ADMIN_PASSWORD", ""))
+        if admin_id or admin_pw:
+            return admin_id, admin_pw
+    except Exception:
+        pass
+    return _os.environ.get("ADMIN_ID", ""), _os.environ.get("ADMIN_PASSWORD", "")
+
+def _is_admin_authenticated() -> bool:
+    return bool(st.session_state.get("_admin_authenticated", False))
+
+def _check_upload_size_ok(file_obj, cloud_mode: bool) -> bool:
+    """クラウド公開時、管理者未ログインならアップロードサイズを制限する。"""
+    if not cloud_mode or _is_admin_authenticated():
+        return True
+    size = len(file_obj.getvalue())
+    if size > MAX_UPLOAD_MB_GUEST * 1024 * 1024:
+        st.error(
+            f"⚠️ ゲスト利用時のアップロード上限は {MAX_UPLOAD_MB_GUEST}MB です"
+            f"（このファイル: {size/1024/1024:.1f}MB）。"
+            "サイドバーの「🔒 管理者ログイン」からログインすると上限が解除されます。"
+        )
+        return False
+    return True
+
+# ─────────────────────────────────────────
 # ページ設定
 # ─────────────────────────────────────────
 st.set_page_config(
@@ -203,6 +237,27 @@ with st.sidebar:
         st.info("☁️ クラウド公開モード\n\n"
                 "この環境では **syslog / SNMP / NetFlow の受信機能は利用できません**（ポート待受・機器到達不可）ため非表示です。\n\n"
                 "✅ 利用可能: **show log 解析・パケット(pcap)解析・LLM解析・各種ビューア**")
+
+        st.markdown("### 🔒 管理者ログイン")
+        if _is_admin_authenticated():
+            st.success("✅ 管理者ログイン中（アップロード上限なし）")
+            if st.button("ログアウト", key="_admin_logout_btn", use_container_width=True):
+                st.session_state["_admin_authenticated"] = False
+                st.rerun()
+        else:
+            st.caption(f"ゲスト利用時のファイルアップロード上限: {MAX_UPLOAD_MB_GUEST}MB")
+            with st.form("_admin_login_form"):
+                _admin_id_in = st.text_input("管理者ID")
+                _admin_pw_in = st.text_input("パスワード", type="password")
+                _admin_login_submitted = st.form_submit_button("ログイン")
+            if _admin_login_submitted:
+                _real_id, _real_pw = _get_admin_credentials()
+                if _real_pw and _admin_id_in == _real_id and _admin_pw_in == _real_pw:
+                    st.session_state["_admin_authenticated"] = True
+                    st.success("ログインしました")
+                    st.rerun()
+                else:
+                    st.error("IDまたはパスワードが違います")
     else:
         # サーバー制御
         st.markdown("### 📡 syslog受信サーバー")
@@ -1399,13 +1454,15 @@ with tab_showlog:
     # ── ファイルをドラッグ＆ドロップでも解析可能に ─────────────
     # .pcap/.pcapng/.cap は自動でパケット解析タブへ誘導、
     # syslog/txt/log/cfg/conf はテキストとして読み込みここで解析する。
+    if _is_cloud_mode() and not _is_admin_authenticated():
+        st.caption(f"🔒 ゲスト利用時のアップロード上限: {MAX_UPLOAD_MB_GUEST}MB（管理者ログインで解除）")
     _up_file = st.file_uploader(
         "📎 ファイルをドラッグ＆ドロップ（syslog/show出力のテキスト、または pcap/pcapng）",
         type=["txt", "log", "cfg", "conf", "syslog", "pcap", "pcapng", "cap"],
         key="show_log_file_upload",
         help="テキストファイルはそのまま下の欄に読み込みます。pcap系は自動でパケット解析します。",
     )
-    if _up_file is not None:
+    if _up_file is not None and _check_upload_size_ok(_up_file, _is_cloud_mode()):
         _up_name = _up_file.name.lower()
         _up_bytes = _up_file.getvalue()
         if _up_name.endswith((".pcap", ".pcapng", ".cap")):
@@ -2753,6 +2810,8 @@ with tab4:
                 "APRESIA", "RHEL/Linux", "Windows", "その他"
             ])
 
+        if _is_cloud_mode() and not _is_admin_authenticated():
+            st.caption(f"🔒 ゲスト利用時のアップロード上限: {MAX_UPLOAD_MB_GUEST}MB（管理者ログインで解除）")
         uploaded_cfg = st.file_uploader(
             "コンフィグファイル（.txt / show running-config の出力等）",
             type=["txt", "cfg", "conf", "log"]
@@ -2771,6 +2830,8 @@ with tab4:
         if submitted:
             if not cfg_ip:
                 st.error("IPアドレスは必須です")
+            elif uploaded_cfg is not None and not _check_upload_size_ok(uploaded_cfg, _is_cloud_mode()):
+                pass  # エラーメッセージは _check_upload_size_ok 内で表示済み
             else:
                 final_text = ""
                 if uploaded_cfg is not None:
@@ -3299,6 +3360,8 @@ with tab_pcap:
     st.markdown("---")
     st.markdown("### 📁 ファイルアップロード")
     st.caption("Wireshark でキャプチャしたファイルを直接アップロードします。")
+    if _is_cloud_mode() and not _is_admin_authenticated():
+        st.caption(f"🔒 ゲスト利用時のアップロード上限: {MAX_UPLOAD_MB_GUEST}MB（管理者ログインで解除）")
 
     uploaded_pcap = st.file_uploader(
         "pcap / pcapng ファイルをアップロード",
@@ -3306,7 +3369,7 @@ with tab_pcap:
         help="Wiresharkの「名前を付けて保存」で .pcapng 形式で保存したファイルをそのままアップロードできます。"
     )
 
-    if uploaded_pcap is not None:
+    if uploaded_pcap is not None and _check_upload_size_ok(uploaded_pcap, _is_cloud_mode()):
         raw_bytes = uploaded_pcap.read()
 
         # キャッシュ: 同じファイルなら再解析しない
