@@ -650,10 +650,12 @@ def _ingest_show_logging(text: str, source_ip: str) -> dict:
 
 # ── show logging の LLM 詳細解析（config / interface status 相関対応） ──
 def _llm_analyze_show_log(logs: list, mode: str,
-                          config_text: str = "", intf_text: str = "") -> tuple[str, str]:
+                          config_text: str = "", intf_text: str = "",
+                          extra_text: str = "") -> tuple[str, str]:
     """
-    取り込んだログ一覧に加え、show running-config / show interface status を
-    突き合わせて総合解析する。事実ベース・ハルシネーション抑制のプロンプト。
+    取り込んだログ一覧に加え、show running-config / show interface status /
+    その他のshow出力(routing/cpu/counters等) を突き合わせて総合解析する。
+    ルーティング・ICMP redirect・CPU/メモリ・ブロードキャスト/マルチキャストも観点に含む。
     戻り値: (レポート本文, モデル名)
     """
     import json as _json
@@ -677,6 +679,7 @@ def _llm_analyze_show_log(logs: list, mode: str,
         return s if len(s) <= n else s[:n] + "\n…(以下省略)"
     cfg = _clip(config_text, 6000)
     intf = _clip(intf_text, 3000)
+    extra = _clip(extra_text, 5000)
 
     system = (
         "あなたは Cisco / 富士通などのネットワーク機器に精通した運用エンジニアです。"
@@ -697,14 +700,25 @@ def _llm_analyze_show_log(logs: list, mode: str,
         "1. 【全体サマリ】機種・役割・設定状況・接続状況を3行以内で\n"
         "2. 【確定事象】ログ/設定/状態から事実として読み取れること（該当行を引用）\n"
         "3. 【バグ/不具合の有無】クラッシュ/メモリ/watchdog/再起動異常などの兆候。無ければ『不具合の兆候なし』と明記\n"
-        "4. 【設定・運用上の問題】未設定・セキュリティ・ライセンス・冗長性など（設定の該当箇所を引用）\n"
-        "5. 【ログと設定の相関】ログの事象を設定/状態で説明できるか（例: Vlan down ↔ interface Vlan1 shutdown）\n"
-        "6. 【推奨アクション】優先度順に、実行コマンド付きで\n\n"
+        "4. 【ルーティング】OSPF/BGP/EIGRP/RIP等の隣接・経路・再配布の異常、"
+        "経路フラップやルーティングテーブルの問題（該当ログ/設定を引用。無ければ『言及なし』）\n"
+        "5. 【ICMP Redirect / 三角ルーティング】ICMP redirect の送受信や、"
+        "非効率な経路（同一セグメントへの折り返し）の兆候（無ければ『兆候なし』）\n"
+        "6. 【CPU / メモリ / 温度】高CPU・メモリ枯渇・高温などリソース逼迫の兆候\n"
+        "7. 【ブロードキャスト/マルチキャスト】ブロードキャスト/マルチキャスト過多、"
+        "ストーム、IGMP/PIM関連、ループ由来のフレーム氾濫の兆候（該当を引用。無ければ『兆候なし』）\n"
+        "8. 【エラー/破棄/インターフェース品質】入出力エラー・破棄・デュプレックス不一致・CRC等\n"
+        "9. 【設定・運用上の問題】未設定・セキュリティ・ライセンス・冗長性など（該当箇所を引用）\n"
+        "10.【ログと設定の相関】ログの事象を設定/状態で説明できるか（例: Vlan down ↔ interface Vlan1 shutdown）\n"
+        "11.【推奨アクション】優先度順に、実行コマンド（show系の追加確認コマンド含む）付きで\n\n"
+        "※各項目、提供データに該当が無ければ『該当データなし』と明記し、想像で埋めないこと。\n"
+        "※show ip route / show processes cpu / show interfaces counters 等が貼られていれば併せて解析すること。\n\n"
         f"────── show logging（解析済み {len(lines)}件）──────\n{ctx}\n\n"
         f"────── show running-config ──────\n{cfg if cfg else '(未提供)'}\n\n"
-        f"────── show interface status ──────\n{intf if intf else '(未提供)'}\n"
+        f"────── show interface status ──────\n{intf if intf else '(未提供)'}\n\n"
+        f"────── その他の show 出力（routing/cpu/counters 等）──────\n{extra if extra else '(未提供)'}\n"
     )
-    return analyzer.ask_llm(system, user, mode, max_tokens=3000)
+    return analyzer.ask_llm(system, user, mode, max_tokens=3500)
 
 
 def _scoped_showlog_logs() -> list:
@@ -1263,6 +1277,7 @@ with tab_showlog:
             # config / interface を LLM 相関解析用に保持
             st.session_state["showlog_cfg"] = _chk["config_body"]
             st.session_state["showlog_intf"] = _chk["intf_body"]
+            st.session_state["showlog_extra"] = _chk.get("extra_body", "")
             st.session_state["_show_anomalies"] = _chk["anomalies"]
             # 今回貼り付けた分だけを解析対象にする（過去ログの混入防止）
             st.session_state["_showlog_ids"] = set(_r.get("ids", []))
@@ -1502,11 +1517,12 @@ with tab_showlog:
             if not _ll:
                 st.warning("解析対象のログがありません。先に show ログを取り込んでください。")
                 return
-            with st.spinner("🤖 LLM が show logging・config・ポート状態を突き合わせて解析中…"):
+            with st.spinner("🤖 LLM が show logging・config・ルーティング/CPU/ポート状態を突き合わせて解析中…"):
                 _rep, _mdl = _llm_analyze_show_log(
                     _ll, _mode_sel,
                     config_text=st.session_state.get("showlog_cfg", ""),
-                    intf_text=st.session_state.get("showlog_intf", ""))
+                    intf_text=st.session_state.get("showlog_intf", ""),
+                    extra_text=st.session_state.get("showlog_extra", ""))
             if _rep:
                 st.session_state["_showlog_llm_report"] = _rep
                 st.session_state["_showlog_llm_model"] = _mdl

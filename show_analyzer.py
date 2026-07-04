@@ -218,7 +218,12 @@ def check_anomalies(sections: list) -> dict:
     anoms: list = []
     kinds: dict = {}
     logging_body = config_body = intf_body = version_body = ""
+    extra_parts = []   # routing/cpu/counters/cdp/other → LLM相関解析の追加材料
     all_text = []
+
+    _kind_ja = {"interfaces": "show interfaces", "intf_brief": "show ip int brief",
+                "version": "show version", "cdp": "show cdp neighbors",
+                "cpu": "show processes cpu", "other": "その他show出力"}
 
     for s in sections:
         kinds[s["kind"]] = kinds.get(s["kind"], 0) + 1
@@ -236,6 +241,10 @@ def check_anomalies(sections: list) -> dict:
             _check_intf_brief(s["body"], anoms)
         elif s["kind"] == "version":
             version_body = s["body"]
+        else:
+            # interfaces / cpu / cdp / other 等は LLM 相関解析へ回す
+            _hdr = _kind_ja.get(s["kind"], s.get("cmd", s["kind"]))
+            extra_parts.append(f"[{_hdr}]\n{s['body']}")
 
     _check_license("\n".join(all_text), anoms)
 
@@ -245,7 +254,8 @@ def check_anomalies(sections: list) -> dict:
     anoms.sort(key=lambda a: rank.get(a["severity"], 6))
     return {"anomalies": anoms, "kinds": kinds, "logging_body": logging_body,
             "config_body": config_body, "intf_body": intf_body,
-            "version_body": version_body}
+            "version_body": version_body,
+            "extra_body": "\n\n".join(extra_parts).strip()}
 
 
 def quality_score(anomalies: list, bug_count: int = 0,
