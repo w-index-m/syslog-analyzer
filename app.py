@@ -344,6 +344,30 @@ with st.sidebar:
 
     st.markdown("---")
 
+    # show logging 貼り付け取り込み
+    st.markdown("### 📋 show logging 貼り付け")
+    st.caption("機器の `show logging` / `show logging syslog` 出力を貼り付けて一括取り込み")
+    _sl_src = st.text_input("送信元IP/ホスト（任意）", value="pasted-device",
+                            key="show_log_src",
+                            help="貼り付けたログの送信元として記録されます")
+    _sl_text = st.text_area("ここに show logging 出力を貼り付け", height=160,
+                            key="show_log_text",
+                            placeholder="*Jul  3 10:00:01.123: %LINK-3-UPDOWN: Interface Gi1/0/1, changed state to down\n"
+                                        "*Jul  3 10:00:02.456: %LINEPROTO-5-UPDOWN: Line protocol on Gi1/0/1, down")
+    if st.button("🔍 解析して取り込み", use_container_width=True, key="show_log_ingest"):
+        if _sl_text.strip():
+            _sl_res = _ingest_show_logging(_sl_text, _sl_src.strip() or "pasted-device")
+            if _sl_res["total"]:
+                _vb = " / ".join(f"{k}:{v}" for k, v in _sl_res["by_vendor"].items())
+                st.success(f"✅ {_sl_res['total']}件取り込み（除外{_sl_res['skipped']}行）\n\n{_vb}")
+                st.caption("「📊 ログ一括 AI 分析」タブでまとめて評価できます")
+            else:
+                st.warning(f"取り込めるログ行がありませんでした（除外{_sl_res['skipped']}行）")
+        else:
+            st.error("show logging の出力を貼り付けてください")
+
+    st.markdown("---")
+
     # ログクリア
     if st.button("🗑️ 全ログ削除", use_container_width=True):
         db.clear_logs()
@@ -421,6 +445,53 @@ def _get_config_context(ip: str) -> str:
     if cfg.get("notes"):
         parts.append("【補足メモ】\n" + cfg["notes"])
     return "\n\n".join(parts)
+
+# ── show logging 出力を一括取り込み ──────────────────────────
+import re as _re_ingest
+
+# Cisco 系 show logging のヘッダ行（ログ本体ではないので除外）
+_SHOW_LOG_HEADER_RE = _re_ingest.compile(
+    r"(syslog logging:|console logging:|monitor logging:|buffer logging:|"
+    r"exception logging:|count and timestamp|persistent logging:|trap logging:|"
+    r"file logging:|origin-id|log buffer\s*\(|logging to |esm:|"
+    r"^\s*members? |^\s*\d+ messages? (logged|dropped|rate-limited))",
+    _re_ingest.IGNORECASE)
+
+# 先頭のシーケンス番号（例 "000123: "）を除去するための正規表現
+_SHOW_LOG_SEQ_RE = _re_ingest.compile(r"^\s*\d{1,6}:\s+")
+
+
+def _ingest_show_logging(text: str, source_ip: str) -> dict:
+    """
+    `show logging` / `show logging syslog` の貼り付け出力を1行ずつ解析し DB 取り込み。
+    戻り値: {"total": 取込件数, "skipped": 除外件数, "by_vendor": {vendor: 件数}}
+    """
+    total = 0
+    skipped = 0
+    by_vendor: dict[str, int] = {}
+    for raw_line in (text or "").splitlines():
+        line = raw_line.rstrip()
+        if not line.strip():
+            continue
+        # ヘッダ/ステータス行はスキップ（%FAC-N-MNEM を含まない場合のみ）
+        if _SHOW_LOG_HEADER_RE.search(line) and "%" not in line:
+            skipped += 1
+            continue
+        # 先頭シーケンス番号を除去（Cisco バッファログ）
+        line = _SHOW_LOG_SEQ_RE.sub("", line).strip()
+        if not line:
+            skipped += 1
+            continue
+        try:
+            parsed = parse_syslog(line, source_ip)
+            db.insert_log(source_ip, line, parsed)
+            v = parsed.get("vendor", "不明")
+            by_vendor[v] = by_vendor.get(v, 0) + 1
+            total += 1
+        except Exception:
+            skipped += 1
+    return {"total": total, "skipped": skipped, "by_vendor": by_vendor}
+
 
 def _inject_test_log(vendor: str):
     logs = TEST_LOGS.get(vendor, [])
