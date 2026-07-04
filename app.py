@@ -16,21 +16,29 @@ from parsers import parse_syslog
 
 # ─────────────────────────────────────────
 # ユーザー設定の永続化（APIキー・モデル等をローカル保存）
-#   git pull やアプリ再起動をしても再入力不要にする。
-#   保存先: リポジトリ直下 user_settings.json（.gitignore 済み・コミットされない）
+#   git pull / clean / 再クローン / 再起動をしても再入力不要にする。
+#   保存先: ホームディレクトリ配下（リポジトリの外なので git 操作の影響を受けない）
+#     Windows: C:\Users\<user>\.syslog_analyzer\settings.json
+#     ※旧: リポジトリ直下 user_settings.json（あれば移行のため読み込む）
 # ─────────────────────────────────────────
 import os as _os
-_SETTINGS_PATH = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "user_settings.json")
+_SETTINGS_DIR = _os.path.join(_os.path.expanduser("~"), ".syslog_analyzer")
+_SETTINGS_PATH = _os.path.join(_SETTINGS_DIR, "settings.json")
+# 旧保存先（リポジトリ内）。存在すれば移行用に読む。
+_LEGACY_SETTINGS_PATH = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "user_settings.json")
 
 def _load_user_settings():
-    try:
-        with open(_SETTINGS_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    for _p in (_SETTINGS_PATH, _LEGACY_SETTINGS_PATH):
+        try:
+            with open(_p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            continue
+    return {}
 
 def _save_user_settings(data: dict):
     try:
+        _os.makedirs(_SETTINGS_DIR, exist_ok=True)   # ~/.syslog_analyzer を作成
         cur = _load_user_settings()
         cur.update({k: v for k, v in data.items() if v is not None})
         with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
@@ -60,6 +68,28 @@ def _apply_saved_settings_once():
         analyzer.OLLAMA_MODEL = s["OLLAMA_MODEL"]
     if s.get("llm_mode"):
         st.session_state["llm_mode"] = s["llm_mode"]
+
+def _is_cloud_mode() -> bool:
+    """
+    Streamlit Community Cloud 等のクラウド公開環境かを判定する。
+    クラウドでは syslog/SNMP/NetFlow の受信(ポート待受・機器到達)ができないため、
+    それらの機能を隠す判断に使う。
+    優先: 環境変数 DEPLOY_MODE(cloud/local) > 自動判定。
+    """
+    dm = _os.environ.get("DEPLOY_MODE", "").strip().lower()
+    if dm in ("cloud", "server", "hosted"):
+        return True
+    if dm in ("local", "onprem", "on-prem"):
+        return False
+    # 自動判定: Streamlit Community Cloud の特徴的なパス/ユーザ
+    try:
+        if _os.path.exists("/mount/src"):        # Cloud はリポジトリを /mount/src にマウント
+            return True
+        if _os.environ.get("HOME", "").rstrip("/").endswith("appuser"):
+            return True
+    except Exception:
+        pass
+    return False
 
 # ─────────────────────────────────────────
 # ページ設定
@@ -167,114 +197,121 @@ with st.sidebar:
     st.markdown("## 🛰️ Syslog AI アナライザー")
     st.markdown("---")
 
-    # サーバー制御
-    st.markdown("### 📡 syslog受信サーバー")
-    port = st.number_input("UDPポート番号", min_value=514, max_value=65535,
-                            value=st.session_state.syslog_port, step=1)
-    st.caption("514はroot権限が必要。5140推奨（要機器側設定）")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("▶ 起動", use_container_width=True,
-                     disabled=st.session_state.server_started):
-            srv = syslog_server.get_server(port=int(port))
-            srv.start()
-            if srv.running:
-                st.session_state.server_started = True
-                st.session_state.syslog_port = int(port)
-                st.success(f"UDP {port} で受信中")
-            else:
-                st.error(srv.error or "起動失敗")
-    with col2:
-        if st.button("⏹ 停止", use_container_width=True,
-                     disabled=not st.session_state.server_started):
-            srv = syslog_server.get_server()
-            srv.stop()
-            st.session_state.server_started = False
-            st.info("停止しました")
-
-    if st.session_state.server_started:
-        st.success(f"✅ UDP {st.session_state.syslog_port} 受信中")
+    # クラウド公開環境では受信系(syslog/SNMP/NetFlow)は使えないため隠す
+    _cloud_mode = _is_cloud_mode()
+    if _cloud_mode:
+        st.info("☁️ クラウド公開モード\n\n"
+                "この環境では **syslog / SNMP / NetFlow の受信機能は利用できません**（ポート待受・機器到達不可）ため非表示です。\n\n"
+                "✅ 利用可能: **show log 解析・パケット(pcap)解析・LLM解析・各種ビューア**")
     else:
-        st.warning("⏸ 停止中")
-
-    st.markdown("---")
-
-    # SNMP Trap サーバー制御
-    st.markdown("### 📡 SNMP Trap サーバー")
-    snmp_port = st.number_input("Trap受信ポート", min_value=162, max_value=65535,
-                                 value=st.session_state.snmp_trap_port, step=1)
-    st.caption("162はroot権限が必要。16200推奨")
-
-    snmp_communities = st.text_input("コミュニティ名（カンマ区切り）", value="public,private")
-
-    col3, col4 = st.columns(2)
-    with col3:
-        if st.button("▶ Trap起動", use_container_width=True,
-                     disabled=st.session_state.snmp_trap_started):
-            communities = [c.strip() for c in snmp_communities.split(",")]
-            srv = snmp_trap_server.get_snmp_server(port=int(snmp_port), communities=communities)
-            srv.start()
-            if srv.running:
-                st.session_state.snmp_trap_started = True
-                st.session_state.snmp_trap_port = int(snmp_port)
-                st.success(f"UDP {snmp_port} Trap受信中")
-            else:
-                st.error(srv.error or "起動失敗")
-    with col4:
-        if st.button("⏹ Trap停止", use_container_width=True,
-                     disabled=not st.session_state.snmp_trap_started):
-            snmp_trap_server.get_snmp_server().stop()
-            st.session_state.snmp_trap_started = False
-            st.info("停止しました")
-
-    if st.session_state.snmp_trap_started:
-        st.success(f"✅ UDP {st.session_state.snmp_trap_port} Trap受信中")
-    else:
-        st.warning("⏸ Trap停止中")
-
-    # SNMPポーラー制御
-    st.markdown("**SNMPポーリング（定期収集）**")
-    col5, col6 = st.columns(2)
-    with col5:
-        if st.button("▶ Poller起動", use_container_width=True,
-                     disabled=st.session_state.snmp_poller_started):
-            snmp_poller.start_poller()
-            st.session_state.snmp_poller_started = True
-            st.success("ポーラー起動")
-    with col6:
-        if st.button("⏹ Poller停止", use_container_width=True,
-                     disabled=not st.session_state.snmp_poller_started):
-            snmp_poller.stop_poller()
-            st.session_state.snmp_poller_started = False
-            st.info("停止")
-
-    # NetFlow 制御
-    st.markdown("**🌊 NetFlow v5 受信**")
-    import netflow_collector as _nfc
-    nf_port = st.number_input("NetFlow ポート", min_value=1024, max_value=65535,
-                               value=9995, key="netflow_port_input")
-    col7, col8 = st.columns(2)
-    with col7:
-        if st.button("▶ NetFlow起動", use_container_width=True,
-                     disabled=st.session_state.netflow_started):
-            srv = _nfc.get_server(port=int(nf_port))
-            srv.start()
-            if srv.running:
-                st.session_state.netflow_started = True
-                st.success(f"UDP {nf_port} 受信中")
-            else:
-                st.error(srv.error or "起動失敗")
-    with col8:
-        if st.button("⏹ NetFlow停止", use_container_width=True,
-                     disabled=not st.session_state.netflow_started):
-            _nfc.get_server().stop()
-            st.session_state.netflow_started = False
-            st.info("停止")
-    if st.session_state.netflow_started:
-        st.success(f"✅ UDP {nf_port} NetFlow受信中")
-    else:
-        st.warning("⏸ NetFlow停止中")
+        # サーバー制御
+        st.markdown("### 📡 syslog受信サーバー")
+        port = st.number_input("UDPポート番号", min_value=514, max_value=65535,
+                                value=st.session_state.syslog_port, step=1)
+        st.caption("514はroot権限が必要。5140推奨（要機器側設定）")
+    
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("▶ 起動", use_container_width=True,
+                         disabled=st.session_state.server_started):
+                srv = syslog_server.get_server(port=int(port))
+                srv.start()
+                if srv.running:
+                    st.session_state.server_started = True
+                    st.session_state.syslog_port = int(port)
+                    st.success(f"UDP {port} で受信中")
+                else:
+                    st.error(srv.error or "起動失敗")
+        with col2:
+            if st.button("⏹ 停止", use_container_width=True,
+                         disabled=not st.session_state.server_started):
+                srv = syslog_server.get_server()
+                srv.stop()
+                st.session_state.server_started = False
+                st.info("停止しました")
+    
+        if st.session_state.server_started:
+            st.success(f"✅ UDP {st.session_state.syslog_port} 受信中")
+        else:
+            st.warning("⏸ 停止中")
+    
+        st.markdown("---")
+    
+        # SNMP Trap サーバー制御
+        st.markdown("### 📡 SNMP Trap サーバー")
+        snmp_port = st.number_input("Trap受信ポート", min_value=162, max_value=65535,
+                                     value=st.session_state.snmp_trap_port, step=1)
+        st.caption("162はroot権限が必要。16200推奨")
+    
+        snmp_communities = st.text_input("コミュニティ名（カンマ区切り）", value="public,private")
+    
+        col3, col4 = st.columns(2)
+        with col3:
+            if st.button("▶ Trap起動", use_container_width=True,
+                         disabled=st.session_state.snmp_trap_started):
+                communities = [c.strip() for c in snmp_communities.split(",")]
+                srv = snmp_trap_server.get_snmp_server(port=int(snmp_port), communities=communities)
+                srv.start()
+                if srv.running:
+                    st.session_state.snmp_trap_started = True
+                    st.session_state.snmp_trap_port = int(snmp_port)
+                    st.success(f"UDP {snmp_port} Trap受信中")
+                else:
+                    st.error(srv.error or "起動失敗")
+        with col4:
+            if st.button("⏹ Trap停止", use_container_width=True,
+                         disabled=not st.session_state.snmp_trap_started):
+                snmp_trap_server.get_snmp_server().stop()
+                st.session_state.snmp_trap_started = False
+                st.info("停止しました")
+    
+        if st.session_state.snmp_trap_started:
+            st.success(f"✅ UDP {st.session_state.snmp_trap_port} Trap受信中")
+        else:
+            st.warning("⏸ Trap停止中")
+    
+        # SNMPポーラー制御
+        st.markdown("**SNMPポーリング（定期収集）**")
+        col5, col6 = st.columns(2)
+        with col5:
+            if st.button("▶ Poller起動", use_container_width=True,
+                         disabled=st.session_state.snmp_poller_started):
+                snmp_poller.start_poller()
+                st.session_state.snmp_poller_started = True
+                st.success("ポーラー起動")
+        with col6:
+            if st.button("⏹ Poller停止", use_container_width=True,
+                         disabled=not st.session_state.snmp_poller_started):
+                snmp_poller.stop_poller()
+                st.session_state.snmp_poller_started = False
+                st.info("停止")
+    
+        # NetFlow 制御
+        st.markdown("**🌊 NetFlow v5 受信**")
+        import netflow_collector as _nfc
+        nf_port = st.number_input("NetFlow ポート", min_value=1024, max_value=65535,
+                                   value=9995, key="netflow_port_input")
+        col7, col8 = st.columns(2)
+        with col7:
+            if st.button("▶ NetFlow起動", use_container_width=True,
+                         disabled=st.session_state.netflow_started):
+                srv = _nfc.get_server(port=int(nf_port))
+                srv.start()
+                if srv.running:
+                    st.session_state.netflow_started = True
+                    st.success(f"UDP {nf_port} 受信中")
+                else:
+                    st.error(srv.error or "起動失敗")
+        with col8:
+            if st.button("⏹ NetFlow停止", use_container_width=True,
+                         disabled=not st.session_state.netflow_started):
+                _nfc.get_server().stop()
+                st.session_state.netflow_started = False
+                st.info("停止")
+        if st.session_state.netflow_started:
+            st.success(f"✅ UDP {nf_port} NetFlow受信中")
+        else:
+            st.warning("⏸ NetFlow停止中")
 
     st.markdown("---")
     st.markdown("### 🤖 AI解析エンジン")
@@ -333,7 +370,7 @@ with st.sidebar:
             os.environ.pop("GROQ_API_KEY", None);   analyzer.GROQ_API_KEY = ""
             st.info("保存したキーを削除しました")
             st.rerun()
-        st.caption("💾 保存先: user_settings.json（この端末内のみ・gitには含まれません）")
+        st.caption(f"💾 保存先: {_SETTINGS_PATH}（この端末内のみ・git操作の影響を受けません）")
 
     _mode_opts = [
         ("auto",   "🔄 自動 (Claude→Gemini→Groq→Ollama)"),
