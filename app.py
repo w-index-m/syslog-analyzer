@@ -10,6 +10,7 @@ import analyzer
 import syslog_server
 import snmp_trap_server
 import snmp_poller
+import prtg_view
 import health_engine as he
 import vendor_recommendations as vendor_rec
 from parsers import parse_syslog
@@ -901,7 +902,7 @@ def _llm_analyze_prtg(devices: list, latest_metrics: list, alerts: list,
         if key in seen:
             continue
         seen.add(key)
-        name = label_map.get(m.get("oid_name"), m.get("oid_name"))
+        name = prtg_view.metric_label(m.get("oid_name"), label_map)
         sensor_lines.append(f"- [{m.get('alert_level','none')}] {m.get('hostname') or m.get('source_ip')} "
                             f"{name} = {m.get('value','-')} {m.get('unit','')}")
     sensor_ctx = "\n".join(sensor_lines[:150]) if sensor_lines else "(センサーデータなし)"
@@ -909,7 +910,7 @@ def _llm_analyze_prtg(devices: list, latest_metrics: list, alerts: list,
     # しきい値超過アラート
     alert_lines = []
     for a in alerts:
-        name = label_map.get(a.get("oid_name"), a.get("oid_name"))
+        name = prtg_view.metric_label(a.get("oid_name"), label_map)
         alert_lines.append(f"- [{a.get('alert_level','')}] {a.get('hostname') or a.get('source_ip')} "
                            f"{name} = {a.get('value','-')} {a.get('unit','')} ({a.get('recorded_at','')})")
     alert_ctx = "\n".join(alert_lines) if alert_lines else "(しきい値超過なし)"
@@ -922,7 +923,10 @@ def _llm_analyze_prtg(devices: list, latest_metrics: list, alerts: list,
     )
     user = (
         "以下はネットワーク監視ダッシュボードの現在の状態です。次の構成で診断してください。\n\n"
-        "1. 【全体サマリ】監視対象デバイス数・状態・全体的な健全性を3行以内で\n"
+        "1. 【全体サマリ】監視対象デバイス数・状態・全体的な健全性を3行以内で。"
+        "down/エラー/しきい値超過アラートが1件もない場合は、先頭に"
+        "「🚀 現在異常はありません。順調に稼働しています」のように、"
+        "一目で安心できる前向きな一言を日本語で添えてください。\n"
         "2. 【デバイス状態】down/エラーの機器があれば個別に指摘\n"
         "3. 【リソース逼迫】CPU/メモリ/温度/セッション数など高負荷の兆候（しきい値超過を優先）\n"
         "4. 【トラフィック/帯域】帯域使用率が高いインターフェースや異常なエラーカウント\n"
@@ -1938,6 +1942,7 @@ with tab_prtg:
     _label_map = {}
     for _k, _v in {**snmp_poller.THRESHOLDS, **snmp_poller.COUNTER_OIDS}.items():
         _label_map[_k] = _v.get("label", _k)
+    _label_map.update(snmp_poller.DISPLAY_LABELS)
     # ベンダー固有MIB(Cisco/PaloAlto/F5)のラベルも表示に反映
     try:
         _label_map.update(snmp_poller.vendor_metric_labels())
@@ -1948,6 +1953,34 @@ with tab_prtg:
         st.info("まだSNMPデータがありません。上の「⚙️ SNMP 設定」でデバイスを登録し、"
                 "「▶ ポーリング開始」を押すと、ここにゲージ・グラフが表示されます。")
     else:
+        # ── 🤖 LLM 総合診断（最初に表示：まず結論を見せる） ──────
+        st.markdown("### 🤖 LLM 総合診断")
+        _prtg_llm_ok = (analyzer.check_claude_available() or analyzer.check_gemini_available()
+                        or analyzer.check_groq_available() or analyzer.check_ollama_available())
+        _prtg_mode = st.session_state.get("llm_mode", "auto")
+        if not _prtg_llm_ok:
+            st.warning("🔑 LLM APIキーが未設定です。サイドバー「🔑 APIキー設定」でGemini/Groqキーを設定するか、"
+                       "Ollamaを起動すると診断できます。")
+        elif _prtg_mode == "none":
+            st.info("解析モードが「⛔ AI解析なし」です。サイドバーでモードを切り替えてください。")
+        else:
+            if st.button("🤖 このダッシュボードをLLMで診断する", key="prtg_llm_btn",
+                        type="primary", use_container_width=True):
+                with st.spinner("🤖 LLM がデバイス状態・センサー値・アラートを分析中…"):
+                    _prep, _pmdl = _llm_analyze_prtg(_devices, _latest, _alerts, _label_map, _prtg_mode)
+                if _prep:
+                    st.session_state["_prtg_llm_report"] = _prep
+                    st.session_state["_prtg_llm_model"] = _pmdl
+                else:
+                    st.error("LLM診断に失敗しました。APIキー設定・ネットワークをご確認ください。")
+        if st.session_state.get("_prtg_llm_report"):
+            st.markdown(
+                f"<div class='ai-explanation'>{st.session_state['_prtg_llm_report']}</div>",
+                unsafe_allow_html=True,
+            )
+            st.caption(f"モデル: {st.session_state.get('_prtg_llm_model','')}")
+        st.markdown("---")
+
         # ── ① デバイス状態マップ ──────────────────────────────
         st.markdown("### 🗺️ デバイス状態マップ")
         _dcols = st.columns(max(1, min(4, len(_devices) or 1)))
@@ -2011,7 +2044,7 @@ with tab_prtg:
                 _lv = (_m.get("alert_level") or "none").lower()
                 _col = _prtg.status_color(_lv)
                 _dot = "🟢" if _col == "#16a34a" else ("🟡" if _col == "#f59e0b" else ("🔴" if _col == "#dc2626" else "⚪"))
-                _name = _label_map.get(_m.get("oid_name"), _m.get("oid_name"))
+                _name = _prtg.metric_label(_m.get("oid_name"), _label_map)
                 with _scols[_i % 3]:
                     st.markdown(
                         f"<div class='log-card' style='border-left:4px solid {_col};padding:8px 12px;'>"
@@ -2034,10 +2067,11 @@ with tab_prtg:
                             "memory_used_pct", "hrCpuLoad",
                             "ciscoEnvMonTemperatureStatusValue", "ifInErrors.1"]
             _sel_metric = _gc2.selectbox("指標", _metric_opts,
-                                         format_func=lambda k: _label_map.get(k, k), key="prtg_metric")
+                                         format_func=lambda k: _prtg.metric_label(k, _label_map), key="prtg_metric")
             _hours = _gc3.selectbox("期間", [1, 3, 6, 24], key="prtg_hours",
                                     format_func=lambda h: f"{h}時間")
-            _trend = snmp_poller.get_metric_trend(_dev_opts[_sel_dev], _sel_metric, hours=_hours)
+            # 累積カウンタ(トラフィック等)は時間当たりレートに変換して表示する
+            _trend, _trend_unit = snmp_poller.get_metric_trend_display(_dev_opts[_sel_dev], _sel_metric, hours=_hours)
             if _trend:
                 import pandas as _pd_prtg
                 _df = _pd_prtg.DataFrame(_trend)
@@ -2047,7 +2081,8 @@ with tab_prtg:
                     _df["recorded_at"] = _pd_prtg.to_datetime(_df["recorded_at"], errors="coerce")
                     _df = _df.dropna(subset=["value"]).set_index("recorded_at")
                 st.line_chart(_df["value"], height=260)
-                st.caption(f"{_sel_dev} / {_label_map.get(_sel_metric, _sel_metric)} — 直近{_hours}時間")
+                _unit_suffix = f"（{_trend_unit}換算・時間当たり平均）" if _trend_unit else ""
+                st.caption(f"{_sel_dev} / {_prtg.metric_label(_sel_metric, _label_map)}{_unit_suffix} — 直近{_hours}時間")
             else:
                 st.caption("この指標の時系列データがまだありません（ポーリングを数回実行すると蓄積されます）。")
 
@@ -2057,7 +2092,7 @@ with tab_prtg:
             for _a in _alerts[:30]:
                 _lv = (_a.get("alert_level") or "warning").lower()
                 _col = _prtg.status_color(_lv)
-                _name = _label_map.get(_a.get("oid_name"), _a.get("oid_name"))
+                _name = _prtg.metric_label(_a.get("oid_name"), _label_map)
                 st.markdown(
                     f"<div class='log-card' style='border-left:4px solid {_col};'>"
                     f"<span style='color:{_col};font-weight:bold;'>[{_a.get('alert_level','')}]</span> "
@@ -2082,7 +2117,7 @@ with tab_prtg:
                     "デバイス": _m.get("hostname") or _m.get("source_ip"),
                     "IP": _m.get("source_ip"),
                     "OID名": _m.get("oid_name"),
-                    "項目名": _label_map.get(_m.get("oid_name"), _m.get("oid_name")),
+                    "項目名": _prtg.metric_label(_m.get("oid_name"), _label_map),
                     "値": _m.get("value"),
                     "単位": _m.get("unit") or "",
                     "状態": _m.get("alert_level") or "none",
@@ -2095,33 +2130,6 @@ with tab_prtg:
                 st.caption(f"{len(_raw_rows)} 項目を表示中（直近ポーリング分・最大300件の範囲内）")
             else:
                 st.caption("まだデータがありません。ポーリングを開始すると表示されます。")
-
-        # ── 🤖 LLM でこのダッシュボードを総合診断 ──────────────
-        st.markdown("### 🤖 LLM 総合診断")
-        _prtg_llm_ok = (analyzer.check_claude_available() or analyzer.check_gemini_available()
-                        or analyzer.check_groq_available() or analyzer.check_ollama_available())
-        _prtg_mode = st.session_state.get("llm_mode", "auto")
-        if not _prtg_llm_ok:
-            st.warning("🔑 LLM APIキーが未設定です。サイドバー「🔑 APIキー設定」でGemini/Groqキーを設定するか、"
-                       "Ollamaを起動すると診断できます。")
-        elif _prtg_mode == "none":
-            st.info("解析モードが「⛔ AI解析なし」です。サイドバーでモードを切り替えてください。")
-        else:
-            if st.button("🤖 このダッシュボードをLLMで診断する", key="prtg_llm_btn",
-                        type="primary", use_container_width=True):
-                with st.spinner("🤖 LLM がデバイス状態・センサー値・アラートを分析中…"):
-                    _prep, _pmdl = _llm_analyze_prtg(_devices, _latest, _alerts, _label_map, _prtg_mode)
-                if _prep:
-                    st.session_state["_prtg_llm_report"] = _prep
-                    st.session_state["_prtg_llm_model"] = _pmdl
-                else:
-                    st.error("LLM診断に失敗しました。APIキー設定・ネットワークをご確認ください。")
-        if st.session_state.get("_prtg_llm_report"):
-            st.markdown(
-                f"<div class='ai-explanation'>{st.session_state['_prtg_llm_report']}</div>",
-                unsafe_allow_html=True,
-            )
-            st.caption(f"モデル: {st.session_state.get('_prtg_llm_model','')}")
 
 # ═══════════════════════════════════════════
 # TAB2: テレメトリダッシュボード

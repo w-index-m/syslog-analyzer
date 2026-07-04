@@ -879,6 +879,60 @@ def get_metric_trend(ip: str, oid_name: str, hours: int = 1) -> list[dict]:
         """, (ip, oid_name, f"-{hours}")).fetchall()]
 
 
+# 累積カウンタ oid_name -> (差分の倍率, 換算スケール, 表示単位)
+#   レート = 差分 * 倍率 / 経過秒数 * スケール
+#   例: octets差分*8bit/秒 = bps。 errors差分/秒*60 = 件/分。
+_COUNTER_RATE_SPEC = {
+    "ifInOctets.1":     (8, 1,  "bps"),
+    "ifOutOctets.1":    (8, 1,  "bps"),
+    "ifInErrors.1":     (1, 60, "件/分"),
+    "ifOutErrors.1":    (1, 60, "件/分"),
+    "ifInDiscards.1":   (1, 60, "件/分"),
+    "icmpInRedirects":  (1, 60, "件/分"),
+    "icmpOutRedirects": (1, 60, "件/分"),
+}
+
+
+def get_metric_trend_display(ip: str, oid_name: str, hours: int = 1) -> tuple[list[dict], str | None]:
+    """
+    グラフ表示用の時系列データを返す。
+    累積カウンタ(ifInOctets.1等)は区間ごとの差分から時間当たりレート(bps/件数など)に
+    変換し、それ以外(%, ℃などの瞬時値)は生値をそのまま返す。
+    戻り値: (rows[{"recorded_at","value"}], 単位ラベル or None（生値の場合）)
+    """
+    raw = get_metric_trend(ip, oid_name, hours)
+    spec = _COUNTER_RATE_SPEC.get(oid_name)
+    if not spec or len(raw) < 2:
+        return raw, None
+    mult, scale, unit_label = spec
+    out = []
+    for prev, cur in zip(raw, raw[1:]):
+        try:
+            v_prev, v_cur = float(prev["value"]), float(cur["value"])
+            dt = (datetime.fromisoformat(cur["recorded_at"])
+                  - datetime.fromisoformat(prev["recorded_at"])).total_seconds()
+            if dt <= 0:
+                continue
+            diff = v_cur - v_prev
+            if diff < 0:
+                continue  # カウンタリセット/機器再起動によるラップアラウンドはスキップ
+            rate = diff * mult / dt * scale
+            out.append({"recorded_at": cur["recorded_at"], "value": round(rate, 2)})
+        except (TypeError, ValueError):
+            continue
+    return out, unit_label
+
+
+# 表示専用ラベル（しきい値アラートの対象ではなく、UI表示名のみ）
+DISPLAY_LABELS = {
+    "ifInOctets.1":  "受信トラフィック",
+    "ifOutOctets.1": "送信トラフィック",
+    "sysDescr":  "システム情報",
+    "sysUpTime": "稼働時間",
+    "sysName":   "ホスト名",
+}
+
+
 # ─────────────────────────────────────────
 # ルーティングテーブル取得（ipRouteTable Walk）
 # ─────────────────────────────────────────

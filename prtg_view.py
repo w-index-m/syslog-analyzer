@@ -6,6 +6,7 @@ PRTG 風ダッシュボードの表示部品（依存追加なし・SVGで自作
 - gauge_spec_for(): SNMP oid_name からゲージ表示仕様（最大値・しきい値・単位）を決める
 """
 import math
+import re
 
 # 信号機カラー
 STATUS_COLORS = {
@@ -117,11 +118,37 @@ _GAUGE_SPECS = {
 }
 
 
+# 登録IF個別メトリクス(if{N}_xxx)のサフィックス → 日本語ラベル
+_IF_METRIC_SUFFIX_LABELS = {
+    "util":     "使用率",
+    "in_bps":   "受信速度",
+    "out_bps":  "送信速度",
+    "inerrors": "受信エラー",
+    "status":   "状態",
+}
+_IF_METRIC_RE = re.compile(r"^if(\d+)_(util|in_bps|out_bps|inerrors|status)$")
+
+
+def if_metric_label(oid_name: str) -> str | None:
+    """if{N}_util 等の動的メトリクス名を日本語ラベルに変換する。対象外なら None。"""
+    m = _IF_METRIC_RE.match(oid_name or "")
+    if not m:
+        return None
+    return _IF_METRIC_SUFFIX_LABELS.get(m.group(2), oid_name)
+
+
+def metric_label(oid_name: str, label_map: dict) -> str:
+    """oid_name の表示用ラベルを返す（固定ラベル→IF個別メトリクス→そのまま の順）。"""
+    if oid_name in label_map:
+        return label_map[oid_name]
+    return if_metric_label(oid_name) or oid_name
+
+
 def gauge_spec_for(oid_name: str):
     """ゲージ表示すべき指標なら仕様を返す。対象外なら None。"""
     if oid_name in _GAUGE_SPECS:
         return _GAUGE_SPECS[oid_name]
     # 登録IFの使用率(if{N}_util)もゲージ表示
     if oid_name and oid_name.startswith("if") and oid_name.endswith("_util"):
-        return {"max": 100, "warn": 70, "crit": 90, "unit": "%", "label": oid_name}
+        return {"max": 100, "warn": 70, "crit": 90, "unit": "%", "label": "使用率"}
     return None
