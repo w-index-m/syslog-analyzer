@@ -1631,8 +1631,81 @@ with tab_showlog:
 with tab_prtg:
     import prtg_view as _prtg
     st.markdown("## 📟 PRTG 風モニタリングダッシュボード")
-    st.caption("SNMPポーリングの結果を、速度計ゲージ・信号機センサー・トラフィックグラフで可視化します。"
-               "（データは「📡 SNMPモニター」タブでデバイス登録＋ポーリング起動で蓄積されます）")
+    st.caption("SNMPポーリングの結果を、速度計ゲージ・信号機センサー・トラフィックグラフで可視化します。")
+
+    # ── ⚙️ SNMP 設定（このタブから直接：デバイス登録＋ポーラー起動） ──
+    _prtg_cloud = _is_cloud_mode()
+    with st.expander("⚙️ SNMP 設定（デバイス登録・ポーリング開始）", expanded=not snmp_poller.get_devices()):
+        if _prtg_cloud:
+            st.warning("☁️ クラウド公開モードでは SNMP ポーリング(機器到達)は利用できません。"
+                       "ローカル(社内)環境で実行してください。")
+        _pc1, _pc2, _pc3, _pc4 = st.columns([2, 1.5, 1, 1])
+        with _pc1:
+            _pd_ip = st.text_input("IPアドレス", placeholder="192.168.1.1", key="prtg_add_ip")
+        with _pc2:
+            _pd_comm = st.text_input("コミュニティ", value="public", key="prtg_add_comm")
+        with _pc3:
+            _pd_ver = st.selectbox("バージョン", ["v2c", "v1"], key="prtg_add_ver")
+        with _pc4:
+            _pd_int = st.number_input("間隔(秒)", value=60, min_value=10, max_value=3600, key="prtg_add_int")
+        _pb0, _pb1, _pb2, _pb3 = st.columns(4)
+        if _pb0.button("🔍 SNMP Walk 探索", use_container_width=True, key="prtg_walk",
+                       disabled=_prtg_cloud):
+            if _pd_ip.strip():
+                with st.spinner(f"{_pd_ip} を SNMP Walk で探索中…"):
+                    st.session_state["_prtg_discover"] = snmp_poller.discover_device(
+                        _pd_ip.strip(), _pd_comm.strip() or "public", _pd_ver)
+            else:
+                st.error("IPアドレスを入力してください")
+        if _pb1.button("➕ デバイス追加", use_container_width=True, key="prtg_add_dev"):
+            if _pd_ip.strip():
+                snmp_poller.add_device(_pd_ip.strip(), _pd_comm.strip() or "public", _pd_ver, 161, int(_pd_int))
+                st.success(f"{_pd_ip} を登録しました")
+                st.rerun()
+            else:
+                st.error("IPアドレスを入力してください")
+        # 探索結果の表示
+        _disc = st.session_state.get("_prtg_discover")
+        if _disc:
+            if _disc.get("reachable"):
+                _sys = _disc["system"]
+                st.success(f"✅ 応答あり: **{_sys.get('sysName','(名前なし)')}**")
+                st.caption(f"sysDescr: {(_sys.get('sysDescr','') or '')[:120]}")
+                _ifs = _disc.get("interfaces", [])
+                if _ifs:
+                    st.caption(f"インターフェース {len(_ifs)} 個を検出（up={sum(1 for i in _ifs if i['status']=='up')}）")
+                    import pandas as _pd_disc
+                    _dfi = _pd_disc.DataFrame(_ifs)[["index", "name", "descr", "status"]]
+                    _dfi.columns = ["ifIndex", "名前", "説明", "状態"]
+                    st.dataframe(_dfi, use_container_width=True, hide_index=True, height=200)
+            else:
+                st.error(f"❌ {_disc.get('error','応答なし')}")
+        if not st.session_state.get("snmp_poller_started"):
+            if _pb2.button("▶ ポーリング開始", use_container_width=True, type="primary",
+                           key="prtg_poll_start", disabled=_prtg_cloud):
+                snmp_poller.start_poller()
+                st.session_state.snmp_poller_started = True
+                st.success("ポーリングを開始しました（数十秒後にゲージ・グラフが出ます）")
+                st.rerun()
+        else:
+            if _pb2.button("⏹ ポーリング停止", use_container_width=True, key="prtg_poll_stop"):
+                snmp_poller.stop_poller()
+                st.session_state.snmp_poller_started = False
+                st.info("ポーリングを停止しました")
+                st.rerun()
+        _pb3.button("🔄 表示を更新", use_container_width=True, key="prtg_refresh")
+        # 登録済みデバイスの簡易一覧＋削除
+        _reg = snmp_poller.get_devices()
+        if _reg:
+            st.caption(f"登録済み {len(_reg)} 台 / ポーリング: "
+                       + ("🟢 実行中" if st.session_state.get("snmp_poller_started") else "⏸ 停止中"))
+            for _rd in _reg:
+                _rc1, _rc2 = st.columns([5, 1])
+                _rc1.markdown(f"・**{_rd.get('hostname') or _rd.get('ip')}** ({_rd.get('ip')}) "
+                              f"— {_rd.get('community')}/{_rd.get('version')} 状態:{_rd.get('last_status','-')}")
+                if _rc2.button("削除", key=f"prtg_del_{_rd.get('ip')}"):
+                    snmp_poller.remove_device(_rd.get("ip"))
+                    st.rerun()
 
     _devices = snmp_poller.get_devices()
     _latest = snmp_poller.get_latest_metrics(limit=300)
@@ -1642,8 +1715,8 @@ with tab_prtg:
         _label_map[_k] = _v.get("label", _k)
 
     if not _devices and not _latest:
-        st.info("まだSNMPデータがありません。「📡 SNMPモニター」タブでデバイスを登録し、"
-                "「Poller起動」でポーリングを開始すると、ここにゲージ・グラフが表示されます。")
+        st.info("まだSNMPデータがありません。上の「⚙️ SNMP 設定」でデバイスを登録し、"
+                "「▶ ポーリング開始」を押すと、ここにゲージ・グラフが表示されます。")
     else:
         # ── ① デバイス状態マップ ──────────────────────────────
         st.markdown("### 🗺️ デバイス状態マップ")

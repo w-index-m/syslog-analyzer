@@ -426,6 +426,54 @@ def remove_device(ip: str):
         conn.commit()
 
 
+# 探索(ディスカバリ)用OID
+_DISCOVER_OIDS = {
+    "sysDescr":  "1.3.6.1.2.1.1.1.0",
+    "sysName":   "1.3.6.1.2.1.1.5.0",
+    "sysObjectID": "1.3.6.1.2.1.1.2.0",
+    "sysLocation": "1.3.6.1.2.1.1.6.0",
+}
+_IF_DESCR_OID  = "1.3.6.1.2.1.2.2.1.2"       # ifDescr
+_IF_NAME_OID   = "1.3.6.1.2.1.31.1.1.1.1"    # ifName
+_IF_OPER_OID   = "1.3.6.1.2.1.2.2.1.8"       # ifOperStatus (1=up,2=down)
+_IF_ALIAS_OID  = "1.3.6.1.2.1.31.1.1.1.18"   # ifAlias
+
+
+def discover_device(ip: str, community: str = "public",
+                    version: str = "v2c", port: int = 161) -> dict:
+    """
+    SNMP Walk による機器探索（ディスカバリ）。
+    システム情報を GET し、インターフェース一覧を WALK で取得する。
+    戻り値: {"reachable": bool, "system": {...}, "interfaces": [{index,name,descr,status}], "error": str}
+    """
+    result = {"reachable": False, "system": {}, "interfaces": [], "error": ""}
+    # システム情報 GET
+    for name, oid in _DISCOVER_OIDS.items():
+        v = snmp_get(ip, community, oid, port, version)
+        if v is not None:
+            result["system"][name] = v
+            result["reachable"] = True
+    if not result["reachable"]:
+        result["error"] = "SNMP応答なし（IP/コミュニティ/バージョン/ポート/到達性を確認してください）"
+        return result
+    # インターフェース一覧 WALK（名前・説明・状態）
+    names  = snmp_walk(ip, community, _IF_NAME_OID, port, version, max_rows=200)
+    descrs = snmp_walk(ip, community, _IF_DESCR_OID, port, version, max_rows=200)
+    opers  = snmp_walk(ip, community, _IF_OPER_OID, port, version, max_rows=200)
+    idxs = sorted(set(list(names.keys()) + list(descrs.keys())),
+                  key=lambda x: int(x) if str(x).isdigit() else 0)
+    for idx in idxs:
+        st = str(opers.get(idx, "")).strip()
+        status = "up" if st == "1" else ("down" if st == "2" else st or "?")
+        result["interfaces"].append({
+            "index": idx,
+            "name": names.get(idx) or descrs.get(idx) or f"if{idx}",
+            "descr": descrs.get(idx, ""),
+            "status": status,
+        })
+    return result
+
+
 def get_alert_metrics() -> list[dict]:
     """閾値超過中のメトリクスを返す"""
     _init_snmp_tables()
