@@ -499,6 +499,7 @@ def _ingest_show_logging(text: str, source_ip: str) -> dict:
     total = 0
     skipped = 0
     by_vendor: dict[str, int] = {}
+    ids: list = []
     for raw_line in (text or "").splitlines():
         line = raw_line.rstrip()
         if not line.strip():
@@ -517,13 +518,15 @@ def _ingest_show_logging(text: str, source_ip: str) -> dict:
             continue
         try:
             parsed = parse_syslog(line, source_ip)
-            db.insert_log(source_ip, line, parsed)
+            _new_id = db.insert_log(source_ip, line, parsed)
+            if _new_id:
+                ids.append(_new_id)
             v = parsed.get("vendor", "不明")
             by_vendor[v] = by_vendor.get(v, 0) + 1
             total += 1
         except Exception:
             skipped += 1
-    return {"total": total, "skipped": skipped, "by_vendor": by_vendor}
+    return {"total": total, "skipped": skipped, "by_vendor": by_vendor, "ids": ids}
 
 
 # ── show logging の LLM 詳細解析（config / interface status 相関対応） ──
@@ -583,6 +586,18 @@ def _llm_analyze_show_log(logs: list, mode: str,
         f"────── show interface status ──────\n{intf if intf else '(未提供)'}\n"
     )
     return analyzer.ask_llm(system, user, mode, max_tokens=3000)
+
+
+def _scoped_showlog_logs() -> list:
+    """
+    show log解析タブの解析対象ログを返す。
+    直近に貼り付けたログID集合があればそれだけに絞る（過去ログの混入防止）。
+    """
+    ids = st.session_state.get("_showlog_ids")
+    alllogs = db.get_logs(limit=500)
+    if ids:
+        return [l for l in alllogs if l.get("id") in ids]
+    return alllogs[:200]
 
 
 def _inject_test_log(vendor: str):
@@ -1109,9 +1124,12 @@ with tab_showlog:
         _sl_src_tab = st.text_input("送信元IP/ホスト", value="pasted-device",
                                     key="show_log_src_tab",
                                     help="貼り付けたログの送信元として記録されます")
-        _sl_go_tab = st.button("🔍 解析して異常チェック", use_container_width=True,
+        _sl_go_tab = st.button("🔍 解析（取り込み＋異常＋LLM）", use_container_width=True,
                                key="show_log_ingest_tab", type="primary")
-        st.caption("show logging はDB取り込み、config/interface は異常性チェックに使用します。")
+        _sl_auto_llm = st.checkbox("解析時にLLMまで自動実行", value=True,
+                                   key="show_log_auto_llm",
+                                   help="ボタン1回で取り込み・異常チェック・LLM詳細解析まで実行します")
+        st.caption("show logging はDB取り込み、config/interface は異常性チェック・相関解析に使用します。")
 
     if _sl_go_tab:
         if _sl_text_tab.strip():
@@ -1127,6 +1145,8 @@ with tab_showlog:
             st.session_state["showlog_cfg"] = _chk["config_body"]
             st.session_state["showlog_intf"] = _chk["intf_body"]
             st.session_state["_show_anomalies"] = _chk["anomalies"]
+            # 今回貼り付けた分だけを解析対象にする（過去ログの混入防止）
+            st.session_state["_showlog_ids"] = set(_r.get("ids", []))
             # セクション内訳
             _kind_label = {"logging": "show logging", "config": "running-config",
                            "intf_status": "interface status", "intf_brief": "ip int brief",
@@ -1143,6 +1163,27 @@ with tab_showlog:
                 _vcols = st.columns(max(1, len(_r["by_vendor"])))
                 for _i, (_v, _c) in enumerate(_r["by_vendor"].items()):
                     _vcols[_i].metric(_v, f"{_c} 件")
+
+            # ── LLM 詳細解析まで自動実行 ──
+            _auto = st.session_state.get("show_log_auto_llm", True)
+            _mode_now = st.session_state.get("llm_mode", "auto")
+            _llm_now = (analyzer.check_claude_available() or analyzer.check_gemini_available()
+                        or analyzer.check_groq_available() or analyzer.check_ollama_available())
+            if _auto and _mode_now != "none" and _llm_now:
+                _ll = _scoped_showlog_logs()
+                if _ll:
+                    with st.spinner("🤖 LLM が show logging・config・ポート状態を突き合わせて解析中…"):
+                        _rep, _mdl = _llm_analyze_show_log(
+                            _ll, _mode_now,
+                            config_text=_chk["config_body"], intf_text=_chk["intf_body"])
+                    if _rep:
+                        st.session_state["_showlog_llm_report"] = _rep
+                        st.session_state["_showlog_llm_model"] = _mdl
+                    else:
+                        st.warning("LLM 解析に失敗しました（APIキー/ネットワークをご確認ください）。")
+            elif _auto and not _llm_now:
+                st.info("🔑 LLM未設定のため自動解析はスキップしました。"
+                        "サイドバー「APIキー設定」で無料のGemini/Groqキーを入れると自動でAI解析まで実行します。")
         else:
             st.error("show コマンドの出力を貼り付けてください")
 
@@ -1151,7 +1192,7 @@ with tab_showlog:
     if _anoms is not None:
         import show_analyzer as _sa2
         import bug_analyzer as _bug2
-        _qlogs = db.get_logs(limit=200)
+        _qlogs = _scoped_showlog_logs()
         _qbug = _bug2.analyze_batch(_qlogs) if _qlogs else {"counts": {"bug": 0, "ops": 0}}
         _q = _sa2.quality_score(_anoms, _qbug["counts"].get("bug", 0),
                                 _qbug["counts"].get("ops", 0))
@@ -1203,68 +1244,83 @@ with tab_showlog:
         else:
             st.success("設定・ポート状態に目立った異常はありませんでした。")
 
-    # ── 🐛 バグ判定解析 ──────────────────────────────────────
-    st.markdown("### 🐛 バグ判定解析")
-    st.caption("取り込んだログから、ソフト/ハードの**不具合(バグ)疑い**・運用設定起因・情報を自動分類します。")
-    _bug_recent = db.get_logs(limit=200)
+    # ── 🐛 バグ判定解析（各ログに判定バッジを付けて表示） ──────
+    st.markdown("### 🐛 バグ判定（各ログを色分け）")
+    st.markdown(
+        "<div style='font-size:13px;color:#6b7280;margin-bottom:6px;'>"
+        "各ログを次の3つに自動分類します：&nbsp;"
+        "<span style='background:#fde8e8;color:#dc2626;padding:1px 8px;border-radius:10px;'>🐛 バグ疑い</span>&nbsp;"
+        "<span style='background:#fef3e2;color:#b45309;padding:1px 8px;border-radius:10px;'>⚙️ 運用・設定</span>&nbsp;"
+        "<span style='background:#e8f0fe;color:#2563eb;padding:1px 8px;border-radius:10px;'>✅ 情報</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    _bug_recent = _scoped_showlog_logs()
     if _bug_recent:
         import bug_analyzer as _bug
-        _bug_res = _bug.analyze_batch(_bug_recent)
-        _bc = _bug_res["counts"]
+        import json as _json_bd
+        # 各ログを判定＋メッセージで重複除去
+        _seen = set()
+        _judged = []
+        for _lg in _bug_recent:
+            _msg = _lg.get("message", "")
+            _key = (_lg.get("vendor", ""), _msg)
+            if _key in _seen:
+                continue
+            _seen.add(_key)
+            _tags = _lg.get("tags")
+            if isinstance(_tags, str):
+                try:
+                    _tags = _json_bd.loads(_tags)
+                except Exception:
+                    _tags = []
+            _res = _bug.analyze_bug({"message": _msg, "tags": _tags},
+                                    _lg.get("raw", _msg))
+            _judged.append((_lg, _res))
+        _bc = {"bug": 0, "ops": 0, "info": 0}
+        for _, _res in _judged:
+            _bc[_res["verdict"]] += 1
         _m1, _m2, _m3 = st.columns(3)
         _m1.metric("🐛 バグ疑い", f"{_bc['bug']} 件")
         _m2.metric("⚙️ 運用・設定", f"{_bc['ops']} 件")
         _m3.metric("✅ 情報", f"{_bc['info']} 件")
         if _bc["bug"]:
-            st.error(_bug_res["summary"])
-            for _bg in _bug_res["bugs"]:
-                _conf_badge = {"high": "🔴高", "medium": "🟠中", "low": "🟡低"}.get(_bg["confidence"], "")
-                st.markdown(
-                    f"<div class='log-card' style='border-left:3px solid #dc2626;'>"
-                    f"<b>🐛 {_bg['category']}</b> <span style='color:#6b7280;'>[{_conf_badge}]</span> "
-                    f"<b>{_bg['vendor']}</b> "
-                    f"<span style='color:#6b7280;'>{_bg['hostname']}</span><br>"
-                    f"<span style='color:#374151;'>{_bg['message']}</span><br>"
-                    f"<span style='color:#dc2626;font-size:12px;'>▶ {_bg['reason']}</span>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
+            st.error(f"🐛 バグ疑いが {_bc['bug']} 件あります。最優先で調査してください。")
         else:
-            st.success(_bug_res["summary"])
+            st.success("🐛 バグ疑いは検出されませんでした（下記は運用・設定/情報レベルです）。")
+
+        # 判定順（バグ→運用→情報）にソートして色分け表示
+        _order = {"bug": 0, "ops": 1, "info": 2}
+        _style = {
+            "bug":  ("#dc2626", "🐛 バグ疑い"),
+            "ops":  ("#b45309", "⚙️ 運用・設定"),
+            "info": ("#2563eb", "✅ 情報"),
+        }
+        _judged.sort(key=lambda x: _order[x[1]["verdict"]])
+        st.caption(f"判定対象 {len(_judged)} 件（重複除去済み）。バグ→運用→情報の順に表示します。")
+        for _lg, _res in _judged[:40]:
+            _v = _res["verdict"]
+            _col, _badge = _style[_v]
+            _sev = _lg.get("severity", "INFO")
+            _reason = ""
+            if _v in ("bug", "ops"):
+                _conf = {"high": "🔴高", "medium": "🟠中", "low": "🟡低"}.get(_res.get("confidence"), "")
+                _reason = (f"<br><span style='color:{_col};font-size:12px;'>"
+                           f"▶ {_res['category']}: {_res['reason']} {_conf}</span>")
+            st.markdown(
+                f"<div class='log-card' style='border-left:4px solid {_col};'>"
+                f"<span style='background:{_col};color:#fff;padding:1px 8px;border-radius:10px;"
+                f"font-size:11px;font-weight:bold;'>{_badge}</span> "
+                f"<span class='severity-{_sev}'>[{_sev}]</span> "
+                f"<b>{_lg.get('vendor','')}</b> "
+                f"<span style='color:#6b7280;font-size:12px;'>{_lg.get('hostname','')}</span><br>"
+                f"<span style='color:#374151;'>{_lg.get('message','')}</span>"
+                f"{_reason}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
     else:
         st.caption("ログを取り込むとバグ判定結果を表示します。")
-
-    # ── ⚠️ 注目イベント（重要度 or キーワードで抽出） ──────────
-    if _bug_recent:
-        _NOTABLE_KW = ("no valid license", "license", "administratively down",
-                       "alarm", "denied", "deny", "unreachable", "failed", "fail",
-                       "expired", "exceeded", "error", "invalid", "reject",
-                       "down", "loop", "crash", "reset", "overflow", "mismatch")
-        _sev_rank = {"EMERGENCY": 0, "ALERT": 1, "CRITICAL": 2, "ERROR": 3,
-                     "WARNING": 4, "NOTICE": 5, "INFO": 6, "DEBUG": 7}
-        _notable = []
-        for _lg in _bug_recent:
-            _sev = _lg.get("severity", "INFO")
-            _msg = (_lg.get("message", "") or "").lower()
-            if _sev_rank.get(_sev, 6) <= 4 or any(k in _msg for k in _NOTABLE_KW):
-                _notable.append(_lg)
-        _notable.sort(key=lambda l: _sev_rank.get(l.get("severity", "INFO"), 6))
-        st.markdown("### ⚠️ 注目イベント")
-        if _notable:
-            st.caption(f"重要度が高い/注意すべきキーワードを含むログ {len(_notable)} 件を抽出しました。")
-            for _lg in _notable[:20]:
-                _sev = _lg.get("severity", "INFO")
-                st.markdown(
-                    f"<div class='log-card' style='border-left:3px solid #b45309;'>"
-                    f"<span class='severity-{_sev}'>[{_sev}]</span> "
-                    f"<b>{_lg.get('vendor','')}</b> "
-                    f"<span style='color:#6b7280;'>{_lg.get('hostname','')}</span><br>"
-                    f"<span style='color:#374151;'>{_lg.get('message','')}</span>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
-        else:
-            st.success("重要度の高い注目イベントはありませんでした。")
 
     # ── 🤖 LLM による詳細解析（config / interface status 相関） ──
     st.markdown("### 🤖 LLM 詳細解析（設定・ポート状態と相関）")
@@ -1296,7 +1352,7 @@ with tab_showlog:
     else:
         if st.button("🤖 LLM で詳細解析する（時間がかかります）", key="showlog_llm",
                      type="primary", use_container_width=True):
-            _ll = db.get_logs(limit=200)
+            _ll = _scoped_showlog_logs()
             if _ll:
                 with st.spinner("LLM が show logging・config・ポート状態を突き合わせて解析中…"):
                     _rep, _mdl = _llm_analyze_show_log(
