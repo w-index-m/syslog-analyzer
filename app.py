@@ -449,22 +449,52 @@ def _get_config_context(ip: str) -> str:
 # ── show logging 出力を一括取り込み ──────────────────────────
 import re as _re_ingest
 
-# Cisco 系 show logging のヘッダ行（ログ本体ではないので除外）
-_SHOW_LOG_HEADER_RE = _re_ingest.compile(
-    r"(syslog logging:|console logging:|monitor logging:|buffer logging:|"
-    r"exception logging:|count and timestamp|persistent logging:|trap logging:|"
-    r"file logging:|origin-id|log buffer\s*\(|logging to |esm:|"
-    r"^\s*members? |^\s*\d+ messages? (logged|dropped|rate-limited))",
-    _re_ingest.IGNORECASE)
-
-# 先頭のシーケンス番号（例 "000123: "）を除去するための正規表現
+# 先頭のシーケンス番号（例 "000123: "）を除去
 _SHOW_LOG_SEQ_RE = _re_ingest.compile(r"^\s*\d{1,6}:\s+")
+
+# ノイズ行（show logging のステータス/バナー/プロンプト/コマンドエコー）→ 取り込まない
+_SHOW_LOG_NOISE_RE = _re_ingest.compile(
+    r"^(?:"
+    r".*[#>]\s*(?:sh(?:ow)?)\s+logg|"                 # コマンドエコー "Switch#show logging"
+    r"\s*\S+[#>]\s*$|"                                 # プロンプトのみ "Switch#"
+    r"\s*(?:syslog logging|console logging|monitor logging|buffer logging|"
+    r"exception logging|count and timestamp|persistent logging|trap logging|"
+    r"file logging|logging source-interface|logging to|logging exception|"
+    r"logging message counter|logging for|log buffer\s*\(|origin-id|esm:|"
+    r"no active filter|no inactive filter|active filter modules|"
+    r"filtering disabled|no (?:in)?active message discriminator|"
+    r"message discriminator|copyright \(c\)|compiled |cisco ios software|"
+    r"technical support:|system image file|rom:\s|bootldr:|"
+    r"\s*members?\s|\d+ messages? (?:logged|dropped|rate-limited))"
+    r")", _re_ingest.IGNORECASE)
+
+# 実ログ行らしさの判定（ホワイトリスト）
+_MNEMONIC_RE = _re_ingest.compile(r"%[A-Za-z0-9_]+-\d+-[A-Za-z0-9_]+")
+_TS_CISCO_RE = _re_ingest.compile(r"^\*?\s*\w{3}\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2}")
+_TS_ISO_RE   = _re_ingest.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}[ T]\d{1,2}:\d{2}")
+_PRI_RE      = _re_ingest.compile(r"^<\d{1,3}>")
+# 富士通 show logging syslog 形式（date host machine : process: ...）
+_FJ_PROC_RE  = _re_ingest.compile(r"\b[a-z][\w\-]*:\s")
+
+
+def _looks_like_log(line: str) -> bool:
+    """実際のログ行（イベント）らしいか。ステータス/バナー行を除外する。"""
+    if _MNEMONIC_RE.search(line):      # Cisco %FAC-N-MNEM
+        return True
+    if _PRI_RE.match(line):            # syslog PRI <NNN>
+        return True
+    if _TS_CISCO_RE.match(line):       # "Jul  4 00:54:39" / "*Mar 1 00:00:18"
+        return True
+    if _TS_ISO_RE.match(line):         # "2026/07/03 10:00:00"（富士通等）
+        return True
+    return False
 
 
 def _ingest_show_logging(text: str, source_ip: str) -> dict:
     """
     `show logging` / `show logging syslog` の貼り付け出力を1行ずつ解析し DB 取り込み。
-    戻り値: {"total": 取込件数, "skipped": 除外件数, "by_vendor": {vendor: 件数}}
+    ステータス行・バナー・プロンプト・コマンドエコーは自動除外し、実ログ行のみ取り込む。
+    戻り値: {"total", "skipped", "by_vendor"}
     """
     total = 0
     skipped = 0
@@ -473,13 +503,16 @@ def _ingest_show_logging(text: str, source_ip: str) -> dict:
         line = raw_line.rstrip()
         if not line.strip():
             continue
-        # ヘッダ/ステータス行はスキップ（%FAC-N-MNEM を含まない場合のみ）
-        if _SHOW_LOG_HEADER_RE.search(line) and "%" not in line:
-            skipped += 1
-            continue
-        # 先頭シーケンス番号を除去（Cisco バッファログ）
+        # 先頭シーケンス番号を除去
         line = _SHOW_LOG_SEQ_RE.sub("", line).strip()
         if not line:
+            continue
+        # ノイズ行は除外
+        if _SHOW_LOG_NOISE_RE.search(line):
+            skipped += 1
+            continue
+        # 実ログ行に見えないものは除外（未分類ゴミの取り込み防止）
+        if not _looks_like_log(line):
             skipped += 1
             continue
         try:
@@ -491,6 +524,65 @@ def _ingest_show_logging(text: str, source_ip: str) -> dict:
         except Exception:
             skipped += 1
     return {"total": total, "skipped": skipped, "by_vendor": by_vendor}
+
+
+# ── show logging の LLM 詳細解析（config / interface status 相関対応） ──
+def _llm_analyze_show_log(logs: list, mode: str,
+                          config_text: str = "", intf_text: str = "") -> tuple[str, str]:
+    """
+    取り込んだログ一覧に加え、show running-config / show interface status を
+    突き合わせて総合解析する。事実ベース・ハルシネーション抑制のプロンプト。
+    戻り値: (レポート本文, モデル名)
+    """
+    import json as _json
+    lines = []
+    for lg in logs[:200]:
+        tags = lg.get("tags")
+        if isinstance(tags, str):
+            try:
+                tags = _json.loads(tags)
+            except Exception:
+                tags = []
+        tagstr = ",".join(t for t in (tags or [])
+                          if not t.startswith(("src:", "loop_port", "from:", "to:", "mac:")))
+        lines.append(f"[{lg.get('severity','INFO')}] {lg.get('vendor','')} "
+                     f"{lg.get('message','')}  <{tagstr}>")
+    ctx = "\n".join(lines) if lines else "(ログなし)"
+
+    # 長すぎる config / interface は切り詰め（トークン節約）
+    def _clip(s, n):
+        s = (s or "").strip()
+        return s if len(s) <= n else s[:n] + "\n…(以下省略)"
+    cfg = _clip(config_text, 6000)
+    intf = _clip(intf_text, 3000)
+
+    system = (
+        "あなたは Cisco / 富士通などのネットワーク機器に精通した運用エンジニアです。"
+        "同一機器から採取した show logging・show running-config・show interface status を"
+        "相互に突き合わせ、事実に基づいて日本語で報告します。\n"
+        "【厳守事項】\n"
+        "1. ログ・設定・状態に実在する記述だけを根拠にする。書かれていない事象を作らない（ハルシネーション禁止）。\n"
+        "2. 「確定（出力から読み取れる）」と「推測」を必ず分けて書く。推測には『推測:』と付ける。\n"
+        "3. 各指摘には該当するログ行・設定行・ポート名を引用する。\n"
+        "4. 以下の既知の正常挙動を誤って障害/バグと判定しない:\n"
+        "   ・%SYS-5-RESTART は通常の再起動通知でクラッシュではない\n"
+        "   ・%PNP-* は未設定機のゼロタッチ(PnP)動作。PnPサーバ不在時の alarm は想定内\n"
+        "   ・'administratively down' は shutdown 設定によるもので障害ではない\n"
+        "   ・notconnect はケーブル未接続、'Not Present' は SFP等モジュール未実装\n"
+    )
+    user = (
+        "同一機器の以下の出力を突き合わせて解析してください。次の構成で回答します。\n\n"
+        "1. 【全体サマリ】機種・役割・設定状況・接続状況を3行以内で\n"
+        "2. 【確定事象】ログ/設定/状態から事実として読み取れること（該当行を引用）\n"
+        "3. 【バグ/不具合の有無】クラッシュ/メモリ/watchdog/再起動異常などの兆候。無ければ『不具合の兆候なし』と明記\n"
+        "4. 【設定・運用上の問題】未設定・セキュリティ・ライセンス・冗長性など（設定の該当箇所を引用）\n"
+        "5. 【ログと設定の相関】ログの事象を設定/状態で説明できるか（例: Vlan down ↔ interface Vlan1 shutdown）\n"
+        "6. 【推奨アクション】優先度順に、実行コマンド付きで\n\n"
+        f"────── show logging（解析済み {len(lines)}件）──────\n{ctx}\n\n"
+        f"────── show running-config ──────\n{cfg if cfg else '(未提供)'}\n\n"
+        f"────── show interface status ──────\n{intf if intf else '(未提供)'}\n"
+    )
+    return analyzer.ask_llm(system, user, mode, max_tokens=3000)
 
 
 def _inject_test_log(vendor: str):
@@ -988,51 +1080,128 @@ with tab1:
 # TAB: show log 解析（貼り付け一括取り込み）
 # ═══════════════════════════════════════════
 with tab_showlog:
-    st.markdown("## 📥 show logging 貼り付け解析")
+    st.markdown("## 📥 show コマンド貼り付け解析")
     st.markdown(
-        "ネットワーク機器の `show logging`（Cisco）や `show logging syslog`（富士通）の"
-        "出力を丸ごと貼り付けて、**各行を自動解析・ベンダー判別・タグ付け**します。"
+        "機器で採取した **show 系コマンドをまとめて貼り付け**てください。"
+        "`show logging` / `show running-config` / `show interface status` / "
+        "`show version` などを自動でセクション分割し、"
+        "**ログ解析＋設定・ポート状態の異常性チェック**を行います。"
     )
 
     _sc1, _sc2 = st.columns([3, 1])
     with _sc1:
         _sl_text_tab = st.text_area(
-            "ここに show logging の出力を貼り付け",
-            height=320, key="show_log_text_tab",
+            "ここに show 系コマンドの出力をまとめて貼り付け",
+            height=340, key="show_log_text_tab",
             placeholder=(
-                "*Jul  3 10:00:01.123: %LINK-3-UPDOWN: Interface Gi1/0/1, changed state to down\n"
-                "*Jul  3 10:00:02.456: %LINEPROTO-5-UPDOWN: Line protocol on Gi1/0/1, changed state to down\n"
-                "*Jul  3 10:00:10.789: %ETHCNTR-3-LOOP_BACK_DETECTED: Loop-back detected on Gi0/1.\n"
-                "\n"
-                "-- 富士通 Si-R/SR-S --\n"
-                "2026/07/03 10:00:00 SiR-G210 Si-R : protocol: ether 1 3 link down\n"
-                "2026/07/03 10:01:00 sw-srs01 SR-S : l2loopd: Configuration Testing Protocol blocked port 5"
+                "Switch#show logging\n"
+                "Jul  4 00:54:39.701: %SYS-5-RESTART: System restarted --\n"
+                "Jul  4 00:55:27.694: %LINK-5-CHANGED: Interface Vlan1, changed state to administratively down\n"
+                "Switch#show running-config\n"
+                "hostname Switch\n"
+                "interface Vlan1\n no ip address\n shutdown\n"
+                "Switch#show interface status\n"
+                "Gi0/1   notconnect  1  auto auto 10/100/1000BaseTX\n"
+                "Switch#"
             ),
         )
     with _sc2:
         _sl_src_tab = st.text_input("送信元IP/ホスト", value="pasted-device",
                                     key="show_log_src_tab",
                                     help="貼り付けたログの送信元として記録されます")
-        _sl_go_tab = st.button("🔍 解析して取り込み", use_container_width=True,
+        _sl_go_tab = st.button("🔍 解析して異常チェック", use_container_width=True,
                                key="show_log_ingest_tab", type="primary")
-        st.caption("ヘッダ行やシーケンス番号は自動除去します。")
+        st.caption("show logging はDB取り込み、config/interface は異常性チェックに使用します。")
 
     if _sl_go_tab:
         if _sl_text_tab.strip():
-            _r = _ingest_show_logging(_sl_text_tab, _sl_src_tab.strip() or "pasted-device")
-            if _r["total"]:
-                st.success(f"✅ {_r['total']} 件のログを取り込みました（除外 {_r['skipped']} 行）")
-                # ベンダー内訳を表示
+            import show_analyzer as _sa
+            _secs = _sa.split_sections(_sl_text_tab)
+            _chk = _sa.check_anomalies(_secs)
+            # logging セクションを DB 取り込み
+            _r = {"total": 0, "skipped": 0, "by_vendor": {}}
+            if _chk["logging_body"]:
+                _r = _ingest_show_logging(_chk["logging_body"],
+                                          _sl_src_tab.strip() or "pasted-device")
+            # config / interface を LLM 相関解析用に保持
+            st.session_state["showlog_cfg"] = _chk["config_body"]
+            st.session_state["showlog_intf"] = _chk["intf_body"]
+            st.session_state["_show_anomalies"] = _chk["anomalies"]
+            # セクション内訳
+            _kind_label = {"logging": "show logging", "config": "running-config",
+                           "intf_status": "interface status", "intf_brief": "ip int brief",
+                           "interfaces": "interfaces", "version": "version",
+                           "cdp": "cdp", "cpu": "cpu", "other": "その他"}
+            _sec_summary = " / ".join(
+                f"{_kind_label.get(s['kind'], s['kind'])}"
+                for s in _secs) or "（区切りなし＝logging扱い）"
+            st.success(
+                f"✅ {len(_secs)} セクションを認識: {_sec_summary}\n\n"
+                f"ログ取り込み {_r['total']} 件（除外 {_r['skipped']} 行）／"
+                f"異常検出 {len(_chk['anomalies'])} 件")
+            if _r["by_vendor"]:
                 _vcols = st.columns(max(1, len(_r["by_vendor"])))
                 for _i, (_v, _c) in enumerate(_r["by_vendor"].items()):
                     _vcols[_i].metric(_v, f"{_c} 件")
-                st.info("下に解析結果を表示します。ページ下部の「ログビューア」タブや"
-                        "「📊 ログ一括 AI 分析」でも確認・評価できます。")
-            else:
-                st.warning(f"取り込めるログ行がありませんでした（除外 {_r['skipped']} 行）。"
-                           "貼り付け内容をご確認ください。")
         else:
-            st.error("show logging の出力を貼り付けてください")
+            st.error("show コマンドの出力を貼り付けてください")
+
+    # ── 🩺 健全性スコア（ネットワーク品質ルーブリック） ──────────
+    _anoms = st.session_state.get("_show_anomalies")
+    if _anoms is not None:
+        import show_analyzer as _sa2
+        import bug_analyzer as _bug2
+        _qlogs = db.get_logs(limit=200)
+        _qbug = _bug2.analyze_batch(_qlogs) if _qlogs else {"counts": {"bug": 0, "ops": 0}}
+        _q = _sa2.quality_score(_anoms, _qbug["counts"].get("bug", 0),
+                                _qbug["counts"].get("ops", 0))
+        _grade_color = {"A": "#16a34a", "B": "#65a30d", "C": "#b45309",
+                        "D": "#ea580c", "E": "#dc2626"}.get(_q["grade"], "#6b7280")
+        st.markdown("### 🩺 健全性スコア（品質ルーブリック）")
+        _qc1, _qc2 = st.columns([1, 2])
+        with _qc1:
+            st.markdown(
+                f"<div class='metric-card' style='border:2px solid {_grade_color};'>"
+                f"<div style='font-size:14px;color:#6b7280;'>総合評価</div>"
+                f"<div style='font-size:52px;font-weight:bold;color:{_grade_color};line-height:1;'>"
+                f"{_q['grade']}</div>"
+                f"<div style='font-size:28px;font-weight:bold;color:#374151;'>{_q['score']}<span style='font-size:14px;'>/100</span></div>"
+                f"<div style='font-size:12px;color:{_grade_color};margin-top:4px;'>{_q['label']}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        with _qc2:
+            st.markdown("**評価の内訳（減点根拠）**")
+            if _q["deductions"]:
+                for _d in _q["deductions"]:
+                    st.markdown(f"<div style='font-size:13px;color:#6b7280;'>・{_d}</div>",
+                                unsafe_allow_html=True)
+            else:
+                st.markdown("<div style='color:#16a34a;'>減点なし（良好）</div>",
+                            unsafe_allow_html=True)
+            st.caption("採点基準: ERROR以上 -20〜-30 / WARNING -8 / NOTICE -3 / バグ疑い -25（各件数×）")
+
+    # ── 🚨 異常性チェック（config / interface / license） ────────
+    if _anoms is not None:
+        st.markdown("### 🚨 異常性チェック（設定・ポート状態）")
+        if _anoms:
+            _sev_color = {"EMERGENCY": "#dc2626", "ALERT": "#dc2626", "CRITICAL": "#dc2626",
+                          "ERROR": "#dc2626", "WARNING": "#b45309", "NOTICE": "#2563eb"}
+            _crit = sum(1 for a in _anoms if a["severity"] in ("ERROR", "CRITICAL", "ALERT", "EMERGENCY"))
+            _warn = sum(1 for a in _anoms if a["severity"] == "WARNING")
+            st.caption(f"🔴 要対処 {_crit} 件 / 🟠 注意 {_warn} 件 / その他 {len(_anoms)-_crit-_warn} 件")
+            for _a in _anoms:
+                _col = _sev_color.get(_a["severity"], "#6b7280")
+                st.markdown(
+                    f"<div class='log-card' style='border-left:3px solid {_col};'>"
+                    f"<span style='color:{_col};font-weight:bold;'>[{_a['severity']}] {_a['category']}</span> "
+                    f"{_a['detail']}<br>"
+                    f"<span style='color:#6b7280;font-size:12px;'>根拠: {_a['evidence']}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.success("設定・ポート状態に目立った異常はありませんでした。")
 
     # ── 🐛 バグ判定解析 ──────────────────────────────────────
     st.markdown("### 🐛 バグ判定解析")
@@ -1060,11 +1229,93 @@ with tab_showlog:
                     f"</div>",
                     unsafe_allow_html=True,
                 )
-            st.info("💡 より詳細な原因推定は、下部「📊 ログ一括 AI 分析」で LLM 判定できます。")
         else:
             st.success(_bug_res["summary"])
     else:
         st.caption("ログを取り込むとバグ判定結果を表示します。")
+
+    # ── ⚠️ 注目イベント（重要度 or キーワードで抽出） ──────────
+    if _bug_recent:
+        _NOTABLE_KW = ("no valid license", "license", "administratively down",
+                       "alarm", "denied", "deny", "unreachable", "failed", "fail",
+                       "expired", "exceeded", "error", "invalid", "reject",
+                       "down", "loop", "crash", "reset", "overflow", "mismatch")
+        _sev_rank = {"EMERGENCY": 0, "ALERT": 1, "CRITICAL": 2, "ERROR": 3,
+                     "WARNING": 4, "NOTICE": 5, "INFO": 6, "DEBUG": 7}
+        _notable = []
+        for _lg in _bug_recent:
+            _sev = _lg.get("severity", "INFO")
+            _msg = (_lg.get("message", "") or "").lower()
+            if _sev_rank.get(_sev, 6) <= 4 or any(k in _msg for k in _NOTABLE_KW):
+                _notable.append(_lg)
+        _notable.sort(key=lambda l: _sev_rank.get(l.get("severity", "INFO"), 6))
+        st.markdown("### ⚠️ 注目イベント")
+        if _notable:
+            st.caption(f"重要度が高い/注意すべきキーワードを含むログ {len(_notable)} 件を抽出しました。")
+            for _lg in _notable[:20]:
+                _sev = _lg.get("severity", "INFO")
+                st.markdown(
+                    f"<div class='log-card' style='border-left:3px solid #b45309;'>"
+                    f"<span class='severity-{_sev}'>[{_sev}]</span> "
+                    f"<b>{_lg.get('vendor','')}</b> "
+                    f"<span style='color:#6b7280;'>{_lg.get('hostname','')}</span><br>"
+                    f"<span style='color:#374151;'>{_lg.get('message','')}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.success("重要度の高い注目イベントはありませんでした。")
+
+    # ── 🤖 LLM による詳細解析（config / interface status 相関） ──
+    st.markdown("### 🤖 LLM 詳細解析（設定・ポート状態と相関）")
+    _has_cfg = bool(st.session_state.get("showlog_cfg", "").strip())
+    _has_intf = bool(st.session_state.get("showlog_intf", "").strip())
+    _ctx_parts = []
+    if _has_cfg:
+        _ctx_parts.append("running-config")
+    if _has_intf:
+        _ctx_parts.append("interface status")
+    if _ctx_parts:
+        st.caption(f"上で貼り付けた **{' / '.join(_ctx_parts)}** も相関材料として解析に含めます。")
+    else:
+        st.caption("上の貼り付けに show running-config / show interface status も含めると、"
+                   "ログと設定・ポート状態を突き合わせた総合診断ができます。")
+    _llm_ok = (analyzer.check_claude_available() or analyzer.check_gemini_available()
+               or analyzer.check_groq_available() or analyzer.check_ollama_available())
+    _mode_sel = st.session_state.get("llm_mode", "auto")
+    if not _llm_ok:
+        st.warning(
+            "🔑 **LLM APIキーが未設定のため AI 詳細解析が使えません。**\n\n"
+            "サイドバーの「🔑 APIキー設定」で、無料枠のある **Gemini** または **Groq** の "
+            "キーを1つ入れて「適用」すると、この機能が有効になります。\n"
+            "- Gemini: https://aistudio.google.com （無料）\n"
+            "- Groq: https://console.groq.com （無料・高速）"
+        )
+    elif _mode_sel == "none":
+        st.info("解析モードが「⛔ AI解析なし」になっています。サイドバーで Gemini/Groq/auto に切り替えてください。")
+    else:
+        if st.button("🤖 LLM で詳細解析する（時間がかかります）", key="showlog_llm",
+                     type="primary", use_container_width=True):
+            _ll = db.get_logs(limit=200)
+            if _ll:
+                with st.spinner("LLM が show logging・config・ポート状態を突き合わせて解析中…"):
+                    _rep, _mdl = _llm_analyze_show_log(
+                        _ll, _mode_sel,
+                        config_text=st.session_state.get("showlog_cfg", ""),
+                        intf_text=st.session_state.get("showlog_intf", ""))
+                if _rep:
+                    st.session_state["_showlog_llm_report"] = _rep
+                    st.session_state["_showlog_llm_model"] = _mdl
+                else:
+                    st.error("LLM 解析に失敗しました。APIキー設定・ネットワークをご確認ください。")
+            else:
+                st.warning("解析対象のログがありません。先に show logging を取り込んでください。")
+    if st.session_state.get("_showlog_llm_report"):
+        st.markdown(
+            f"<div class='ai-explanation'>{st.session_state['_showlog_llm_report']}</div>",
+            unsafe_allow_html=True,
+        )
+        st.caption(f"モデル: {st.session_state.get('_showlog_llm_model','')}")
 
     # 直近の取り込みログをその場でプレビュー表示
     st.markdown("### 🔎 解析結果（直近の取り込みログ）")
