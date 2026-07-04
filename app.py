@@ -1252,11 +1252,16 @@ with tab_showlog:
             st.caption(f"🔴 要対処 {_crit} 件 / 🟠 注意 {_warn} 件 / その他 {len(_anoms)-_crit-_warn} 件")
             for _a in _anoms:
                 _col = _sev_color.get(_a["severity"], "#6b7280")
+                _remedy_html = ""
+                if _a.get("remedy"):
+                    _remedy_html = (f"<br><span style='color:#16a34a;font-size:12px;'>"
+                                    f"✅ 対処: {_a['remedy']}</span>")
                 st.markdown(
                     f"<div class='log-card' style='border-left:3px solid {_col};'>"
                     f"<span style='color:{_col};font-weight:bold;'>[{_a['severity']}] {_a['category']}</span> "
                     f"{_a['detail']}<br>"
                     f"<span style='color:#6b7280;font-size:12px;'>根拠: {_a['evidence']}</span>"
+                    f"{_remedy_html}"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
@@ -1308,16 +1313,13 @@ with tab_showlog:
         else:
             st.success("🐛 バグ疑いは検出されませんでした（下記は運用・設定/情報レベルです）。")
 
-        # 判定順（バグ→運用→情報）にソートして色分け表示
-        _order = {"bug": 0, "ops": 1, "info": 2}
         _style = {
             "bug":  ("#dc2626", "🐛 バグ疑い"),
             "ops":  ("#b45309", "⚙️ 運用・設定"),
             "info": ("#2563eb", "✅ 情報"),
         }
-        _judged.sort(key=lambda x: _order[x[1]["verdict"]])
-        st.caption(f"判定対象 {len(_judged)} 件（重複除去済み）。バグ→運用→情報の順に表示します。")
-        for _lg, _res in _judged[:40]:
+
+        def _render_card(_lg, _res):
             _v = _res["verdict"]
             _col, _badge = _style[_v]
             _sev = _lg.get("severity", "INFO")
@@ -1338,6 +1340,21 @@ with tab_showlog:
                 f"</div>",
                 unsafe_allow_html=True,
             )
+
+        # バグ→運用は常時表示（要対処）。情報は折りたたみ（クラッター防止）
+        _actionable = [(l, r) for l, r in _judged if r["verdict"] in ("bug", "ops")]
+        _infos = [(l, r) for l, r in _judged if r["verdict"] == "info"]
+        _actionable.sort(key=lambda x: 0 if x[1]["verdict"] == "bug" else 1)
+        if _actionable:
+            st.markdown("**要確認（バグ・運用/設定）**")
+            for _lg, _res in _actionable[:40]:
+                _render_card(_lg, _res)
+        else:
+            st.caption("要対処（バグ・運用/設定）のログはありません。")
+        if _infos:
+            with st.expander(f"✅ 情報レベルのログ {len(_infos)} 件（クリックで表示）"):
+                for _lg, _res in _infos[:60]:
+                    _render_card(_lg, _res)
     else:
         st.caption("ログを取り込むとバグ判定結果を表示します。")
 

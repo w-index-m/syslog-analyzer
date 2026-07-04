@@ -79,9 +79,9 @@ def split_sections(text: str) -> list[dict]:
 
 
 # ── 異常性チェック ────────────────────────────────────────────
-def _add(anoms, severity, category, detail, evidence=""):
+def _add(anoms, severity, category, detail, evidence="", remedy=""):
     anoms.append({"severity": severity, "category": category,
-                  "detail": detail, "evidence": evidence})
+                  "detail": detail, "evidence": evidence, "remedy": remedy})
 
 
 def _check_config(body: str, anoms: list):
@@ -94,22 +94,26 @@ def _check_config(body: str, anoms: list):
     hm = re.search(r"^\s*hostname\s+(\S+)", body, re.IGNORECASE | re.MULTILINE)
     if hm and hm.group(1) in ("Switch", "Router", "switch", "router"):
         _add(anoms, "WARNING", "未設定", "ホスト名が既定値のまま（未設定機の可能性）",
-             f"hostname {hm.group(1)}")
+             f"hostname {hm.group(1)}",
+             remedy="ホスト名を設定: (config)# hostname <装置名>")
 
     # 特権パスワード未設定
     if "enable secret" not in low and "enable password" not in low:
         _add(anoms, "WARNING", "セキュリティ", "特権EXEC(enable)パスワードが未設定",
-             "enable secret / enable password なし")
+             "enable secret / enable password なし",
+             remedy="特権パスワードを設定: (config)# enable secret <強固なパスワード>")
 
     # パスワード平文
     if "no service password-encryption" in low:
         _add(anoms, "NOTICE", "セキュリティ", "パスワード暗号化が無効（平文保存）",
-             "no service password-encryption")
+             "no service password-encryption",
+             remedy="平文保存を回避: (config)# service password-encryption")
 
     # HTTP サーバ有効
     if re.search(r"^\s*ip http server", body, re.IGNORECASE | re.MULTILINE):
         _add(anoms, "NOTICE", "セキュリティ", "HTTPサーバが有効（未使用なら無効化推奨）",
-             "ip http server")
+             "ip http server",
+             remedy="未使用なら無効化: (config)# no ip http server / no ip http secure-server")
 
     # SSH/ユーザ・VTY 認証
     has_user = bool(re.search(r"^\s*username\s+\S+", body, re.IGNORECASE | re.MULTILINE))
@@ -118,24 +122,31 @@ def _check_config(body: str, anoms: list):
         vb = vty_block.group(0).lower()
         if "transport input telnet" in vb or ("transport input all" in vb):
             _add(anoms, "WARNING", "セキュリティ", "VTYでTelnet(平文)が許可されている",
-                 "line vty: transport input telnet/all")
+                 "line vty: transport input telnet/all",
+                 remedy="SSHのみ許可: (config-line)# transport input ssh")
         if "login" not in vb and "password" not in vb and not has_user:
             _add(anoms, "WARNING", "リモート管理", "VTYにログイン認証が設定されていない",
-                 "line vty: login/password なし")
+                 "line vty: login/password なし",
+                 remedy="ローカル認証を設定: (config)# username admin secret <pw> → "
+                        "(config-line)# login local")
     if "crypto key generate rsa" not in low and "ip ssh" not in low and not has_user:
         _add(anoms, "NOTICE", "リモート管理", "SSHが設定されていない可能性（鍵/ユーザなし）",
-             "ip ssh / username なし")
+             "ip ssh / username なし",
+             remedy="SSH有効化: (config)# ip domain-name <名> → crypto key generate rsa "
+                    "modulus 2048 → ip ssh version 2")
 
     # 管理IP(SVI)の有無
     svi_ip = re.search(r"interface Vlan\d+[\s\S]*?ip address\s+[\d.]+", body, re.IGNORECASE)
     if not svi_ip:
         _add(anoms, "WARNING", "管理性", "管理用IPアドレス(SVI)が未設定（インバンド管理不可）",
-             "interface Vlan* に ip address なし")
+             "interface Vlan* に ip address なし",
+             remedy="管理SVIを設定: (config)# interface vlan1 → ip address <IP> <mask> → no shutdown")
 
     # syslog 転送
     if not re.search(r"^\s*logging\s+(host\s+)?[\d.]+", body, re.IGNORECASE | re.MULTILINE):
         _add(anoms, "NOTICE", "運用", "syslog転送先(logging host)が未設定",
-             "logging <ip> なし")
+             "logging <ip> なし",
+             remedy="syslog転送先を設定: (config)# logging host <SYSLOGサーバIP>")
 
 
 def _check_intf_status(body: str, anoms: list):
@@ -153,20 +164,26 @@ def _check_intf_status(body: str, anoms: list):
         total += 1
         if "err-disabled" in low:
             errdis += 1
-            _add(anoms, "ERROR", "ポート", "err-disabled ポートを検出（要復旧）", l.strip())
+            _add(anoms, "ERROR", "ポート", "err-disabled ポートを検出（要復旧）", l.strip(),
+                 remedy="原因確認後に復旧: # show interface <port> → 原因除去 → "
+                        "(config-if)# shutdown → no shutdown（errdisable recovery設定も検討）")
         elif "connected" in low:
             connected += 1
             # 半二重は不一致の疑い
             if re.search(r"\bhalf\b", low):
                 halfdup += 1
-                _add(anoms, "WARNING", "ポート", "接続中ポートが半二重（デュプレックス不一致の疑い）", l.strip())
+                _add(anoms, "WARNING", "ポート", "接続中ポートが半二重（デュプレックス不一致の疑い）", l.strip(),
+                     remedy="両端の速度/デュプレックスを揃える: (config-if)# duplex auto / speed auto、"
+                            "または両端で固定値を一致させる")
         elif "disabled" in low:
             disabled += 1
         elif "notconnect" in low:
             notconnect += 1
     if total and connected == 0:
         _add(anoms, "WARNING", "接続性", f"稼働中のリンクが1つもない（全{total}ポートが未接続/停止）",
-             f"connected=0 / notconnect={notconnect} / disabled={disabled}")
+             f"connected=0 / notconnect={notconnect} / disabled={disabled}",
+             remedy="ケーブル接続とポート状態を確認: # show interface status、"
+                    "SFP未実装(Not Present)なら必要に応じてモジュール装着")
 
 
 def _check_intf_brief(body: str, anoms: list):
@@ -177,7 +194,8 @@ def _check_intf_brief(body: str, anoms: list):
         low = l.lower()
         # protocol down while admin up → L1/L2 問題
         if re.search(r"\bup\s+down\b", low):
-            _add(anoms, "WARNING", "接続性", "administratively up だが protocol down（L1/L2要確認）", l.strip())
+            _add(anoms, "WARNING", "接続性", "administratively up だが protocol down（L1/L2要確認）", l.strip(),
+                 remedy="物理/データリンク層を確認: ケーブル・SFP・対向機・カプセル化/クロック等")
         if "administratively down" in low:
             pass  # 意図的shutdown（設定由来）なので単体では警告しない
 
@@ -186,7 +204,9 @@ def _check_license(sections_text: str, anoms: list):
     if re.search(r"no valid license", sections_text, re.IGNORECASE):
         _add(anoms, "WARNING", "ライセンス",
              "有効なライセンスが無い（次回起動で機能レベルが降格する可能性）",
-             "No valid license found")
+             "No valid license found",
+             remedy="# show license / show version でレベル確認。必要な機能なら正規ライセンス適用、"
+                    "不要なら (config)# license boot level ipbase で警告解消")
 
 
 def check_anomalies(sections: list) -> dict:
