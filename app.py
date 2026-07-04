@@ -792,9 +792,9 @@ _process_queue()
 # ─────────────────────────────────────────
 # メインUI
 # ─────────────────────────────────────────
-(tab_health, tab1, tab_showlog, tab2, tab3, tab4, tab5,
+(tab_health, tab1, tab_showlog, tab_prtg, tab2, tab3, tab4, tab5,
  tab_netflow, tab_pcap, tab_topo, tab_probe) = st.tabs([
-    "📊 品質ルーブリック", "📋 ログビューア", "📥 show log解析",
+    "📊 品質ルーブリック", "📋 ログビューア", "📥 show log解析", "📟 PRTG風",
     "📊 テレメトリダッシュボード", "📡 SNMPモニター", "🗂️ 機器コンフィグ",
     "📖 セットアップガイド", "🌊 NetFlow", "📦 パケット解析",
     "🗺️ トポロジー", "⏱️ 応答時間"
@@ -1553,6 +1553,144 @@ with tab_showlog:
             )
     else:
         st.caption("まだ取り込まれたログがありません。上に show logging を貼り付けて実行してください。")
+
+# ═══════════════════════════════════════════
+# TAB: PRTG 風ダッシュボード
+# ═══════════════════════════════════════════
+with tab_prtg:
+    import prtg_view as _prtg
+    st.markdown("## 📟 PRTG 風モニタリングダッシュボード")
+    st.caption("SNMPポーリングの結果を、速度計ゲージ・信号機センサー・トラフィックグラフで可視化します。"
+               "（データは「📡 SNMPモニター」タブでデバイス登録＋ポーリング起動で蓄積されます）")
+
+    _devices = snmp_poller.get_devices()
+    _latest = snmp_poller.get_latest_metrics(limit=300)
+    _alerts = snmp_poller.get_alert_metrics()
+    _label_map = {}
+    for _k, _v in {**snmp_poller.THRESHOLDS, **snmp_poller.COUNTER_OIDS}.items():
+        _label_map[_k] = _v.get("label", _k)
+
+    if not _devices and not _latest:
+        st.info("まだSNMPデータがありません。「📡 SNMPモニター」タブでデバイスを登録し、"
+                "「Poller起動」でポーリングを開始すると、ここにゲージ・グラフが表示されます。")
+    else:
+        # ── ① デバイス状態マップ ──────────────────────────────
+        st.markdown("### 🗺️ デバイス状態マップ")
+        _dcols = st.columns(max(1, min(4, len(_devices) or 1)))
+        for _i, _dev in enumerate(_devices):
+            _st = (_dev.get("last_status") or "unknown").lower()
+            _dcol = _prtg.status_color("critical" if _st in ("down", "error", "unreachable")
+                                       else ("ok" if _st in ("ok", "up", "reachable") else "unknown"))
+            _mark = "🟢" if _dcol == "#16a34a" else ("🔴" if _dcol == "#dc2626" else "⚪")
+            with _dcols[_i % len(_dcols)]:
+                st.markdown(
+                    f"<div class='metric-card' style='border-top:4px solid {_dcol};text-align:left;'>"
+                    f"<div style='font-size:20px;'>{_mark} <b>{_dev.get('hostname') or _dev.get('ip')}</b></div>"
+                    f"<div style='color:#6b7280;font-size:12px;'>{_dev.get('ip')}</div>"
+                    f"<div style='color:#6b7280;font-size:12px;'>状態: {_dev.get('last_status','unknown')}</div>"
+                    f"<div style='color:#9ca3af;font-size:11px;'>最終: {_dev.get('last_polled','-')}</div>"
+                    f"</div>", unsafe_allow_html=True)
+
+        # ── ② 速度計ゲージ（最新値・ゲージ対象の指標） ──────────
+        st.markdown("### 🎛️ 速度計ゲージ（最新値）")
+        # 各(source_ip, oid_name)の最新値だけ拾う
+        _seen_g = set()
+        _gauges = []
+        for _m in _latest:  # _latest は新しい順
+            _key = (_m.get("source_ip"), _m.get("oid_name"))
+            if _key in _seen_g:
+                continue
+            _spec = _prtg.gauge_spec_for(_m.get("oid_name", ""))
+            if not _spec:
+                continue
+            _seen_g.add(_key)
+            try:
+                _val = float(_m.get("value"))
+            except (TypeError, ValueError):
+                continue
+            _gauges.append((_m.get("hostname") or _m.get("source_ip"), _spec, _val))
+        if _gauges:
+            _gcols = st.columns(min(4, len(_gauges)))
+            for _i, (_host, _spec, _val) in enumerate(_gauges[:12]):
+                with _gcols[_i % len(_gcols)]:
+                    st.markdown(
+                        f"<div style='text-align:center;font-size:12px;color:#6b7280;'>{_host}</div>"
+                        + _prtg.svg_gauge(_val, _spec["max"], _spec["label"], _spec["unit"],
+                                          _spec["warn"], _spec["crit"]),
+                        unsafe_allow_html=True)
+        else:
+            st.caption("ゲージ対象の指標（CPU/温度など）がまだ収集されていません。")
+
+        # ── ③ センサー一覧（信号機ステータス） ──────────────────
+        st.markdown("### 🚦 センサー一覧（信号機ステータス）")
+        _seen_s = set()
+        _sensors = []
+        for _m in _latest:
+            _key = (_m.get("source_ip"), _m.get("oid_name"))
+            if _key in _seen_s:
+                continue
+            _seen_s.add(_key)
+            _sensors.append(_m)
+        if _sensors:
+            _scols = st.columns(3)
+            for _i, _m in enumerate(_sensors[:30]):
+                _lv = (_m.get("alert_level") or "none").lower()
+                _col = _prtg.status_color(_lv)
+                _dot = "🟢" if _col == "#16a34a" else ("🟡" if _col == "#f59e0b" else ("🔴" if _col == "#dc2626" else "⚪"))
+                _name = _label_map.get(_m.get("oid_name"), _m.get("oid_name"))
+                with _scols[_i % 3]:
+                    st.markdown(
+                        f"<div class='log-card' style='border-left:4px solid {_col};padding:8px 12px;'>"
+                        f"{_dot} <b>{_name}</b> "
+                        f"<span style='color:#6b7280;font-size:11px;'>{_m.get('hostname') or _m.get('source_ip')}</span><br>"
+                        f"<span style='font-size:18px;font-weight:bold;color:{_col};'>{_m.get('value','-')}</span> "
+                        f"<span style='color:#6b7280;font-size:12px;'>{_m.get('unit','')}</span>"
+                        f"</div>", unsafe_allow_html=True)
+        else:
+            st.caption("センサーデータがまだありません。")
+
+        # ── ④ トラフィックグラフ（時系列） ──────────────────────
+        st.markdown("### 📈 トラフィック / 指標グラフ（時系列）")
+        if _devices:
+            _gc1, _gc2, _gc3 = st.columns([2, 2, 1])
+            _dev_opts = {f"{d.get('hostname') or d.get('ip')} ({d.get('ip')})": d.get("ip") for d in _devices}
+            _sel_dev = _gc1.selectbox("デバイス", list(_dev_opts.keys()), key="prtg_dev")
+            _metric_opts = ["ifInOctets.1", "ifOutOctets.1", "cpmCPUTotal5min",
+                            "ciscoEnvMonTemperatureStatusValue", "ifInErrors.1"]
+            _sel_metric = _gc2.selectbox("指標", _metric_opts,
+                                         format_func=lambda k: _label_map.get(k, k), key="prtg_metric")
+            _hours = _gc3.selectbox("期間", [1, 3, 6, 24], key="prtg_hours",
+                                    format_func=lambda h: f"{h}時間")
+            _trend = snmp_poller.get_metric_trend(_dev_opts[_sel_dev], _sel_metric, hours=_hours)
+            if _trend:
+                import pandas as _pd_prtg
+                _df = _pd_prtg.DataFrame(_trend)
+                # value を数値化
+                _df["value"] = _pd_prtg.to_numeric(_df["value"], errors="coerce")
+                if "recorded_at" in _df.columns:
+                    _df["recorded_at"] = _pd_prtg.to_datetime(_df["recorded_at"], errors="coerce")
+                    _df = _df.dropna(subset=["value"]).set_index("recorded_at")
+                st.line_chart(_df["value"], height=260)
+                st.caption(f"{_sel_dev} / {_label_map.get(_sel_metric, _sel_metric)} — 直近{_hours}時間")
+            else:
+                st.caption("この指標の時系列データがまだありません（ポーリングを数回実行すると蓄積されます）。")
+
+        # ── ⑤ しきい値アラート ──────────────────────────────────
+        st.markdown("### 🚨 しきい値アラート（超過中）")
+        if _alerts:
+            for _a in _alerts[:30]:
+                _lv = (_a.get("alert_level") or "warning").lower()
+                _col = _prtg.status_color(_lv)
+                _name = _label_map.get(_a.get("oid_name"), _a.get("oid_name"))
+                st.markdown(
+                    f"<div class='log-card' style='border-left:4px solid {_col};'>"
+                    f"<span style='color:{_col};font-weight:bold;'>[{_a.get('alert_level','')}]</span> "
+                    f"<b>{_name}</b> = {_a.get('value','-')} {_a.get('unit','')} "
+                    f"<span style='color:#6b7280;font-size:12px;'>@ {_a.get('hostname') or _a.get('source_ip')} "
+                    f"({_a.get('recorded_at','')})</span>"
+                    f"</div>", unsafe_allow_html=True)
+        else:
+            st.success("現在しきい値を超過しているセンサーはありません。")
 
 # ═══════════════════════════════════════════
 # TAB2: テレメトリダッシュボード
