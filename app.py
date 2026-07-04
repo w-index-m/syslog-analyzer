@@ -1163,27 +1163,8 @@ with tab_showlog:
                 _vcols = st.columns(max(1, len(_r["by_vendor"])))
                 for _i, (_v, _c) in enumerate(_r["by_vendor"].items()):
                     _vcols[_i].metric(_v, f"{_c} 件")
-
-            # ── LLM 詳細解析まで自動実行 ──
-            _auto = st.session_state.get("show_log_auto_llm", True)
-            _mode_now = st.session_state.get("llm_mode", "auto")
-            _llm_now = (analyzer.check_claude_available() or analyzer.check_gemini_available()
-                        or analyzer.check_groq_available() or analyzer.check_ollama_available())
-            if _auto and _mode_now != "none" and _llm_now:
-                _ll = _scoped_showlog_logs()
-                if _ll:
-                    with st.spinner("🤖 LLM が show logging・config・ポート状態を突き合わせて解析中…"):
-                        _rep, _mdl = _llm_analyze_show_log(
-                            _ll, _mode_now,
-                            config_text=_chk["config_body"], intf_text=_chk["intf_body"])
-                    if _rep:
-                        st.session_state["_showlog_llm_report"] = _rep
-                        st.session_state["_showlog_llm_model"] = _mdl
-                    else:
-                        st.warning("LLM 解析に失敗しました（APIキー/ネットワークをご確認ください）。")
-            elif _auto and not _llm_now:
-                st.info("🔑 LLM未設定のため自動解析はスキップしました。"
-                        "サイドバー「APIキー設定」で無料のGemini/Groqキーを入れると自動でAI解析まで実行します。")
+            # 新しい取り込みバッチなので、LLM 自動解析を未実行状態にリセット
+            st.session_state["_showlog_llm_done_ids"] = None
         else:
             st.error("show コマンドの出力を貼り付けてください")
 
@@ -1350,22 +1331,37 @@ with tab_showlog:
     elif _mode_sel == "none":
         st.info("解析モードが「⛔ AI解析なし」になっています。サイドバーで Gemini/Groq/auto に切り替えてください。")
     else:
-        if st.button("🤖 LLM で詳細解析する（時間がかかります）", key="showlog_llm",
-                     type="primary", use_container_width=True):
+        # 今回の貼り付けバッチ識別子。新しいバッチにまだレポートが無ければ自動実行。
+        _cur_ids = frozenset(st.session_state.get("_showlog_ids") or [])
+        _done_ids = st.session_state.get("_showlog_llm_done_ids")
+        _auto_on = st.session_state.get("show_log_auto_llm", True)
+
+        def _run_showlog_llm():
             _ll = _scoped_showlog_logs()
-            if _ll:
-                with st.spinner("LLM が show logging・config・ポート状態を突き合わせて解析中…"):
-                    _rep, _mdl = _llm_analyze_show_log(
-                        _ll, _mode_sel,
-                        config_text=st.session_state.get("showlog_cfg", ""),
-                        intf_text=st.session_state.get("showlog_intf", ""))
-                if _rep:
-                    st.session_state["_showlog_llm_report"] = _rep
-                    st.session_state["_showlog_llm_model"] = _mdl
-                else:
-                    st.error("LLM 解析に失敗しました。APIキー設定・ネットワークをご確認ください。")
+            if not _ll:
+                st.warning("解析対象のログがありません。先に show ログを取り込んでください。")
+                return
+            with st.spinner("🤖 LLM が show logging・config・ポート状態を突き合わせて解析中…"):
+                _rep, _mdl = _llm_analyze_show_log(
+                    _ll, _mode_sel,
+                    config_text=st.session_state.get("showlog_cfg", ""),
+                    intf_text=st.session_state.get("showlog_intf", ""))
+            if _rep:
+                st.session_state["_showlog_llm_report"] = _rep
+                st.session_state["_showlog_llm_model"] = _mdl
+                st.session_state["_showlog_llm_done_ids"] = _cur_ids
             else:
-                st.warning("解析対象のログがありません。先に show logging を取り込んでください。")
+                st.error("LLM 解析に失敗しました。APIキー設定・ネットワークをご確認ください。")
+
+        # 自動実行: 新しい取り込みバッチがあり、まだ解析していなければ即実行（バッチ毎に1回）
+        if _auto_on and _cur_ids and _cur_ids != _done_ids:
+            st.session_state["_showlog_llm_done_ids"] = _cur_ids  # 二重実行防止(先にマーク)
+            st.caption("🤖 取り込み後、自動でLLM詳細解析を実行しました。")
+            _run_showlog_llm()
+        # 手動再実行ボタン（やり直したいとき）
+        if st.button("🔁 LLM で再解析する", key="showlog_llm",
+                     use_container_width=True):
+            _run_showlog_llm()
     if st.session_state.get("_showlog_llm_report"):
         st.markdown(
             f"<div class='ai-explanation'>{st.session_state['_showlog_llm_report']}</div>",
