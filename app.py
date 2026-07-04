@@ -288,7 +288,32 @@ with st.sidebar:
             analyzer.OLLAMA_MODEL = _sel_model
             os.environ["OLLAMA_MODEL"] = _sel_model
         st.caption(f"使用モデル: **{analyzer.OLLAMA_MODEL}**"
-                   + ("" if _installed else "（Ollamaに導入済みか ollama list で確認してください）"))
+                   + ("" if _installed else "（未導入なら下でモデルを取得してください）"))
+
+        # ── アプリ内でモデルを取得(pull) ──
+        with st.expander("📥 モデルを取得（pull）"):
+            _pull_name = st.text_input("取得するモデル名", value="gemma3",
+                                       key="ollama_pull_name",
+                                       help="例: gemma3 / llama3 / qwen2.5 / elyza/llama3-jp")
+            if st.button("📥 取得を開始", key="ollama_pull_btn"):
+                _pbar = st.progress(0.0, text="準備中…")
+                def _cb(status, pct):
+                    _pbar.progress(pct if pct is not None else 0.0,
+                                   text=f"{status}" + (f" {pct*100:.0f}%" if pct else ""))
+                with st.spinner(f"'{_pull_name}' を取得中…（数GB・数分かかります）"):
+                    _ok, _msg = analyzer.pull_ollama_model(_pull_name, _cb)
+                if _ok:
+                    _pbar.progress(1.0, text="完了")
+                    st.success(_msg)
+                    analyzer.OLLAMA_MODEL = _pull_name
+                    os.environ["OLLAMA_MODEL"] = _pull_name
+                    st.rerun()
+                else:
+                    st.error(_msg)
+    else:
+        # Ollama 自体が起動していない場合の案内（モデル取得もできない）
+        st.caption("💡 完全ローカルで使うには Ollama を起動してください（https://ollama.com）。"
+                   "起動後、ここで gemma3 等のモデルを取得・選択できます。")
 
     st.session_state.auto_analyze = st.checkbox("受信ログを自動AI解析", value=True)
     st.session_state.judge_enabled = st.checkbox(

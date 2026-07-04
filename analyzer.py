@@ -122,6 +122,47 @@ def list_ollama_models() -> list:
         pass
     return []
 
+
+def pull_ollama_model(name: str, progress_cb=None) -> tuple[bool, str]:
+    """
+    Ollama にモデルをダウンロード（pull）する。
+    progress_cb(status:str, pct:float|None) が渡されれば進捗を通知。
+    戻り値: (成功したか, メッセージ)
+    """
+    import json as _json
+    name = (name or "").strip()
+    if not name:
+        return False, "モデル名を指定してください。"
+    try:
+        with requests.post(f"{OLLAMA_BASE_URL}/api/pull",
+                           json={"name": name, "stream": True},
+                           stream=True, timeout=3600) as r:
+            if r.status_code != 200:
+                return False, f"pull 失敗 (HTTP {r.status_code}): {r.text[:200]}"
+            last_status = ""
+            for line in r.iter_lines():
+                if not line:
+                    continue
+                try:
+                    ev = _json.loads(line.decode("utf-8"))
+                except Exception:
+                    continue
+                if ev.get("error"):
+                    return False, f"エラー: {ev['error']}"
+                status = ev.get("status", "")
+                last_status = status
+                pct = None
+                if ev.get("total"):
+                    pct = min(1.0, ev.get("completed", 0) / ev["total"])
+                if progress_cb:
+                    progress_cb(status, pct)
+                if status == "success":
+                    return True, f"'{name}' の取得が完了しました。"
+            # ストリーム終了（success 明示が無くてもエラーが無ければ成功扱い）
+            return True, f"'{name}' の取得が完了しました（{last_status}）。"
+    except Exception as e:
+        return False, f"pull 通信エラー: {e}"
+
 def check_claude_available() -> bool:
     return bool(ANTHROPIC_API_KEY)
 
