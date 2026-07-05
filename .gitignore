@@ -4,3 +4,4 @@ syslog.db
 venv/
 .venv/
 user_settings.json
+.streamlit/secrets.toml
