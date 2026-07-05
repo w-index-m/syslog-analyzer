@@ -31,6 +31,12 @@ SCENARIOS = {
     "ddos":          "🔴 DDoS攻撃（ポートスキャン + SYNフラッド）",
     "icmp_redirect": "🟡 ICMPリダイレクト多発（ルーティング設計ミス）",
     "voip_degraded": "📞 VoIP品質劣化（ジッター増大・パケットロス）",
+    "pcap_showcase": "📦 パケットキャプチャー総合サンプル（複数の通信パターン）",
+    "cisco_catalyst":"🔀 Cisco Catalyst（ポートフラップ・STPループ）",
+    "cisco_ios":     "🖥️ Cisco IOS（CPU高騰・メモリ枯渇）",
+    "f5_bigip":      "🅵 F5 BIG-IP（プール障害・HA切替）",
+    "paloalto":      "🛡️ Palo Alto（脅威検知・HAダウン）",
+    "sir":           "📡 富士通 Si-R（回線断・エラーコード）",
 }
 
 # ─── サンプル IP ───────────────────────────────────────────────────
@@ -50,6 +56,18 @@ HOSTNAMES = {
     SWITCH2:  "Access-SW-01",
 }
 
+# ─── ベンダー別デモ機器 ────────────────────────────────────────────
+CATALYST_SW = "192.168.1.1"
+BIGIP1      = "192.168.1.20"
+PA_FW01     = "192.168.1.30"
+SIR_G210    = "192.168.1.3"
+HOSTNAMES.update({
+    CATALYST_SW: "catalyst01",
+    BIGIP1:      "bigip1",
+    PA_FW01:     "PA-FW01",
+    SIR_G210:    "SiR-G210",
+})
+
 # ═══════════════════════════════════════════════════════════════════
 #  syslog 生成ヘルパー
 # ═══════════════════════════════════════════════════════════════════
@@ -63,6 +81,28 @@ def _syslog_raw(device_ip: str, facility_sev: str, mnemonic: str, message: str) 
 def _insert_syslog(device_ip: str, raw: str):
     parsed = parse_syslog(raw, device_ip)
     db.insert_log(device_ip, raw, parsed)
+
+
+def _f5_raw(device_ip: str, msgid: str, sev: str, message: str) -> str:
+    """F5 BIG-IP tmm/mcpd 形式: <PRI>MMM DD HH:MM:SS host tmm[pid]: msgid:sev: message"""
+    hn = HOSTNAMES.get(device_ip, device_ip)
+    ts = datetime.now().strftime("%b %d %H:%M:%S")
+    return f"<13{sev}>{ts} {hn} tmm[1234]: {msgid}:{sev}: {message}"
+
+
+def _paloalto_raw(device_ip: str, logtype: str, fields: str) -> str:
+    """Palo Alto CSV形式: <PRI>MMM DD HH:MM:SS host N,timestamp,serial,LOGTYPE,fields..."""
+    hn = HOSTNAMES.get(device_ip, device_ip)
+    ts = datetime.now().strftime("%b %d %H:%M:%S")
+    log_ts = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+    return f"<14>{ts} {hn} 1,{log_ts},001801000001,{logtype},{fields}"
+
+
+def _sir_raw(device_ip: str, pri: int, process: str, message: str) -> str:
+    """富士通Si-R形式: <PRI>MMM DD HH:MM:SS host process: message"""
+    hn = HOSTNAMES.get(device_ip, device_ip)
+    ts = datetime.now().strftime("%b %d %H:%M:%S")
+    return f"<{pri}>{ts} {hn} {process}: {message}"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -305,6 +345,95 @@ def _syslogs_voip() -> list[tuple[str, str]]:
     return events
 
 
+def _syslogs_cisco_catalyst() -> list[tuple[str, str]]:
+    """Cisco Catalyst: ポートフラップ・STPループの疑い。"""
+    events = []
+    for _ in range(6):
+        events.append((CATALYST_SW, _syslog_raw(CATALYST_SW, "%LINK-3", "UPDOWN",
+            "Interface GigabitEthernet1/0/12, changed state to down")))
+        events.append((CATALYST_SW, _syslog_raw(CATALYST_SW, "%LINK-3", "UPDOWN",
+            "Interface GigabitEthernet1/0/12, changed state to up")))
+    for _ in range(4):
+        events.append((CATALYST_SW, _syslog_raw(CATALYST_SW, "%SPANTREE-2", "LOOPGUARD_BLOCK",
+            "Loop guard blocking port GigabitEthernet1/0/12 on VLAN0010")))
+    events.append((CATALYST_SW, _syslog_raw(CATALYST_SW, "%SYS-5", "CONFIG_I",
+        "Configured from console by admin on vty0")))
+    events.append((CATALYST_SW, _syslog_raw(CATALYST_SW, "%OSPF-5", "ADJCHG",
+        "Process 1, Nbr 10.0.0.2 on Gi1/0/2 from LOADING to FULL")))
+    return events
+
+
+def _syslogs_cisco_ios() -> list[tuple[str, str]]:
+    """Cisco IOS ルーター: CPU高騰・メモリ枯渇の疑い。"""
+    events = []
+    events.append((ROUTER2, _syslog_raw(ROUTER2, "%SYS-2", "MALLOCFAIL",
+        "Memory allocation of 65536 bytes failed")))
+    for _ in range(3):
+        events.append((ROUTER2, _syslog_raw(ROUTER2, "%SYS-3", "CPUHOG",
+            f"Task ran for {random.randint(2500,5000)}ms, process = IP Input")))
+    events.append((ROUTER2, _syslog_raw(ROUTER2, "%SYS-5", "RESTART",
+        "System restarted --")))
+    events.append((ROUTER2, _syslog_raw(ROUTER2, "%LINK-3", "UPDOWN",
+        "Interface GigabitEthernet0/1, changed state to down")))
+    events.append((ROUTER2, _syslog_raw(ROUTER2, "%LINEPROTO-5", "UPDOWN",
+        "Line protocol on Interface GigabitEthernet0/1, changed state to down")))
+    return events
+
+
+def _syslogs_f5_bigip() -> list[tuple[str, str]]:
+    """F5 BIG-IP: プールメンバー障害・HAフェイルオーバー。"""
+    events = []
+    events.append((BIGIP1, _f5_raw(BIGIP1, "01010028", "4",
+        "Pool /Common/web_pool member /Common/10.0.0.11:80 monitor status down.")))
+    events.append((BIGIP1, _f5_raw(BIGIP1, "01010028", "4",
+        "Pool /Common/web_pool member /Common/10.0.0.12:80 monitor status down.")))
+    events.append((BIGIP1, _f5_raw(BIGIP1, "01010025", "3",
+        "Pool /Common/web_pool now has no members available.")))
+    events.append((BIGIP1, _f5_raw(BIGIP1, "01340011", "5",
+        "HA process failover: going standby.")))
+    events.append((BIGIP1, _f5_raw(BIGIP1, "01260009", "4",
+        "SSL handshake failed / certificate expired for virtual /Common/vs_https.")))
+    events.append((BIGIP1, _f5_raw(BIGIP1, "010719xx", "3",
+        "Configuration sync failed: device group mismatch.")))
+    return events
+
+
+def _syslogs_paloalto() -> list[tuple[str, str]]:
+    """Palo Alto: 脅威検知・HAダウン・ライセンス期限切れ。"""
+    events = []
+    events.append((PA_FW01, _paloalto_raw(PA_FW01, "THREAT",
+        "vulnerability,2049,2026/07/04 10:00:00,203.0.113.9,10.0.0.5,,,allow-web,,,"
+        "web-browsing,vsys1,untrust,trust,ae1,ae2,log-forward,,critical,,drop,,SQL Injection Attempt")))
+    events.append((PA_FW01, _paloalto_raw(PA_FW01, "TRAFFIC",
+        "end,2049,,,10.0.0.5,203.0.113.1,,,allow-web,,,ssl,vsys1,trust,untrust,,,,allow")))
+    events.append((PA_FW01, _paloalto_raw(PA_FW01, "TRAFFIC",
+        "deny,2049,,,10.0.0.9,8.8.8.8,,,block-dns,,,dns,vsys1,trust,untrust,,,,deny")))
+    events.append((PA_FW01, _paloalto_raw(PA_FW01, "SYSTEM",
+        "general,0,,,,,,,high,HA1 link down, peer suspended")))
+    events.append((PA_FW01, _paloalto_raw(PA_FW01, "CONFIG",
+        "0,0,,,,admin,commit,committed,succeeded")))
+    events.append((PA_FW01, _paloalto_raw(PA_FW01, "SYSTEM",
+        "general,0,,,,,,,medium,Threat Prevention license expired")))
+    return events
+
+
+def _syslogs_sir() -> list[tuple[str, str]]:
+    """富士通Si-R: WAN回線断・IPsecダウン・エラーコード。"""
+    events = []
+    events.append((SIR_G210, _sir_raw(SIR_G210, 19, "protocol", "ether 1 3 link down")))
+    events.append((SIR_G210, _sir_raw(SIR_G210, 22, "protocol", "[line0] ch1 disconnected by peer")))
+    events.append((SIR_G210, _sir_raw(SIR_G210, 163, "isakmp",
+        "DPD watching host is down. [203.0.113.1]")))
+    events.append((SIR_G210, _sir_raw(SIR_G210, 163, "bgpd",
+        "10.0.0.1 recv NOTIFICATION 6/2 (Cease/Administrative Shutdown)")))
+    events.append((SIR_G210, _sir_raw(SIR_G210, 163, "nsm",
+        "vrrp master router down detection. lan0 vrid1 [192.168.1.1] #3")))
+    events.append((SIR_G210, _sir_raw(SIR_G210, 165, "cmodemctl",
+        "[WWAN1] PIN code error. modem0 (PUK required)")))
+    events.append((SIR_G210, _sir_raw(SIR_G210, 27, "init", "error code [85020000]")))
+    return events
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  シナリオ別 NetFlow
 # ═══════════════════════════════════════════════════════════════════
@@ -533,6 +662,90 @@ def _pcap_ddos() -> bytes:
     return _write_pcap(pkts)
 
 
+def _pcap_showcase() -> bytes:
+    """
+    パケット解析タブの全機能を一度に試せる総合サンプル。
+    HTTP/DNS(正常) + ICMP redirect少数 + VoIP RTP短時間 + ポートスキャン少数 + TCP再送
+    を1つのpcapにまとめる。
+    """
+    pkts = []
+    t = time.time() - 180
+
+    # ① 正常なHTTP/DNS/ARP
+    for i in range(6):
+        t += 0.1
+        pkts.append((t, _ip_tcp("192.168.10.1", "93.184.216.34",
+                                random.randint(40000, 60000), 80,
+                                dpkt.tcp.TH_SYN, seq=i * 1000)))
+    for name in ["example.com", "github.com"]:
+        t += 0.05
+        txid = random.randint(1, 65535)
+        pkts.append((t, _dns_query("192.168.10.2", name, txid)))
+        t += 0.01
+        pkts.append((t, _ip_udp(DNS_SRV, "192.168.10.2",
+                                 53, random.randint(40000, 60000),
+                                 struct.pack("!HHHHHH", txid, 0x8180, 1, 1, 0, 0))))
+
+    # ② DNS NXDOMAIN（名前解決失敗）
+    t += 0.2
+    txid = random.randint(1, 65535)
+    pkts.append((t, _dns_query("192.168.10.1", "typo.example.cm", txid)))
+    t += 0.05
+    nx = _dns_nxdomain("192.168.10.1", "typo.example.cm", txid)
+    if nx:
+        pkts.append((t, nx))
+
+    # ③ ICMP redirect（少数）
+    for client in random.sample(CLIENT_IPS, 3):
+        t += 0.3
+        gw_ip = "192.168.1.2"
+        inner_ip = dpkt.ip.IP(
+            src=socket.inet_aton(client),
+            dst=socket.inet_aton(random.choice(EXT_IPS)),
+            p=dpkt.ip.IP_PROTO_TCP,
+        )
+        inner_tcp_hdr = struct.pack("!HHI", 12345, 80, 0)
+        icmp_raw = socket.inet_aton(gw_ip) + bytes(inner_ip)[:20] + inner_tcp_hdr[:8]
+        icmp = dpkt.icmp.ICMP(type=5, code=1)
+        icmp.data = icmp_raw
+        ip = dpkt.ip.IP(src=socket.inet_aton(ROUTER1),
+                        dst=socket.inet_aton(client),
+                        p=dpkt.ip.IP_PROTO_ICMP, data=icmp)
+        pkts.append((t, _eth(ip)))
+
+    # ④ VoIP RTP（短時間、ジッターあり）
+    seq, rtp_ts = random.randint(0, 1000), random.randint(0, 100000)
+    for _ in range(40):
+        jitter_ms = random.uniform(15, 60)
+        t += jitter_ms / 1000
+        rtp_ts += 160
+        pkts.append((t, _rtp_pkt("192.168.10.6", "10.0.0.10", 16390, 16390,
+                                  0xAABBCC10, seq, rtp_ts, pt=0)))
+        seq = (seq + 1) % 65536
+
+    # ⑤ ポートスキャン（少数ポート）
+    for port in [22, 23, 80, 443, 3389]:
+        t += 0.02
+        pkts.append((t, _ip_tcp(ATTACK_IPS[1], ROUTER1,
+                                 54321, port, dpkt.tcp.TH_SYN, seq=12345)))
+        t += 0.01
+        pkts.append((t, _ip_tcp(ROUTER1, ATTACK_IPS[1],
+                                 port, 54321,
+                                 dpkt.tcp.TH_RST | dpkt.tcp.TH_ACK, seq=0, ack=12346)))
+
+    # ⑥ TCP再送（同一seqを複数回）
+    for _ in range(4):
+        t += 0.2
+        pkts.append((t, _ip_tcp("192.168.10.3", "93.184.216.34",
+                                 54321, 80,
+                                 dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK,
+                                 seq=1000, ack=500,
+                                 data=b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")))
+
+    pkts.sort(key=lambda x: x[0])
+    return _write_pcap(pkts)
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  パブリック API
 # ═══════════════════════════════════════════════════════════════════
@@ -549,6 +762,12 @@ def run_scenario(scenario: str) -> dict:
         "ddos":          _syslogs_ddos,
         "icmp_redirect": _syslogs_icmp_redirect,
         "voip_degraded": _syslogs_voip,
+        "pcap_showcase": _syslogs_normal,
+        "cisco_catalyst": _syslogs_cisco_catalyst,
+        "cisco_ios":      _syslogs_cisco_ios,
+        "f5_bigip":       _syslogs_f5_bigip,
+        "paloalto":       _syslogs_paloalto,
+        "sir":            _syslogs_sir,
     }.get(scenario, _syslogs_normal)
 
     syslog_events = syslog_fn()
@@ -568,6 +787,12 @@ def run_scenario(scenario: str) -> dict:
         "ddos":          _netflow_ddos,
         "icmp_redirect": _netflow_icmp_redirect,
         "voip_degraded": _netflow_voip,
+        "pcap_showcase": _netflow_normal,
+        "cisco_catalyst": _netflow_normal,
+        "cisco_ios":      _netflow_normal,
+        "f5_bigip":       _netflow_normal,
+        "paloalto":       _netflow_normal,
+        "sir":            _netflow_normal,
     }.get(scenario, _netflow_normal)
 
     flows = flow_fn()
@@ -583,6 +808,12 @@ def run_scenario(scenario: str) -> dict:
         "ddos":          _pcap_ddos,
         "icmp_redirect": _pcap_icmp_redirect,
         "voip_degraded": _pcap_voip,
+        "pcap_showcase": _pcap_showcase,
+        "cisco_catalyst": _pcap_normal,
+        "cisco_ios":      _pcap_normal,
+        "f5_bigip":       _pcap_normal,
+        "paloalto":       _pcap_normal,
+        "sir":            _pcap_normal,
     }.get(scenario, _pcap_normal)
 
     try:
