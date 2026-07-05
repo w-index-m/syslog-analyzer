@@ -2094,7 +2094,8 @@ with tab_prtg:
                     st.session_state["_prtg_discover"] = _dres
             else:
                 st.error("IPアドレスを入力してください")
-        if _pb1.button("➕ デバイス追加", use_container_width=True, key="prtg_add_dev"):
+        if _pb1.button("➕ デバイス追加", use_container_width=True, key="prtg_add_dev",
+                       disabled=_prtg_cloud):
             if _pd_ip.strip():
                 snmp_poller.add_device(_pd_ip.strip(), _pd_comm.strip() or "public", _pd_ver, 161, int(_pd_int))
                 st.success(f"{_pd_ip} を登録しました")
