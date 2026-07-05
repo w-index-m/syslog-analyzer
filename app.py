@@ -3982,6 +3982,12 @@ with tab_pcap:
                 with _tc3:
                     st.metric("接続失敗(SYN未応答)", _syn_n,
                               delta="⚠️ サービス停止?" if _syn_n else None)
+                # ポートスキャン/DDoS(SYNフラッド)の統計的兆候（LLM診断を待たずに即座に表示）
+                for _scan in res.get("scan_patterns", []):
+                    if _scan["type"] == "port_scan":
+                        st.error(f"🔴 **ポートスキャンを検出**: {_scan['detail']}")
+                    elif _scan["type"] == "ddos_synflood":
+                        st.error(f"🔴 **DDoS(分散SYNフラッド)を検出**: {_scan['detail']}")
                 df_tcp = pd.DataFrame(res["tcp_issues"])
                 df_tcp_show = df_tcp[["type", "src", "dst", "src_port", "dst_port", "count", "description"]]
                 df_tcp_show.columns = ["種別", "送信元IP", "宛先IP", "送信元Port", "宛先Port", "回数", "説明"]

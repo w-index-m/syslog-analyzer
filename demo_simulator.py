@@ -532,6 +532,53 @@ def _pcap_normal() -> bytes:
     return _write_pcap(pkts)
 
 
+def _pcap_bgp_incident() -> bytes:
+    """
+    BGPネイバーフラップ: ポート179(BGP)のTCPセッションが
+    RSTで切断→再接続の試行が応答なし→再確立、という流れを再現する。
+    """
+    pkts = []
+    t = time.time() - 200
+    r1, r2 = ROUTER1, ROUTER2
+
+    # ① 正常なBGPセッション確立（3way handshake、port 179）
+    seq1, seq2 = random.randint(1000, 9000), random.randint(1000, 9000)
+    pkts.append((t, _ip_tcp(r1, r2, 34567, 179, dpkt.tcp.TH_SYN, seq=seq1))); t += 0.01
+    pkts.append((t, _ip_tcp(r2, r1, 179, 34567, dpkt.tcp.TH_SYN | dpkt.tcp.TH_ACK,
+                             seq=seq2, ack=seq1 + 1))); t += 0.01
+    pkts.append((t, _ip_tcp(r1, r2, 34567, 179, dpkt.tcp.TH_ACK, seq=seq1 + 1, ack=seq2 + 1))); t += 1.0
+    # BGP OPEN風のペイロード（マーカー16byte 0xff + 簡易ヘッダ）
+    pkts.append((t, _ip_tcp(r1, r2, 34567, 179, dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK,
+                             seq=seq1 + 1, ack=seq2 + 1,
+                             data=b"\xff" * 16 + b"\x00\x1d\x01"))); t += 3.0
+
+    # ② インターフェースフラップによりBGPセッションがRSTで切断（neighbor Down）
+    pkts.append((t, _ip_tcp(r1, r2, 34567, 179, dpkt.tcp.TH_RST | dpkt.tcp.TH_ACK,
+                             seq=seq1 + 20, ack=seq2 + 1))); t += 1.0
+
+    # ③ ネイバーダウン中：再接続試行(SYN)が応答なし
+    for _ in range(4):
+        t += 5
+        pkts.append((t, _ip_tcp(r1, r2, random.randint(34000, 40000), 179,
+                                 dpkt.tcp.TH_SYN, seq=random.randint(1, 90000))))
+
+    # ④ 復旧：新しいBGPセッションを再確立（neighbor Up）
+    t += 8
+    seq3, seq4 = random.randint(1000, 9000), random.randint(1000, 9000)
+    pkts.append((t, _ip_tcp(r1, r2, 45678, 179, dpkt.tcp.TH_SYN, seq=seq3))); t += 0.01
+    pkts.append((t, _ip_tcp(r2, r1, 179, 45678, dpkt.tcp.TH_SYN | dpkt.tcp.TH_ACK,
+                             seq=seq4, ack=seq3 + 1))); t += 0.01
+    pkts.append((t, _ip_tcp(r1, r2, 45678, 179, dpkt.tcp.TH_ACK, seq=seq3 + 1, ack=seq4 + 1)))
+
+    # ⑤ 通常のバックグラウンドトラフィックも少し混ぜる
+    for i in range(5):
+        t += 0.1
+        pkts.append((t, _ip_tcp("192.168.10.1", "93.184.216.34",
+                                random.randint(40000, 60000), 80,
+                                dpkt.tcp.TH_SYN, seq=i * 1000)))
+    return _write_pcap(pkts)
+
+
 def _pcap_icmp_redirect() -> bytes:
     pkts = []
     t = time.time() - 200
@@ -804,7 +851,7 @@ def run_scenario(scenario: str) -> dict:
     # ── pcap ──
     pcap_fn = {
         "normal":        _pcap_normal,
-        "bgp_incident":  _pcap_normal,
+        "bgp_incident":  _pcap_bgp_incident,
         "ddos":          _pcap_ddos,
         "icmp_redirect": _pcap_icmp_redirect,
         "voip_degraded": _pcap_voip,

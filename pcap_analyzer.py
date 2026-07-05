@@ -316,6 +316,7 @@ def analyze_pcap(data: bytes) -> dict:
         tcp_retrans_summary 再送率サマリー(total_retrans/flows_affected/total_packets/retrans_rate_pct)
         tcp_syn_no_synack   SYN 未応答（接続失敗）
         tcp_zero_window     TCP ゼロウィンドウ発生フロー
+        scan_patterns       ポートスキャン/DDoS(SYNフラッド)の兆候（送信元・宛先の集約から検出）
         ip_fragments        IP フラグメント発生フロー
         http_errors         HTTP 4xx/5xx エラー一覧
         http_summary        HTTP ステータスコード集計
@@ -336,6 +337,7 @@ def analyze_pcap(data: bytes) -> dict:
         "rip_packets": [],    "arp_anomalies": [],
         "tcp_issues": [],     "tcp_retransmissions": [],
         "tcp_syn_no_synack": [], "tcp_zero_window": [],
+        "scan_patterns": [],
         "ip_fragments": [],
         "http_errors": [],    "http_summary": {},
         "tls_sessions": [],   "tls_alerts": [],
@@ -728,6 +730,34 @@ def analyze_pcap(data: bytes) -> dict:
                     "type": "接続失敗", "src": src, "dst": dst, "src_port": sp, "dst_port": dp,
                     "count": 1, "description": desc,
                 })
+
+    # ポートスキャン / DDoS(SYNフラッド) の兆候検出
+    # ・ポートスキャン: 単一送信元IPが多数の異なる宛先ポートへSYNを送信
+    # ・SYNフラッド/DDoS: 単一の宛先(IP:ポート)へ多数の送信元IPからSYN未応答が集中
+    _scan_ports_by_src = {}
+    for (src, dst, sp, dp) in syn_sent:
+        _scan_ports_by_src.setdefault(src, set()).add(dp)
+    for src, ports in _scan_ports_by_src.items():
+        if len(ports) >= 8:
+            result["scan_patterns"].append({
+                "type": "port_scan",
+                "severity": "high" if len(ports) >= 30 else "medium",
+                "src": src,
+                "detail": f"{src} から {len(ports)} 個の異なるポートへ接続要求 — ポートスキャンの可能性",
+            })
+
+    _flood_src_by_dst = {}
+    for e in result["tcp_syn_no_synack"]:
+        _flood_src_by_dst.setdefault((e["dst"], e["dst_port"]), set()).add(e["src"])
+    for (dst, dp), srcs in _flood_src_by_dst.items():
+        if len(srcs) >= 4:
+            result["scan_patterns"].append({
+                "type": "ddos_synflood",
+                "severity": "high" if len(srcs) >= 10 else "medium",
+                "dst": dst, "dst_port": dp,
+                "detail": f"{dst}:{dp} へ {len(srcs)} 個の異なる送信元IPからSYNが集中し応答なし "
+                          "— DDoS(分散SYNフラッド)の可能性",
+            })
 
     # TCP ゼロウィンドウ
     for (src, dst, sp, dp), cnt in zero_win_count.items():

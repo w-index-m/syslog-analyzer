@@ -1034,6 +1034,16 @@ _PCAP_SYSTEM_PROMPT = """あなたはパケットキャプチャ（pcap）を分
 - 再送やPSHについて言及する場合は、上記の基準に照らして「問題かどうか」を明言し、
   正常範囲内であればpositive_findingsに、問題があればtop_issuesに分類してください。
 
+【ポート番号からのプロトコル特定（重要）】
+TCP/UDPの問題フローにはポート番号がプロトコル名付きで示されます
+（例: 179(BGP), 22(SSH), 443(HTTPS)）。ポート番号にプロトコル名が
+付いている場合は、単に「TCP接続失敗」と一般化せず、
+「BGPセッション（ルーティングプロトコル）の切断」のように
+具体的なプロトコル名・影響範囲（ルーティング/管理アクセス/暗号化通信 等）
+を明記して診断してください。特にBGP(179)/OSPF/SSH(22)/SNMP(161/162)
+のようなルーティング・管理系プロトコルの切断は severity を高めに
+評価してください。
+
 必ずJSON形式で以下の構造で返してください:
 {
   "overall_health": "正常|要注意|問題あり|重大",
@@ -1053,6 +1063,27 @@ _PCAP_SYSTEM_PROMPT = """あなたはパケットキャプチャ（pcap）を分
 }
 
 JSONのみ返してください。```は不要です。"""
+
+
+# 主要なwell-knownポート。LLMがポート番号だけでなくプロトコル名まで
+# 認識できるように、プロンプト構築時にラベル付けする。
+_WELL_KNOWN_PORTS = {
+    22: "SSH", 23: "Telnet", 53: "DNS", 67: "DHCP", 68: "DHCP", 69: "TFTP",
+    80: "HTTP", 123: "NTP", 161: "SNMP", 162: "SNMP Trap", 179: "BGP",
+    443: "HTTPS", 445: "SMB", 514: "Syslog", 520: "RIP", 1812: "RADIUS",
+    3389: "RDP", 5060: "SIP",
+}
+
+
+def _port_label(port) -> str:
+    if port in (None, "", 0):
+        return ""
+    try:
+        port_i = int(port)
+    except (TypeError, ValueError):
+        return str(port)
+    name = _WELL_KNOWN_PORTS.get(port_i)
+    return f"{port_i}({name})" if name else str(port_i)
 
 
 def _build_pcap_prompt(pcap_result: dict) -> str:
@@ -1082,7 +1113,19 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
     ]
     if r.get("tcp_issues"):
         for i in r["tcp_issues"][:5]:
-            lines.append("    - " + i.get("type","") + " " + i.get("src","") + "→" + i.get("dst","") + " : " + i.get("description","")[:80])
+            _sp, _dp = _port_label(i.get("src_port")), _port_label(i.get("dst_port"))
+            _src = i.get("src","") + (f":{_sp}" if _sp else "")
+            _dst = i.get("dst","") + (f":{_dp}" if _dp else "")
+            lines.append("    - " + i.get("type","") + " " + _src + "→" + _dst + " : " + i.get("description","")[:80])
+
+    if r.get("scan_patterns"):
+        lines.append("")
+        lines.append("【⚠️ ポートスキャン/DDoS(SYNフラッド)の統計的兆候（機械的に検出・確定情報）】")
+        for sp_item in r["scan_patterns"]:
+            lines.append("    - [" + sp_item.get("severity","") + "] " + sp_item.get("detail",""))
+        lines.append("    ※上記は送信元/宛先の集約から統計的に検出したものです。"
+                     "top_issuesで「ポートスキャンが実行されています」"
+                     "「DDoS(SYNフラッド)を受けています」のように断定的に報告してください。")
 
     lines += [
         "",
