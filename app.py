@@ -139,6 +139,24 @@ def _check_upload_size_ok(file_obj, cloud_mode: bool) -> bool:
         return False
     return True
 
+def _show_table_top_n(df, csv_name: str, dl_key: str, limit: int = 20):
+    """
+    件数が多くなりうる表を上位N件だけ表示し、全件はCSVダウンロードで提供する。
+    df は表示用に列名変更済み・ソート済みのものを渡すこと。
+    """
+    if len(df) > limit:
+        st.caption(f"{len(df)}件あるため、上位{limit}件のみ表示します（全件はCSVでダウンロードできます）。")
+        st.dataframe(df.head(limit), use_container_width=True, hide_index=True)
+        st.download_button(
+            "📥 全件をCSVでダウンロード",
+            data=df.to_csv(index=False).encode("utf-8-sig"),
+            file_name=csv_name,
+            mime="text/csv",
+            key=dl_key,
+        )
+    else:
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
 # ─────────────────────────────────────────
 # ページ設定
 # ─────────────────────────────────────────
@@ -3775,7 +3793,7 @@ with tab_pcap:
                 )
                 pair_count.columns = ["Redirectを送ったルーター", "Redirectを受けたホスト",
                                        "本来のゲートウェイ", "元パケットの宛先", "回数"]
-                st.dataframe(pair_count, use_container_width=True, hide_index=True)
+                _show_table_top_n(pair_count, "icmp_redirect_pairs.csv", "dl_icmp_redirect_pairs_csv")
 
                 # syslog との統合表示
                 st.markdown("**syslog検出との照合**")
@@ -3991,7 +4009,8 @@ with tab_pcap:
                 df_tcp = pd.DataFrame(res["tcp_issues"])
                 df_tcp_show = df_tcp[["type", "src", "dst", "src_port", "dst_port", "count", "description"]]
                 df_tcp_show.columns = ["種別", "送信元IP", "宛先IP", "送信元Port", "宛先Port", "回数", "説明"]
-                st.dataframe(df_tcp_show, use_container_width=True, hide_index=True)
+                df_tcp_show = df_tcp_show.sort_values("回数", ascending=False)
+                _show_table_top_n(df_tcp_show, "tcp_issues.csv", "dl_tcp_issues_csv")
 
             # ── TCP 再送詳細 ─────────────────────────────
             if res.get("tcp_retransmissions"):
@@ -4001,7 +4020,8 @@ with tab_pcap:
                 df_rt = pd.DataFrame(res["tcp_retransmissions"])
                 df_rt = df_rt[["src", "dst", "src_port", "dst_port", "retrans_count", "description"]]
                 df_rt.columns = ["送信元IP", "宛先IP", "送信元Port", "宛先Port", "再送回数", "説明"]
-                st.dataframe(df_rt, use_container_width=True, hide_index=True)
+                df_rt = df_rt.sort_values("再送回数", ascending=False)
+                _show_table_top_n(df_rt, "tcp_retransmissions.csv", "dl_tcp_retrans_csv")
 
             # ── SYN 未応答 ──────────────────────────────
             if res.get("tcp_syn_no_synack"):
@@ -4011,7 +4031,8 @@ with tab_pcap:
                 df_syn = pd.DataFrame(res["tcp_syn_no_synack"])
                 df_syn = df_syn[["src", "dst", "src_port", "dst_port", "syn_at", "wait_sec", "description"]]
                 df_syn.columns = ["接続元IP", "接続先IP", "接続元Port", "接続先Port", "SYN送信時刻", "待機(秒)", "説明"]
-                st.dataframe(df_syn, use_container_width=True, hide_index=True)
+                df_syn = df_syn.sort_values("待機(秒)", ascending=False)
+                _show_table_top_n(df_syn, "tcp_syn_no_synack.csv", "dl_tcp_syn_csv")
 
             # ── TCP ゼロウィンドウ ──────────────────────
             if res.get("tcp_zero_window"):

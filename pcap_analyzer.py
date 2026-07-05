@@ -351,7 +351,7 @@ def analyze_pcap(data: bytes) -> dict:
         "syslog_packets": [],
         "voip_streams": [], "voip_avg_mos": 0.0, "voip_stream_count": 0, "voip_poor_streams": 0,
         "total_packets": 0,
-        "capture_start": "", "capture_end": "",
+        "capture_start": "", "capture_end": "", "capture_duration_sec": 0,
         "error": None,
     }
 
@@ -853,6 +853,7 @@ def analyze_pcap(data: bytes) -> dict:
     if timestamps:
         result["capture_start"] = _ts_str(min(timestamps))
         result["capture_end"]   = _ts_str(max(timestamps))
+        result["capture_duration_sec"] = round(max(timestamps) - min(timestamps), 1)
 
     if result["syslog_packets"]:
         try:
