@@ -412,14 +412,27 @@ with st.sidebar:
 
     with st.expander("🔑 APIキー設定", expanded=not (claude_ok or gemini_ok or groq_ok)):
         import os
+        # クラウド公開環境では全訪問者が同じサーバープロセス（同じos.environ）を
+        # 共有するため、設定済みキーの値をそのまま入力欄に出すと誰でも閲覧できてしまう。
+        # 管理者ログイン済みの場合のみ値の表示・変更を許可する。
+        _hide_keys = _is_cloud_mode() and not _is_admin_authenticated()
+        if _hide_keys:
+            st.warning("☁️ クラウド公開環境のため、設定済みAPIキーの値は表示・変更できません"
+                       "（全訪問者に見えてしまうのを防ぐため）。サイドバー「🔒 管理者ログイン」"
+                       "でログインすると変更できます。")
         _gk = st.text_input("Gemini API Key", type="password",
-                             value=os.environ.get("GEMINI_API_KEY",""),
+                             value="" if _hide_keys else os.environ.get("GEMINI_API_KEY",""),
+                             placeholder="●●●●●●●●（設定済み）" if (_hide_keys and gemini_ok) else "",
+                             disabled=_hide_keys,
                              help="Google AI Studio (aistudio.google.com) で無料取得")
         _rk = st.text_input("Groq API Key", type="password",
-                             value=os.environ.get("GROQ_API_KEY",""),
+                             value="" if _hide_keys else os.environ.get("GROQ_API_KEY",""),
+                             placeholder="●●●●●●●●（設定済み）" if (_hide_keys and groq_ok) else "",
+                             disabled=_hide_keys,
                              help="console.groq.com で無料取得")
         _c_apply, _c_clear = st.columns(2)
-        if _c_apply.button("適用して保存", key="apply_api_keys", use_container_width=True):
+        if _c_apply.button("適用して保存", key="apply_api_keys", use_container_width=True,
+                           disabled=_hide_keys):
             if _gk:
                 os.environ["GEMINI_API_KEY"] = _gk
                 analyzer.GEMINI_API_KEY = _gk
@@ -430,13 +443,15 @@ with st.sidebar:
             _save_user_settings({"GEMINI_API_KEY": _gk or None, "GROQ_API_KEY": _rk or None})
             st.success("APIキーを保存しました（次回以降は自動で読み込まれます）")
             st.rerun()
-        if _c_clear.button("保存キーを削除", key="clear_api_keys", use_container_width=True):
+        if _c_clear.button("保存キーを削除", key="clear_api_keys", use_container_width=True,
+                           disabled=_hide_keys):
             _save_user_settings({"GEMINI_API_KEY": "", "GROQ_API_KEY": ""})
             os.environ.pop("GEMINI_API_KEY", None); analyzer.GEMINI_API_KEY = ""
             os.environ.pop("GROQ_API_KEY", None);   analyzer.GROQ_API_KEY = ""
             st.info("保存したキーを削除しました")
             st.rerun()
-        st.caption(f"💾 保存先: {_SETTINGS_PATH}（この端末内のみ・git操作の影響を受けません）")
+        if not _hide_keys:
+            st.caption(f"💾 保存先: {_SETTINGS_PATH}（この端末内のみ・git操作の影響を受けません）")
 
     if _sidebar_cloud:
         # クラウドでは Ollama 到達不可のため選択肢から除外し、自動の説明も合わせる
