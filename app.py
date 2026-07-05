@@ -7,6 +7,7 @@ import pandas as pd
 
 import db
 import analyzer
+import notifier
 import syslog_server
 import snmp_trap_server
 import snmp_poller
@@ -61,6 +62,19 @@ def _get_secret_api_keys() -> dict:
     return keys
 
 
+def _get_secret_slack_settings() -> dict:
+    """Streamlit Cloud の Settings→Secrets からSlack通知設定を読む（設定されていれば優先）。"""
+    out = {}
+    try:
+        if "SLACK_WEBHOOK_URL" in st.secrets:
+            out["SLACK_WEBHOOK_URL"] = str(st.secrets["SLACK_WEBHOOK_URL"])
+        if "SLACK_NOTIFY_ENABLED" in st.secrets:
+            out["SLACK_NOTIFY_ENABLED"] = str(st.secrets["SLACK_NOTIFY_ENABLED"])
+    except Exception:
+        pass
+    return out
+
+
 def _apply_saved_settings_once():
     """起動時に一度だけ、保存済み設定を analyzer / os.environ に反映する。"""
     if st.session_state.get("_settings_loaded"):
@@ -68,6 +82,7 @@ def _apply_saved_settings_once():
     st.session_state["_settings_loaded"] = True
     s = _load_user_settings()
     s.update(_get_secret_api_keys())  # st.secrets(Streamlit Cloud)があればローカル保存より優先
+    s.update(_get_secret_slack_settings())
     if s.get("GEMINI_API_KEY"):
         _os.environ["GEMINI_API_KEY"] = s["GEMINI_API_KEY"]
         analyzer.GEMINI_API_KEY = s["GEMINI_API_KEY"]
@@ -80,6 +95,10 @@ def _apply_saved_settings_once():
     if s.get("OLLAMA_MODEL"):
         _os.environ["OLLAMA_MODEL"] = s["OLLAMA_MODEL"]
         analyzer.OLLAMA_MODEL = s["OLLAMA_MODEL"]
+    if s.get("SLACK_WEBHOOK_URL"):
+        _os.environ["SLACK_WEBHOOK_URL"] = s["SLACK_WEBHOOK_URL"]
+    if s.get("SLACK_NOTIFY_ENABLED"):
+        _os.environ["SLACK_NOTIFY_ENABLED"] = s["SLACK_NOTIFY_ENABLED"]
     if s.get("llm_mode"):
         st.session_state["llm_mode"] = s["llm_mode"]
 
@@ -478,6 +497,54 @@ with st.sidebar:
                 st.info("保存したキーを削除しました")
                 st.rerun()
             st.caption(f"💾 保存先: {_SETTINGS_PATH}（この端末内のみ・git操作の影響を受けません）")
+
+    with st.expander("🔔 Slack通知設定", expanded=False):
+        if _is_cloud_mode():
+            # APIキーと同じ理由（全訪問者が同じos.environを共有）で、
+            # Webhook URLもアプリ内の編集UIには出さず、Streamlit Cloud の Secrets を正とする。
+            st.info("☁️ クラウド公開環境ではWebhook URLをアプリ内から設定しません。\n\n"
+                    "Streamlit Cloudの管理画面 → 対象アプリの **Settings → Secrets** で\n"
+                    "`SLACK_WEBHOOK_URL` と `SLACK_NOTIFY_ENABLED`（`\"1\"`で有効）を設定してください"
+                    "（保存すると自動的に反映されます）。")
+            st.caption("この方式ならWebhook URLの値が訪問者に見えることはありません。")
+            if _is_admin_authenticated():
+                if st.button("🧪 テスト送信", key="slack_test_send_cloud", use_container_width=True):
+                    _ok, _err = notifier.send_slack_message(
+                        "🔔 [テスト通知] Syslog AI Analyzerからのテスト送信です。")
+                    (st.success("Slackへ送信しました") if _ok else st.error(_err))
+        else:
+            _wh = st.text_input("Slack Webhook URL", type="password",
+                                 value=_os.environ.get("SLACK_WEBHOOK_URL", ""),
+                                 help="Slackアプリの「Incoming Webhook」で発行したURLを貼り付け")
+            _en = st.checkbox("危険水準(critical)アラートをSlackに通知する",
+                               value=_os.environ.get("SLACK_NOTIFY_ENABLED", "") == "1",
+                               key="slack_notify_enabled_cb")
+            _c_apply, _c_clear = st.columns(2)
+            if _c_apply.button("適用して保存", key="apply_slack_settings", use_container_width=True):
+                if _wh:
+                    _os.environ["SLACK_WEBHOOK_URL"] = _wh
+                _os.environ["SLACK_NOTIFY_ENABLED"] = "1" if _en else "0"
+                _save_user_settings({"SLACK_WEBHOOK_URL": _wh or None,
+                                      "SLACK_NOTIFY_ENABLED": "1" if _en else "0"})
+                st.success("Slack通知設定を保存しました（次回以降は自動で読み込まれます）")
+                st.rerun()
+            if _c_clear.button("保存URLを削除", key="clear_slack_settings", use_container_width=True):
+                _save_user_settings({"SLACK_WEBHOOK_URL": "", "SLACK_NOTIFY_ENABLED": "0"})
+                _os.environ.pop("SLACK_WEBHOOK_URL", None)
+                _os.environ["SLACK_NOTIFY_ENABLED"] = "0"
+                st.info("保存したWebhook URLを削除しました")
+                st.rerun()
+            if st.button("🧪 テスト送信", key="slack_test_send", use_container_width=True):
+                _test_url = _wh or _os.environ.get("SLACK_WEBHOOK_URL", "")
+                if not _test_url:
+                    st.warning("先にWebhook URLを入力してください。")
+                else:
+                    _ok, _err = notifier.send_slack_message(
+                        "🔔 [テスト通知] Syslog AI Analyzerからのテスト送信です。", webhook_url=_test_url)
+                    (st.success("Slackへ送信しました") if _ok else st.error(_err))
+            st.caption(f"💾 保存先: {_SETTINGS_PATH}（この端末内のみ・git操作の影響を受けません）")
+            st.caption("有効化すると、SNMP監視でCPU/メモリ等が危険水準(critical)を超えた際に自動通知されます"
+                       "（同じ項目が継続して危険な間は最短30分間隔で再通知）。")
 
     if _sidebar_cloud:
         # クラウドでは Ollama 到達不可のため選択肢から除外し、自動の説明も合わせる

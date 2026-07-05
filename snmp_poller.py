@@ -11,6 +11,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import notifier
+
 DB_PATH = Path(os.environ.get("DB_PATH", str(Path(__file__).parent / "syslog.db")))
 
 # ─────────────────────────────────────────
@@ -331,6 +333,10 @@ def poll_device(ip: str, community: str = "public",
     results = {}
     hostname = None
     recorded_at = datetime.now().isoformat()
+    # notifier は別のSQLite接続を使うため、snmp_metrics側のconnがオープンな間に
+    # 呼ぶと "database is locked" になる。通知はここに貯めて、withブロックを
+    # 抜けて接続がクローズされた後にまとめて送信する。
+    _pending_notifications = []
 
     with sqlite3.connect(DB_PATH, check_same_thread=False) as conn:
         for oid_name, oid in POLL_OIDS.items():
@@ -383,6 +389,13 @@ def poll_device(ip: str, community: str = "public",
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (recorded_at, ip, hostname or ip, oid_name, oid, value, unit, alert_level))
 
+            if alert_level == "critical":
+                _label = THRESHOLDS.get(oid_name, COUNTER_OIDS.get(oid_name, {})).get("label", oid_name)
+                _pending_notifications.append((
+                    f"{ip}:{oid_name}", alert_level,
+                    f"🔴 [{hostname or ip}] {_label} が危険水準です: {value}{unit}",
+                ))
+
         # ── ベンダー固有MIBの収集（sysObjectID/sysDescrで自動判別） ──
         try:
             _sysoid = snmp_get(ip, community, "1.3.6.1.2.1.1.2.0", port, version)
@@ -408,6 +421,11 @@ def poll_device(ip: str, community: str = "public",
                         (recorded_at, source_ip, hostname, oid_name, oid, value, unit, alert_level)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """, (recorded_at, ip, hostname or ip, v_name, v_oid, v_val, v_unit, v_alert))
+                    if v_alert == "critical":
+                        _pending_notifications.append((
+                            f"{ip}:{v_name}", v_alert,
+                            f"🔴 [{hostname or ip}] {v_label} が危険水準です: {v_val}{v_unit}",
+                        ))
                 results["_vendor"] = _vendor
         except Exception as _ve:
             print(f"[Poller:VendorMIB] {ip}: {_ve}")
@@ -435,6 +453,11 @@ def poll_device(ip: str, community: str = "public",
                 """, (recorded_at, ip, hostname or ip, "memory_used_pct", "derived",
                       mem_pct, "%", mem_alert))
                 results["memory_used_pct"] = mem_pct
+                if mem_alert == "critical":
+                    _pending_notifications.append((
+                        f"{ip}:memory_used_pct", mem_alert,
+                        f"🔴 [{hostname or ip}] メモリ使用率が危険水準です: {mem_pct}%",
+                    ))
         except (TypeError, ValueError) as _me:
             print(f"[Poller:Memory] {ip}: {_me}")
 
@@ -453,6 +476,11 @@ def poll_device(ip: str, community: str = "public",
                 """, (recorded_at, ip, hostname or ip, "hrCpuLoad", _HR_CPU_TABLE_OID,
                       hr_cpu, "%", cpu_alert))
                 results["hrCpuLoad"] = hr_cpu
+                if cpu_alert == "critical":
+                    _pending_notifications.append((
+                        f"{ip}:hrCpuLoad", cpu_alert,
+                        f"🔴 [{hostname or ip}] CPU使用率(汎用)が危険水準です: {hr_cpu}%",
+                    ))
 
         # デバイステーブルを更新
         conn.execute("""
@@ -464,6 +492,10 @@ def poll_device(ip: str, community: str = "public",
                 last_status='ok'
         """, (ip, hostname or ip, community, version, port, recorded_at))
         conn.commit()
+
+    # snmp_metrics用の接続がクローズされた後にまとめて通知を送信する
+    for _key, _level, _message in _pending_notifications:
+        notifier.notify_alert(key=_key, level=_level, message=_message)
 
     return {"ip": ip, "hostname": hostname, "metrics": results, "recorded_at": recorded_at}
 
