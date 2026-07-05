@@ -612,6 +612,87 @@ with st.sidebar:
     st.caption("v1.0 | Cisco/NX-OS/Si-R/IPCOM/SR-S/F5 BIG-IP/PaloAlto/APRESIA/RHEL/Windows対応")
 
 # ─────────────────────────────────────────
+# show log解析タブ用のサンプル（ベンダー別・貼り付け形式）
+#   pcapの「デモシミュレーター」に相当する、show系コマンド貼り付けの実例集。
+#   それぞれ show_analyzer.py のベンダー別異常検知が実際に反応する内容にしてある。
+# ─────────────────────────────────────────
+SHOWLOG_SAMPLES = {
+    "Cisco IOS/IOS-XE": """Switch#show logging
+Jul  4 09:58:12.101: %SYS-2-MALLOCFAIL: Memory allocation of 65536 bytes failed
+Jul  4 09:59:03.552: %SYS-3-CPUHOG: Task ran for 3204ms, process = IP Input
+Jul  4 10:00:39.701: %SYS-5-RESTART: System restarted --
+Jul  4 10:01:27.694: %LINK-3-UPDOWN: Interface GigabitEthernet0/1, changed state to down
+Jul  4 10:01:28.011: %LINEPROTO-5-UPDOWN: Line protocol on Interface GigabitEthernet0/1, changed state to down
+Switch#show running-config
+hostname Switch
+interface GigabitEthernet0/1
+ description Uplink-to-Core
+ no ip address
+ shutdown
+interface Vlan1
+ ip address 192.168.1.10 255.255.255.0
+Switch#show interface status
+Port      Name               Status       Vlan       Duplex  Speed Type
+Gi0/1     Uplink-to-Core     notconnect   1          auto    auto  10/100/1000BaseTX
+Gi0/2                        connected    1          a-full  a-1000 10/100/1000BaseTX
+Switch#""",
+
+    "F5 BIG-IP": """[root@bigip1:Standby:Not In Sync] ~ # tmsh show ltm pool
+Ltm::Pool: pool_web01
+Status
+Availability   : available
+State          : enabled
+Reason         : The pool has no enabled members. 0 of 2 members available
+
+Ltm::Pool Member: 10.0.0.11:80
+  Session       : monitor-enabled
+  State         : down
+
+Ltm::Pool Member: 10.0.0.12:80
+  Session       : monitor-enabled
+  State         : down
+[root@bigip1:Standby:Not In Sync] ~ # tmsh show sys ha-status
+HA status
+  This device        : Standby
+  Peer device        : Active
+  Config sync status : Not In Sync
+[root@bigip1:Standby:Not In Sync] ~ #""",
+
+    "Palo Alto": """admin@PA-FW> show system info
+hostname: PA-FW01
+model: PA-820
+sw-version: 10.2.3
+admin@PA-FW> show high-availability state
+
+Local Information:
+    Mode: Active-Passive
+    State: suspended
+    Reason: Suspended by user
+
+Peer Information:
+    State: active
+admin@PA-FW> show session info
+num-active: 195000
+num-max: 200000
+num-tcp: 120000
+num-udp: 60000
+admin@PA-FW> request license info
+Feature: Threat Prevention
+Description: Threat Prevention License
+Expires: 2026-01-01
+Expired: yes
+admin@PA-FW>""",
+
+    "富士通 Si-R": """SiR-G210#show logging
+Jul  4 09:50:12 SiR-G210 protocol: ether 1 1 link down
+Jul  4 09:50:15 SiR-G210 isakmp: DPD watching host is down. [203.0.113.1]
+Jul  4 09:52:30 SiR-G210 bgpd: 10.0.0.1 recv NOTIFICATION 6/2 (Cease/Administrative Shutdown)
+Jul  4 09:55:02 SiR-G210 init: error code [85020000]
+Jul  4 09:56:40 SiR-G210 cmodemctl: [WWAN1] PIN code error. modem0 (PUK required)
+SiR-G210#""",
+}
+
+# ─────────────────────────────────────────
 # テストログ定義
 # ─────────────────────────────────────────
 TEST_LOGS = {
@@ -1521,6 +1602,20 @@ with tab_showlog:
                 st.session_state["show_log_text_tab"] = _up_text
                 st.session_state["_showlog_last_upload"] = _up_file.name
                 st.success(f"📄 {_up_file.name} を読み込みました（下の欄に反映済み）")
+                st.rerun()
+
+    # ── サンプルを読み込む（実機が無くても各ベンダーの挙動を試せる） ──
+    with st.expander("📋 サンプルを読み込む（実機が無くてもお試しいただけます）"):
+        _spl_col1, _spl_col2 = st.columns([3, 1])
+        with _spl_col1:
+            _spl_vendor = st.selectbox("ベンダー", list(SHOWLOG_SAMPLES.keys()),
+                                       key="showlog_sample_vendor")
+        with _spl_col2:
+            st.write("")
+            st.write("")
+            if st.button("📋 読み込む", key="showlog_sample_load", use_container_width=True):
+                st.session_state["show_log_text_tab"] = SHOWLOG_SAMPLES[_spl_vendor]
+                st.success(f"{_spl_vendor} のサンプルを読み込みました（下の欄に反映済み）")
                 st.rerun()
 
     _sc1, _sc2 = st.columns([3, 1])
