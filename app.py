@@ -1099,7 +1099,7 @@ def _llm_analyze_prtg(devices: list, latest_metrics: list, alerts: list,
                       label_map: dict, mode: str,
                       running_configs: dict | None = None) -> tuple[str, str]:
     """
-    PRTG風ダッシュボードの現況（デバイス状態・最新センサー値・超過アラート）を
+    MRTG風ダッシュボードの現況（デバイス状態・最新センサー値・超過アラート）を
     LLMに渡し、総合的な健全性診断レポートを生成する。
     running_configs: {ip: config_text} が渡された場合、show running-config も
     踏まえたコンフィグ是正点の指摘を追加で行う。
@@ -1263,7 +1263,7 @@ _process_queue()
 # ─────────────────────────────────────────
 (tab_health, tab1, tab_showlog, tab_prtg, tab2, tab3, tab4, tab5,
  tab_netflow, tab_pcap, tab_topo, tab_probe) = st.tabs([
-    "📊 品質ルーブリック", "📋 ログビューア", "📥 show log解析", "📟 PRTG風",
+    "📊 品質ルーブリック", "📋 ログビューア", "📥 show log解析", "📟 MRTG風",
     "📊 テレメトリダッシュボード", "📡 SNMPモニター", "🗂️ 機器コンフィグ",
     "📖 セットアップガイド", "🌊 NetFlow", "📦 パケット解析",
     "🗺️ トポロジー", "⏱️ 応答時間"
@@ -2087,11 +2087,11 @@ with tab_showlog:
         st.caption("まだ取り込まれたログがありません。上に show logging を貼り付けて実行してください。")
 
 # ═══════════════════════════════════════════
-# TAB: PRTG 風ダッシュボード
+# TAB: MRTG 風ダッシュボード
 # ═══════════════════════════════════════════
 with tab_prtg:
     import prtg_view as _prtg
-    st.markdown("## 📟 PRTG 風モニタリングダッシュボード")
+    st.markdown("## 📟 MRTG 風モニタリングダッシュボード")
     st.caption("SNMPポーリングの結果を、速度計ゲージ・信号機センサー・トラフィックグラフで可視化します。")
 
     # ── ⚙️ SNMP 設定（このタブから直接：デバイス登録＋ポーラー起動） ──
