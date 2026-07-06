@@ -125,6 +125,32 @@ def _is_cloud_mode() -> bool:
     return False
 
 # ─────────────────────────────────────────
+# クラウド公開版だけの「主要クラウド/通信キャリアへの疎通状況」表示
+#   実機ping/SNMPが使えないクラウド環境向けに、このアプリのサーバーから
+#   主要クラウド事業者・国内キャリアの公開サイトへHTTP応答時間を計測して見せる。
+#   ※あくまで「このサーバー1拠点から見た」参考値であり、利用者ごとの体感速度や
+#     「世の中全体の回線混雑状況」を代表するものではない。
+# ─────────────────────────────────────────
+_CLOUD_LATENCY_TARGETS = [
+    ("AWS",          "https://aws.amazon.com"),
+    ("Azure",        "https://azure.microsoft.com"),
+    ("Google Cloud", "https://cloud.google.com"),
+    ("NTTドコモ",     "https://www.nttdocomo.co.jp"),
+    ("au (KDDI)",    "https://www.au.com"),
+    ("ソフトバンク",   "https://www.softbank.jp"),
+]
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _measure_cloud_latency() -> list:
+    """主要クラウド/キャリアへのHTTP応答時間を計測する（1分キャッシュ・全訪問者で共有）。"""
+    import app_probe as _probe
+    results = []
+    for name, url in _CLOUD_LATENCY_TARGETS:
+        r = _probe.probe_http(url, timeout=5)
+        results.append({"name": name, "url": url, **r})
+    return results
+
+# ─────────────────────────────────────────
 # クラウド公開時のアップロード制限（管理者ログインで解除）
 #   管理者ID/パスワードは Streamlit Cloud の secrets.toml（[ADMIN_ID]/[ADMIN_PASSWORD]）
 #   またはローカル環境変数 ADMIN_ID / ADMIN_PASSWORD で設定する（リポジトリには含めない）。
@@ -4573,7 +4599,30 @@ with tab_probe:
     st.markdown("## ⏱️ アプリケーション応答時間")
     st.caption("HTTP/HTTPS エンドポイントや ping の応答時間を定期計測してトレンドを可視化します。IP SLA 結果もルーターから RESTCONF で取得できます。")
 
-    _probe_tab1, _probe_tab2 = st.tabs(["📡 HTTP/Ping プローブ", "📊 IP SLA（ルーター）"])
+    if _is_cloud_mode():
+        _probe_tab0, _probe_tab1, _probe_tab2 = st.tabs(
+            ["🌐 クラウド/キャリア疎通", "📡 HTTP/Ping プローブ", "📊 IP SLA（ルーター）"])
+        with _probe_tab0:
+            st.markdown("### 🌐 主要クラウド/通信キャリアへの疎通状況")
+            st.caption("このアプリのサーバーから、主要クラウド事業者・国内通信キャリアの公開サイトへ"
+                       "HTTPで応答時間を計測した参考値です（1分キャッシュ・全訪問者で共有）。"
+                       "あくまで**このサーバー1拠点から見た**値であり、お使いの回線の体感速度や"
+                       "「世の中全体の回線混雑状況」を代表するものではない点にご注意ください。")
+            if st.button("🔄 今すぐ再計測", key="cloud_latency_refresh"):
+                _measure_cloud_latency.clear()
+            _lat_results = _measure_cloud_latency()
+            _lat_cols = st.columns(3)
+            for _li, _lr in enumerate(_lat_results):
+                with _lat_cols[_li % 3]:
+                    if _lr["success"]:
+                        _rtt = _lr["rtt_ms"]
+                        _icon = "🟢" if _rtt < 150 else ("🟡" if _rtt < 400 else "🔴")
+                        st.metric(f"{_icon} {_lr['name']}", f"{_rtt:.0f} ms")
+                    else:
+                        st.metric(f"🔴 {_lr['name']}", "応答なし")
+            st.caption("🟢 150ms未満（良好） / 🟡 150〜400ms（やや遅延） / 🔴 400ms以上 or 応答なし（遅延・疎通不可）")
+    else:
+        _probe_tab1, _probe_tab2 = st.tabs(["📡 HTTP/Ping プローブ", "📊 IP SLA（ルーター）"])
 
     # ── HTTP/Ping プローブ ──
     with _probe_tab1:
