@@ -4199,6 +4199,41 @@ with tab_pcap:
                 df_unk = df_unk.sort_values("回数", ascending=False)
                 _show_table_top_n(df_unk, "unknown_proto_hints.csv", "dl_unknown_proto_csv")
 
+            # ── ID/session値による突き合わせ（複数フローにまたがる出現） ──
+            _sid_corr = res.get("session_id_correlations", [])
+            if _sid_corr:
+                st.markdown("---")
+                st.markdown("### 🔗 ID/session値による通信の突き合わせ")
+                st.caption("同じID/session値が複数の通信フローにまたがって出現しているものです。"
+                           "人手での突き合わせは現実的に困難なため機械的に検出しています。"
+                           "送信元IPが複数にまたがる場合はセッションの使い回し・乗っ取りの疑いもあるため要確認です。")
+                for _c in _sid_corr:
+                    if _c["anomaly_multi_src"]:
+                        st.error(f"🔴 **要確認**: {_c['description']}")
+                df_sid = pd.DataFrame(_sid_corr)
+                df_sid_show = df_sid[["id_value", "total_occurrences", "distinct_flows",
+                                       "distinct_src_ips", "description"]]
+                df_sid_show.columns = ["ID値", "出現回数", "フロー数", "送信元IP種類数", "説明"]
+                _show_table_top_n(df_sid_show, "session_id_correlations.csv", "dl_session_id_csv")
+
+                _sid_options = [c["id_value"] for c in _sid_corr]
+                _sel_sid = st.selectbox("内訳を見るID値を選択", _sid_options, key="sel_session_id_corr")
+                _sel_c = next((c for c in _sid_corr if c["id_value"] == _sel_sid), None)
+                if _sel_c:
+                    _sid_c1, _sid_c2 = st.columns(2)
+                    with _sid_c1:
+                        st.markdown("**フロー別集計**")
+                        df_sid_flows = pd.DataFrame(_sel_c["flows"])
+                        df_sid_flows.columns = ["プロトコル", "送信元IP", "宛先IP", "送信元Port", "宛先Port", "回数"]
+                        st.dataframe(df_sid_flows, use_container_width=True, hide_index=True)
+                    with _sid_c2:
+                        st.markdown("**出現順（シーケンス）**")
+                        st.caption(f"最大間隔: {_sel_c.get('max_gap_sec', 0)}秒")
+                        df_sid_tl = pd.DataFrame(_sel_c["timeline"])
+                        df_sid_tl.columns = ["時刻", "プロトコル", "送信元IP", "宛先IP",
+                                              "送信元Port", "宛先Port", "前回からの間隔(秒)"]
+                        st.dataframe(df_sid_tl, use_container_width=True, hide_index=True)
+
             # ── HTTP 解析 ────────────────────────────────
             _http_errs = res.get("http_errors", [])
             _http_sum  = res.get("http_summary", [])

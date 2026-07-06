@@ -1211,6 +1211,22 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
                      "行う独自/未対応プロトコルの可能性があるため、top_issuesで"
                      "「手動でのパケット確認を推奨」と言及してください。")
 
+    _sid_corr = r.get("session_id_correlations", [])
+    if _sid_corr:
+        lines += [
+            "",
+            "【⚠️ ID/session値の突き合わせ結果（機械的に検出・確定情報）】",
+            f"  複数フローにまたがって出現したID/session値: {len(_sid_corr)} 件",
+        ]
+        for c in _sid_corr[:5]:
+            lines.append(f"    - ID値「{c.get('id_value','')}」: {c.get('distinct_flows',0)}フローに"
+                         f"計{c.get('total_occurrences',0)}回出現"
+                         f"（送信元IP種類数={c.get('distinct_src_ips',0)}）"
+                         + ("【複数送信元IPにまたがる要確認事項】" if c.get("anomaly_multi_src") else ""))
+        lines.append("    ※これは人手では現実的に不可能な、パケット横断でのID値の完全突き合わせ結果です。"
+                     "送信元IPが複数にまたがるものは、セッションの使い回し・共有・乗っ取りの可能性として"
+                     "top_issuesで具体的に言及し、正常な負荷分散/NAT配下の可能性にも触れつつ要確認と報告してください。")
+
     # VoIP
     vc = r.get("voip_stream_count", 0)
     if vc > 0:

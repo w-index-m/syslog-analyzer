@@ -92,6 +92,25 @@ def _find_unknown_proto_keywords(payload: bytes) -> list:
     tokens = (t.lower() for t in _NON_ALNUM_RE.split(spaced) if t)
     return sorted({t for t in tokens if t in _UNKNOWN_PROTO_TOKENS})
 
+
+# ID/session の「値」を抽出して、複数フローにまたがる出現を突き合わせるための正規表現。
+# 例: "session_id=555" "SessionID: abc123" "sid=99" "id=42"
+_ID_VALUE_RE = re.compile(
+    r"\b(?:session[_-]?id|sid|id)\s*[:=]\s*[\"']?([A-Za-z0-9_\-\.]{2,64})[\"']?",
+    re.IGNORECASE,
+)
+
+
+def _extract_id_values(payload: bytes) -> list:
+    """プロトコル不明なペイロードから ID/session の値を抽出する（人手では困難な突き合わせ用）。"""
+    if not payload:
+        return []
+    try:
+        text = payload[:300].decode("utf-8", errors="ignore")
+    except Exception:
+        return []
+    return _ID_VALUE_RE.findall(text)
+
 # ── VoIP/RTP ────────────────────────────────────────────────────
 RTP_CLOCK_RATES = {
     0: 8000, 8: 8000,   # G.711 u-law / a-law
@@ -352,6 +371,7 @@ def analyze_pcap(data: bytes) -> dict:
         dns_summary         DNS 集計
         syslog_packets      pcap内syslog
         unknown_proto_hints プロトコル不明な通信でID/sessionキーワードを検出したフロー
+        session_id_correlations  同一ID値が複数フローにまたがって出現した突き合わせ結果
         total_packets       int
         capture_start / capture_end  str
         error               str | None
@@ -374,6 +394,7 @@ def analyze_pcap(data: bytes) -> dict:
                         "servfail": 0, "refused": 0, "slow": 0},
         "syslog_packets": [],
         "unknown_proto_hints": [],
+        "session_id_correlations": [],
         "voip_streams": [], "voip_avg_mos": 0.0, "voip_stream_count": 0, "voip_poor_streams": 0,
         "total_packets": 0,
         "capture_start": "", "capture_end": "", "capture_duration_sec": 0,
@@ -411,7 +432,12 @@ def analyze_pcap(data: bytes) -> dict:
     # プロトコル不明の通信: (proto, src, dst, sport, dport) -> {count, keywords, sample}
     unknown_proto_hints: dict[tuple, dict] = {}
 
-    def _record_unknown_hint(proto_name, src, dst, sp, dp, payload):
+    # ID/session値 -> {count, flows: {(proto,src,dst,sp,dp): count}, events: [{ts, flow}]}
+    # 人手では困難な「同じID値が複数フローにまたがって出現していないか」の突き合わせと、
+    # 出現順（シーケンス）チェックに使う。
+    session_id_index: dict[str, dict] = {}
+
+    def _record_unknown_hint(proto_name, src, dst, sp, dp, payload, ts):
         kw = _find_unknown_proto_keywords(payload)
         if not kw:
             return
@@ -421,6 +447,13 @@ def analyze_pcap(data: bytes) -> dict:
         entry["keywords"].update(kw)
         if not entry["sample"]:
             entry["sample"] = payload[:120].decode("utf-8", errors="replace")
+
+        for id_val in _extract_id_values(payload):
+            idx = session_id_index.setdefault(id_val, {"count": 0, "flows": {}, "events": []})
+            idx["count"] += 1
+            fl = idx["flows"].setdefault(key, 0)
+            idx["flows"][key] = fl + 1
+            idx["events"].append({"ts": ts, "flow": key})
 
     try:
         for ts, raw_pkt in reader:
@@ -578,7 +611,7 @@ def analyze_pcap(data: bytes) -> dict:
                         except Exception:
                             _is_http_resp = False
                         if not _is_http_resp:
-                            _record_unknown_hint("TCP", src, dst, sport, dport, bytes(tcp.data))
+                            _record_unknown_hint("TCP", src, dst, sport, dport, bytes(tcp.data), ts)
 
                 # ── UDP ─────────────────────────────────
                 elif isinstance(ip.data, dpkt.udp.UDP):
@@ -714,7 +747,7 @@ def analyze_pcap(data: bytes) -> dict:
 
                     # ── プロトコル不明時: ID/session キーワード検索 ──
                     else:
-                        _record_unknown_hint("UDP", src, dst, udp.sport, udp.dport, bytes(udp.data))
+                        _record_unknown_hint("UDP", src, dst, udp.sport, udp.dport, bytes(udp.data), ts)
 
             # ── ARP ─────────────────────────────────────
             elif isinstance(eth.data, dpkt.arp.ARP):
@@ -925,6 +958,56 @@ def analyze_pcap(data: bytes) -> dict:
                             f"({info['count']}パケット) — 未対応の独自/セッション型プロトコルの可能性",
         })
     result["unknown_proto_hints"].sort(key=lambda x: x["count"], reverse=True)
+
+    # 同一ID/session値が複数フローにまたがって出現していないかの突き合わせ
+    # （1フロー内だけの出現は「その通信が持続している」だけなので対象外とし、
+    #   複数フローにまたがる出現のみを「突き合わせ結果」として拾う）
+    for id_val, info in session_id_index.items():
+        flow_keys = list(info["flows"].keys())
+        if len(flow_keys) < 2:
+            continue
+        distinct_src_ips = {fk[1] for fk in flow_keys}
+        flows_list = [
+            {"protocol": fk[0], "src": fk[1], "dst": fk[2], "src_port": fk[3], "dst_port": fk[4],
+             "count": cnt}
+            for fk, cnt in info["flows"].items()
+        ]
+        anomaly_multi_src = len(distinct_src_ips) > 1
+
+        # 出現順（シーケンス）チェック: 時刻順に並べ、フロー間の遷移と間隔を追う
+        events_sorted = sorted(info["events"], key=lambda e: e["ts"])
+        timeline = []
+        prev_ts = None
+        for e in events_sorted:
+            fk = e["flow"]
+            gap_sec = round(e["ts"] - prev_ts, 3) if prev_ts is not None else None
+            timeline.append({
+                "timestamp": _ts_str(e["ts"]),
+                "protocol": fk[0], "src": fk[1], "dst": fk[2],
+                "src_port": fk[3], "dst_port": fk[4],
+                "gap_sec": gap_sec,
+            })
+            prev_ts = e["ts"]
+        gaps = [t["gap_sec"] for t in timeline if t["gap_sec"] is not None]
+        max_gap_sec = max(gaps) if gaps else 0
+
+        desc = (f"ID値「{id_val}」が{len(flow_keys)}個の異なる通信フローに"
+                f"計{info['count']}回出現しています。")
+        if anomaly_multi_src:
+            desc += f"送信元IPが{len(distinct_src_ips)}種類にまたがっており、要確認です。"
+        result["session_id_correlations"].append({
+            "id_value": id_val,
+            "total_occurrences": info["count"],
+            "distinct_flows": len(flow_keys),
+            "distinct_src_ips": len(distinct_src_ips),
+            "anomaly_multi_src": anomaly_multi_src,
+            "flows": flows_list,
+            "timeline": timeline,
+            "max_gap_sec": round(max_gap_sec, 3),
+            "description": desc,
+        })
+    result["session_id_correlations"].sort(
+        key=lambda x: (x["anomaly_multi_src"], x["total_occurrences"]), reverse=True)
 
     return result
 
