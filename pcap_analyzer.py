@@ -4,6 +4,7 @@ ICMP redirect を中心に RIP / ARP / TCP / DNS / HTTP / TLS / DHCP /
 IPフラグメント / フロー解析 / pcap内syslog を抽出する。
 """
 import io
+import re
 import struct
 import socket
 from collections import defaultdict
@@ -68,6 +69,28 @@ TLS_ALERT_DESCS = {
 }
 
 PROTO_NAMES = {1: "ICMP", 2: "IGMP", 6: "TCP", 17: "UDP", 89: "OSPF"}
+
+# ── プロトコル不明時のキーワード検索（ID/session） ──────────────
+# 既存パーサーで識別できない通信でも、平文に "id" や "session" が
+# 含まれていれば独自/セッション型プロトコルの手がかりとして拾う。
+# "session_id" (snake_case) や "SessionID" (camelCase) のような複合語も
+# 拾えるよう、camelCase境界と非英数字で区切ってから単語単位で判定する。
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_NON_ALNUM_RE       = re.compile(r"[^A-Za-z0-9]+")
+_UNKNOWN_PROTO_TOKENS = {"id", "session"}
+
+
+def _find_unknown_proto_keywords(payload: bytes) -> list:
+    """プロトコル不明なペイロードから 'ID' / 'session' という単語を探す（ヒューリスティック）。"""
+    if not payload:
+        return []
+    try:
+        text = payload[:300].decode("utf-8", errors="ignore")
+    except Exception:
+        return []
+    spaced = _CAMEL_BOUNDARY_RE.sub("_", text)
+    tokens = (t.lower() for t in _NON_ALNUM_RE.split(spaced) if t)
+    return sorted({t for t in tokens if t in _UNKNOWN_PROTO_TOKENS})
 
 # ── VoIP/RTP ────────────────────────────────────────────────────
 RTP_CLOCK_RATES = {
@@ -328,6 +351,7 @@ def analyze_pcap(data: bytes) -> dict:
         dns_issues          DNS エラー / 遅延
         dns_summary         DNS 集計
         syslog_packets      pcap内syslog
+        unknown_proto_hints プロトコル不明な通信でID/sessionキーワードを検出したフロー
         total_packets       int
         capture_start / capture_end  str
         error               str | None
@@ -349,6 +373,7 @@ def analyze_pcap(data: bytes) -> dict:
         "dns_summary": {"queries": 0, "responses": 0, "nxdomain": 0,
                         "servfail": 0, "refused": 0, "slow": 0},
         "syslog_packets": [],
+        "unknown_proto_hints": [],
         "voip_streams": [], "voip_avg_mos": 0.0, "voip_stream_count": 0, "voip_poor_streams": 0,
         "total_packets": 0,
         "capture_start": "", "capture_end": "", "capture_duration_sec": 0,
@@ -382,6 +407,20 @@ def analyze_pcap(data: bytes) -> dict:
 
     # VoIP/RTP: ssrc -> {pkts:[{ts,seq,rtp_ts,size}], src, dst, pt}
     rtp_streams: dict[int, dict] = {}
+
+    # プロトコル不明の通信: (proto, src, dst, sport, dport) -> {count, keywords, sample}
+    unknown_proto_hints: dict[tuple, dict] = {}
+
+    def _record_unknown_hint(proto_name, src, dst, sp, dp, payload):
+        kw = _find_unknown_proto_keywords(payload)
+        if not kw:
+            return
+        key = (proto_name, src, dst, sp, dp)
+        entry = unknown_proto_hints.setdefault(key, {"count": 0, "keywords": set(), "sample": ""})
+        entry["count"] += 1
+        entry["keywords"].update(kw)
+        if not entry["sample"]:
+            entry["sample"] = payload[:120].decode("utf-8", errors="replace")
 
     try:
         for ts, raw_pkt in reader:
@@ -531,6 +570,16 @@ def analyze_pcap(data: bytes) -> dict:
                                 })
                                 result["tls_summary"]["fatal_alerts"] += 1
 
+                    # ── プロトコル不明時: ID/session キーワード検索 ──
+                    # HTTPレスポンス/TLS(暗号化)以外の平文ペイロードが対象。
+                    if data_len > 0 and not (sport in TLS_PORTS or dport in TLS_PORTS):
+                        try:
+                            _is_http_resp = bytes(tcp.data[:5]) == b"HTTP/"
+                        except Exception:
+                            _is_http_resp = False
+                        if not _is_http_resp:
+                            _record_unknown_hint("TCP", src, dst, sport, dport, bytes(tcp.data))
+
                 # ── UDP ─────────────────────────────────
                 elif isinstance(ip.data, dpkt.udp.UDP):
                     udp = ip.data
@@ -662,6 +711,10 @@ def analyze_pcap(data: bytes) -> dict:
                                     "port": udp.dport, "raw": raw_msg,
                                 })
                         except Exception: pass
+
+                    # ── プロトコル不明時: ID/session キーワード検索 ──
+                    else:
+                        _record_unknown_hint("UDP", src, dst, udp.sport, udp.dport, bytes(udp.data))
 
             # ── ARP ─────────────────────────────────────
             elif isinstance(eth.data, dpkt.arp.ARP):
@@ -861,6 +914,17 @@ def analyze_pcap(data: bytes) -> dict:
             for pkt in result["syslog_packets"]:
                 pkt["parsed"] = parse_syslog(pkt["raw"], pkt["src_ip"])
         except Exception: pass
+
+    # プロトコル不明の通信（ID/sessionキーワード検出）
+    for (proto, src, dst, sp, dp), info in unknown_proto_hints.items():
+        kw_str = "/".join(info["keywords"])
+        result["unknown_proto_hints"].append({
+            "protocol": proto, "src": src, "dst": dst, "src_port": sp, "dst_port": dp,
+            "count": info["count"], "keywords": kw_str, "sample": info["sample"],
+            "description": f"プロトコル不明の通信に「{kw_str}」を含む語を検出 "
+                            f"({info['count']}パケット) — 未対応の独自/セッション型プロトコルの可能性",
+        })
+    result["unknown_proto_hints"].sort(key=lambda x: x["count"], reverse=True)
 
     return result
 

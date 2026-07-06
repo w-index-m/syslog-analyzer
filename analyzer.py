@@ -1195,6 +1195,22 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
         f"  異常（スプーフィング疑い）: {len(r.get('arp_anomalies', []))} 件",
     ]
 
+    _unk_hints = r.get("unknown_proto_hints", [])
+    if _unk_hints:
+        lines += [
+            "",
+            "【プロトコル不明の通信（ID/sessionキーワード検出）】",
+            f"  該当フロー: {len(_unk_hints)} 件",
+        ]
+        for u in _unk_hints[:5]:
+            _usp, _udp = _port_label(u.get("src_port")), _port_label(u.get("dst_port"))
+            lines.append(f"    - {u.get('protocol','')} {u.get('src','')}:{_usp}→{u.get('dst','')}:{_udp} "
+                         f"({u.get('count',0)}パケット, 検出語:{u.get('keywords','')}) : "
+                         f"サンプル「{u.get('sample','')[:60]}」")
+        lines.append("    ※既知プロトコルとして解析できなかった通信です。認証・セッション管理を"
+                     "行う独自/未対応プロトコルの可能性があるため、top_issuesで"
+                     "「手動でのパケット確認を推奨」と言及してください。")
+
     # VoIP
     vc = r.get("voip_stream_count", 0)
     if vc > 0:

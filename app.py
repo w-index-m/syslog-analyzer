@@ -4183,6 +4183,22 @@ with tab_pcap:
                 df_frag.columns = ["送信元IP", "宛先IP", "プロトコル", "フラグメント数", "説明"]
                 st.dataframe(df_frag, use_container_width=True, hide_index=True)
 
+            # ── プロトコル不明（ID/sessionキーワード検出） ──────
+            _unk_hints = res.get("unknown_proto_hints", [])
+            if _unk_hints:
+                st.markdown("---")
+                st.markdown("### ❓ プロトコル不明の通信（ID/session キーワード検出）")
+                st.caption("既知のプロトコルとして解析できなかった通信のうち、平文に「id」「session」を"
+                           "含む語が見つかったものです。独自プロトコルや認証・セッション管理を行っている"
+                           "通信の可能性があるため、手動確認をおすすめします。")
+                df_unk = pd.DataFrame(_unk_hints)
+                df_unk = df_unk[["protocol", "src", "dst", "src_port", "dst_port",
+                                  "count", "keywords", "sample", "description"]]
+                df_unk.columns = ["プロトコル", "送信元IP", "宛先IP", "送信元Port", "宛先Port",
+                                   "回数", "検出語", "サンプル(先頭120バイト)", "説明"]
+                df_unk = df_unk.sort_values("回数", ascending=False)
+                _show_table_top_n(df_unk, "unknown_proto_hints.csv", "dl_unknown_proto_csv")
+
             # ── HTTP 解析 ────────────────────────────────
             _http_errs = res.get("http_errors", [])
             _http_sum  = res.get("http_summary", [])
