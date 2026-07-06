@@ -202,6 +202,56 @@ def _show_table_top_n(df, csv_name: str, dl_key: str, limit: int = 20):
     else:
         st.dataframe(df, use_container_width=True, hide_index=True)
 
+
+def _render_pcap_ai_diagnosis(res: dict, key_prefix: str = "main"):
+    """
+    pcap解析結果に対する「🤖 AI診断実行」ボタンとレポート表示。
+    pcapの取得経路（アップロード/SCP/EPC等）によらず、全ページで同一の
+    ボタン・診断ロジック（analyzer.diagnose_pcap）を使うための共通部品。
+    key_prefix は同一画面に複数配置してもキーが衝突しないようにするため。
+    """
+    st.markdown("---")
+    _llm_ok = (analyzer.check_claude_available() or analyzer.check_gemini_available()
+               or analyzer.check_groq_available() or analyzer.check_ollama_available())
+    _ai_col1, _ai_col2 = st.columns([5, 1])
+    _ai_col1.markdown("### 🤖 pcap 総合 AI 診断")
+    _ai_col1.caption("TCP / DNS / DHCP / HTTP / TLS / VoIP / ICMP / ARP の全解析結果を LLM に投げて根本原因を推定します。")
+    with _ai_col2:
+        _pcap_ai_btn = st.button("🤖 AI診断実行", key=f"pcap_ai_diag_{key_prefix}",
+                                 disabled=not _llm_ok, use_container_width=True,
+                                 type="primary")
+    if not _llm_ok:
+        st.caption("AI診断を使うにはサイドバーの「🔑 APIキー設定」でClaude / Gemini / Groqのいずれかを設定してください。")
+
+    _diag_state_key = f"_pcap_diag_{key_prefix}"
+    if _pcap_ai_btn:
+        with st.spinner("LLM がpcap解析結果を総合分析中..."):
+            st.session_state[_diag_state_key] = analyzer.diagnose_pcap(
+                res, st.session_state.get("llm_mode", "auto"))
+
+    _pcap_diag = st.session_state.get(_diag_state_key)
+    if _pcap_diag:
+        _health = _pcap_diag.get("overall_health", "")
+        _health_color = {"正常": "🟢", "要注意": "🟡", "問題あり": "🟠", "重大": "🔴"}.get(_health, "⚪")
+        st.markdown(f"**総合評価: {_health_color} {_health}**")
+        st.markdown(f"{_pcap_diag.get('summary','')}")
+
+        _issues = _pcap_diag.get("top_issues", [])
+        if _issues:
+            st.markdown("**検出された問題（優先順）:**")
+            for _iss in _issues:
+                _sev = _iss.get("severity", "")
+                _sev_icon = {"高": "🔴", "中": "🟡", "低": "🟢"}.get(_sev, "⚪")
+                with st.expander(f"{_sev_icon} [{_iss.get('category','')}] {_iss.get('description','')}"):
+                    st.markdown(f"**原因推定:** {_iss.get('root_cause','')}")
+                    st.markdown(f"**推奨対応:** {_iss.get('action','')}")
+
+        if _pcap_diag.get("positive_findings"):
+            st.markdown("**✅ 問題なし:** " + " / ".join(_pcap_diag["positive_findings"]))
+        st.info(f"**🚨 最優先対応:** {_pcap_diag.get('priority_action','')}")
+        st.caption(f"診断モデル: {_pcap_diag.get('diagnosis_model','')} | "
+                   f"LLMモード: {st.session_state.get('llm_mode','auto')}")
+
 # ─────────────────────────────────────────
 # ページ設定
 # ─────────────────────────────────────────
@@ -2792,9 +2842,30 @@ snmp-server trap enable
                 st.dataframe(pd.DataFrame(redirect_dest_tags), use_container_width=True, hide_index=True)
 
             # ── ③ ルーティングテーブル照合 ──
+            # 優先順位: RESTCONF（取得済みキャッシュがあれば最優先・高速&高精度） > SNMP Walk > コンフィグ解析
+            _rc_routes_icmp = st.session_state.get(f"rc_routes_{sel_icmp_ip}")
             snmp_routes = snmp_poller.get_routing_table(sel_icmp_ip)
             routing_summary = ""
-            if snmp_routes:
+            if _rc_routes_icmp:
+                with st.expander(f"🗺️ ルーティングテーブル（RESTCONF取得済み: {len(_rc_routes_icmp)}件）", expanded=True):
+                    st.caption("⚡ RESTCONFで取得したルートを使用中（「SNMPモニター」タブの「⚡ RESTCONF で取得」ボタンで更新できます）")
+                    df_rc_icmp = pd.DataFrame(_rc_routes_icmp)[["dest","mask","nexthop","proto","metric"]]
+                    df_rc_icmp.columns = ["宛先","マスク","ネクストホップ","プロトコル","メトリック"]
+                    st.dataframe(df_rc_icmp, use_container_width=True, hide_index=True)
+                    if redirect_dest_tags:
+                        st.markdown("**宛先IP照合結果:**")
+                        dest_ips = [t["値"] for t in redirect_dest_tags if t["種別"] == "dest"]
+                        for dip in set(dest_ips[:5]):
+                            match = next((r for r in _rc_routes_icmp if r.get("dest") == dip), None)
+                            if match:
+                                st.markdown(f"- 宛先 `{dip}` → ✅ 一致ルート: `{match['dest']}/{match['mask']}` via `{match['nexthop']}` ({match['proto']})")
+                            else:
+                                st.markdown(f"- 宛先 `{dip}` → ⚠️ ルーティングテーブルに一致なし（スタティックルート欠落の可能性）")
+                routing_summary = "\n".join(
+                    f"{r['dest']}/{r['mask']} via {r['nexthop']} ({r['proto']})"
+                    for r in _rc_routes_icmp
+                )
+            elif snmp_routes:
                 with st.expander(f"🗺️ ルーティングテーブル（SNMP Walk取得済み: {len(snmp_routes)}件）"):
                     df_rt_icmp = pd.DataFrame(snmp_routes)[["dest","mask","nexthop","route_type","proto","fetched_at"]]
                     df_rt_icmp.columns = ["宛先","マスク","ネクストホップ","タイプ","プロトコル","取得時刻"]
@@ -2994,14 +3065,23 @@ snmp-server trap enable
                         with st.spinner("pcap を解析中..."):
                             import pcap_analyzer
                             pcap_result = pcap_analyzer.analyze_pcap(pcap_bytes)
+                            pcap_convs   = pcap_analyzer.get_conversations(pcap_bytes)
+                            pcap_talkers = pcap_analyzer.get_top_talkers(pcap_bytes)
+                        # 「📦 パケット解析」タブと同じセッション状態に格納する。
+                        # これにより取得経路（アップロード/SCP/EPC）によらず同じ解析結果表示・
+                        # 同じ「🤖 AI診断実行」ボタンが使えるようになる。
+                        st.session_state["_pcap_key"]     = f"epc_{dl_ip}_{dl_file}"
+                        st.session_state["_pcap_res"]     = pcap_result
+                        st.session_state["_pcap_convs"]   = pcap_convs
+                        st.session_state["_pcap_talkers"] = pcap_talkers
+
                         # 解析結果を表示
                         st.markdown("#### 📊 pcap 解析結果")
-                        summary = pcap_result.get("summary", {})
                         sr1, sr2, sr3, sr4 = st.columns(4)
-                        sr1.metric("総パケット数", summary.get("total_packets", 0))
-                        sr2.metric("ICMP Redirect", summary.get("icmp_redirects", 0))
-                        sr3.metric("TCP RST", summary.get("tcp_rst", 0))
-                        sr4.metric("キャプチャ時間", f"{summary.get('duration_sec',0):.1f}s")
+                        sr1.metric("総パケット数", pcap_result.get("total_packets", 0))
+                        sr2.metric("ICMP Redirect", len(pcap_result.get("icmp_redirects", [])))
+                        sr3.metric("TCP問題フロー", len(pcap_result.get("tcp_issues", [])))
+                        sr4.metric("キャプチャ時間", f"{pcap_result.get('capture_duration_sec', 0):.1f}s")
 
                         redirects = pcap_result.get("icmp_redirects", [])
                         if redirects:
@@ -3026,6 +3106,9 @@ snmp-server trap enable
                             file_name=dl_file.split("/")[-1],
                             mime="application/octet-stream",
                         )
+
+                        # 全ページ共通の「🤖 AI診断実行」ボタン（詳細な内訳表は「📦 パケット解析」タブ参照）
+                        _render_pcap_ai_diagnosis(pcap_result, key_prefix="epc")
                     else:
                         st.error(f"ダウンロード失敗: {err}")
 
@@ -3727,7 +3810,16 @@ with tab_pcap:
             res     = st.session_state["_pcap_res"]
             convs   = st.session_state["_pcap_convs"]
             talkers = st.session_state["_pcap_talkers"]
+    elif st.session_state.get("_pcap_res"):
+        # SCP/EPCなど、アップロード以外の経路で取得済みのpcap結果があればそちらを使う
+        # （取得経路によらず、同じ解析結果表示・同じAI診断ボタンを使うための統一処理）
+        res     = st.session_state["_pcap_res"]
+        convs   = st.session_state.get("_pcap_convs", [])
+        talkers = st.session_state.get("_pcap_talkers", [])
+    else:
+        res = None
 
+    if res is not None:
         if res["error"]:
             st.error(f"解析エラー: {res['error']}")
         else:
@@ -3774,47 +3866,8 @@ with tab_pcap:
                           delta="⚠️ 要確認" if res.get("dhcp_issues") else None)
             st.caption(f"📅 キャプチャ範囲: {res['capture_start']} 〜 {res['capture_end']}")
 
-            # ── pcap 総合 AI 診断 ──────────────────────
-            st.markdown("---")
-            _llm_ok = (analyzer.check_claude_available() or analyzer.check_gemini_available()
-                       or analyzer.check_groq_available() or analyzer.check_ollama_available())
-            _ai_col1, _ai_col2 = st.columns([5, 1])
-            _ai_col1.markdown("### 🤖 pcap 総合 AI 診断")
-            _ai_col1.caption("TCP / DNS / DHCP / HTTP / TLS / VoIP / ICMP / ARP の全解析結果を LLM に投げて根本原因を推定します。")
-            with _ai_col2:
-                _pcap_ai_btn = st.button("🤖 AI診断実行", key="pcap_ai_diag_main",
-                                         disabled=not _llm_ok, use_container_width=True,
-                                         type="primary")
-            if not _llm_ok:
-                st.caption("AI診断を使うにはサイドバーの「🔑 APIキー設定」でClaude / Gemini / Groqのいずれかを設定してください。")
-
-            if _pcap_ai_btn:
-                with st.spinner("LLM がpcap解析結果を総合分析中..."):
-                    _pcap_diag = analyzer.diagnose_pcap(res, st.session_state.get("llm_mode", "auto"))
-                st.session_state["_pcap_diag"] = _pcap_diag
-
-            _pcap_diag = st.session_state.get("_pcap_diag")
-            if _pcap_diag:
-                _health = _pcap_diag.get("overall_health", "")
-                _health_color = {"正常": "🟢", "要注意": "🟡", "問題あり": "🟠", "重大": "🔴"}.get(_health, "⚪")
-                st.markdown(f"**総合評価: {_health_color} {_health}**")
-                st.markdown(f"{_pcap_diag.get('summary','')}")
-
-                _issues = _pcap_diag.get("top_issues", [])
-                if _issues:
-                    st.markdown("**検出された問題（優先順）:**")
-                    for _iss in _issues:
-                        _sev = _iss.get("severity", "")
-                        _sev_icon = {"高": "🔴", "中": "🟡", "低": "🟢"}.get(_sev, "⚪")
-                        with st.expander(f"{_sev_icon} [{_iss.get('category','')}] {_iss.get('description','')}"):
-                            st.markdown(f"**原因推定:** {_iss.get('root_cause','')}")
-                            st.markdown(f"**推奨対応:** {_iss.get('action','')}")
-
-                if _pcap_diag.get("positive_findings"):
-                    st.markdown("**✅ 問題なし:** " + " / ".join(_pcap_diag["positive_findings"]))
-                st.info(f"**🚨 最優先対応:** {_pcap_diag.get('priority_action','')}")
-                st.caption(f"診断モデル: {_pcap_diag.get('diagnosis_model','')} | "
-                           f"LLMモード: {st.session_state.get('llm_mode','auto')}")
+            # ── pcap 総合 AI 診断（全ページ共通部品） ──────
+            _render_pcap_ai_diagnosis(res, key_prefix="main")
 
             # ── ICMP redirect 詳細 ─────────────────────
             st.markdown("---")
@@ -3945,10 +3998,16 @@ with tab_pcap:
                         router_ips = df_red["router_ip"].unique().tolist()
                         sel_router = router_ips[0] if router_ips else ""
 
-                        # routing summary（SNMP or コンフィグ）
+                        # routing summary（RESTCONF > SNMP > コンフィグ の優先順）
                         routing_summary = ""
+                        _rc_routes_router = st.session_state.get(f"rc_routes_{sel_router}")
                         snmp_routes = snmp_poller.get_routing_table(sel_router)
-                        if snmp_routes:
+                        if _rc_routes_router:
+                            routing_summary = "\n".join(
+                                f"{r['dest']}/{r['mask']} via {r['nexthop']} ({r['proto']})"
+                                for r in _rc_routes_router
+                            )
+                        elif snmp_routes:
                             routing_summary = "\n".join(
                                 f"{r['dest']}/{r['mask']} via {r['nexthop']} ({r['proto']})"
                                 for r in snmp_routes
