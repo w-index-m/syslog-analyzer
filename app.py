@@ -252,6 +252,45 @@ def _render_pcap_ai_diagnosis(res: dict, key_prefix: str = "main"):
         st.caption(f"診断モデル: {_pcap_diag.get('diagnosis_model','')} | "
                    f"LLMモード: {st.session_state.get('llm_mode','auto')}")
 
+    # ── 複数Ollamaモデルによる多面解析（ローカル限定） ──
+    # クラウドAPIと違いOllamaは呼び出し課金・レート制限がないため、
+    # 導入済みモデルが複数あれば同じデータを全モデルに投げて比較する価値がある。
+    if analyzer.check_ollama_available():
+        _installed_models = analyzer.list_ollama_models()
+        if len(_installed_models) >= 2:
+            with st.expander("🔬 複数のOllamaモデルで多面解析（無料・ローカルのみ）"):
+                st.caption("導入済みのOllamaモデルに同じデータを投げて、診断結果を比較します。"
+                           "ローカル実行のためクラウドAPIのクオータは消費しません。")
+                _sel_models = st.multiselect(
+                    "比較するモデルを選択", _installed_models,
+                    default=_installed_models[:2], key=f"ollama_multi_sel_{key_prefix}")
+                if st.button("▶ 選択したモデルで比較解析", key=f"ollama_multi_run_{key_prefix}",
+                             disabled=not _sel_models, use_container_width=True):
+                    _multi_results = {}
+                    _progress = st.progress(0.0)
+                    for _mi, _mname in enumerate(_sel_models):
+                        with st.spinner(f"{_mname} で分析中... ({_mi+1}/{len(_sel_models)})"):
+                            _multi_results[_mname] = analyzer.diagnose_pcap_with_ollama_model(res, _mname)
+                        _progress.progress((_mi + 1) / len(_sel_models))
+                    st.session_state[f"_pcap_ollama_multi_{key_prefix}"] = _multi_results
+
+                _multi_results = st.session_state.get(f"_pcap_ollama_multi_{key_prefix}")
+                if _multi_results:
+                    _model_tabs = st.tabs(list(_multi_results.keys()))
+                    for _mtab, (_mname, _mres) in zip(_model_tabs, _multi_results.items()):
+                        with _mtab:
+                            if not _mres:
+                                st.error("このモデルでは診断結果を取得できませんでした（応答形式エラー・タイムアウト等）。")
+                                continue
+                            _mhealth = _mres.get("overall_health", "")
+                            _mcolor = {"正常": "🟢", "要注意": "🟡", "問題あり": "🟠", "重大": "🔴"}.get(_mhealth, "⚪")
+                            st.markdown(f"**総合評価: {_mcolor} {_mhealth}**")
+                            st.markdown(_mres.get("summary", ""))
+                            for _iss in _mres.get("top_issues", []):
+                                _sev_icon = {"高": "🔴", "中": "🟡", "低": "🟢"}.get(_iss.get("severity", ""), "⚪")
+                                st.markdown(f"- {_sev_icon} [{_iss.get('category','')}] {_iss.get('description','')}")
+                            st.caption(f"🚨 最優先対応: {_mres.get('priority_action','')}")
+
 # ─────────────────────────────────────────
 # ページ設定
 # ─────────────────────────────────────────

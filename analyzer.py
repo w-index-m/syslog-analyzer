@@ -1339,3 +1339,30 @@ def diagnose_pcap(pcap_result: dict, mode: str = "auto") -> dict:
             "diagnosis_model": "ルールベース",
         }
     return result
+
+
+def diagnose_pcap_with_ollama_model(pcap_result: dict, model_name: str) -> dict | None:
+    """
+    pcap診断を、指定したOllamaモデル1つで実行する（グローバルOLLAMA_MODELは使わない）。
+    導入済みの複数モデルで多面解析する用途向け。ローカルOllamaは呼び出し課金・
+    レート制限がないため、クラウドAPIと違って複数モデル比較のコストが低い。
+    失敗時は None を返す。
+    """
+    prompt = _build_pcap_prompt(pcap_result)
+    try:
+        resp = requests.post(
+            f"{OLLAMA_BASE_URL}/api/chat",
+            json={"model": model_name,
+                  "messages": [{"role": "system", "content": _PCAP_SYSTEM_PROMPT},
+                               {"role": "user",   "content": prompt}],
+                  "stream": False, "options": {"temperature": 0.1}},
+            timeout=180,
+        )
+        resp.raise_for_status()
+        text = resp.json()["message"]["content"].strip().replace("```json", "").replace("```", "").strip()
+        r = json.loads(text)
+        r["diagnosis_model"] = f"ollama/{model_name}"
+        return r
+    except Exception as e:
+        print(f"[pcap diag:Ollama/{model_name}] {e}")
+        return None
