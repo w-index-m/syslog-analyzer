@@ -4065,21 +4065,32 @@ with tab_pcap:
                                     f"リスク {_hr['risk_score']}/100（{_hr['risk_level']}）: "
                                     + " + ".join(_hr["factors"]))
 
-                # シグネチャ型（CVE/推奨対応つき）
+                # シグネチャ型（CVE/推奨対応つき・重大度フィルタあり）
                 if _ips_alerts:
                     _crit = sum(1 for a in _ips_alerts if a["severity"] == "critical")
                     _high = sum(1 for a in _ips_alerts if a["severity"] == "high")
                     st.markdown(f"**🔴 シグネチャ型検知: {len(_ips_alerts)}件**（重大 {_crit} / 高 {_high}）")
+                    # 重大度で絞り込み（ET Open等を取り込むと件数が増えるため）
+                    _sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+                    _sev_filter = st.selectbox(
+                        "表示する最低重大度", ["すべて", "medium以上", "high以上", "criticalのみ"],
+                        key="ips_sev_filter")
+                    _sev_max = {"すべて": 3, "medium以上": 2, "high以上": 1, "criticalのみ": 0}[_sev_filter]
+                    _ips_view = [a for a in _ips_alerts
+                                 if _sev_order.get(a["severity"], 9) <= _sev_max]
+                    if not _ips_view:
+                        st.caption("この重大度に該当する検知はありません。")
                     _sev_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
-                    df_ips = pd.DataFrame(_ips_alerts)
-                    df_ips["重大度"] = df_ips["severity"].map(lambda s: f"{_sev_icon.get(s,'⚪')} {s}")
-                    _ips_cols = ["重大度", "category", "cve", "protocol", "src", "dst", "dst_port", "count"]
-                    df_ips_show = df_ips[_ips_cols].rename(columns={
-                        "category": "攻撃カテゴリ", "cve": "CVE", "protocol": "プロトコル",
-                        "src": "送信元IP", "dst": "宛先IP", "dst_port": "宛先Port", "count": "回数"})
-                    _show_table_top_n(df_ips_show, "ips_signature_alerts.csv", "dl_ips_csv")
+                    if _ips_view:
+                        df_ips = pd.DataFrame(_ips_view)
+                        df_ips["重大度"] = df_ips["severity"].map(lambda s: f"{_sev_icon.get(s,'⚪')} {s}")
+                        _ips_cols = ["重大度", "category", "cve", "protocol", "src", "dst", "dst_port", "count"]
+                        df_ips_show = df_ips[_ips_cols].rename(columns={
+                            "category": "攻撃カテゴリ", "cve": "CVE", "protocol": "プロトコル",
+                            "src": "送信元IP", "dst": "宛先IP", "dst_port": "宛先Port", "count": "回数"})
+                        _show_table_top_n(df_ips_show, "ips_signature_alerts.csv", "dl_ips_csv")
                     with st.expander("検知の詳細・推奨対応を見る"):
-                        for _a in _ips_alerts[:20]:
+                        for _a in _ips_view[:20]:
                             st.markdown(f"**{_sev_icon.get(_a['severity'],'⚪')} {_a['category']}** "
                                         f"({_a['src']}→{_a['dst']}:{_a['dst_port']})"
                                         + (f" / {_a['cve']}" if _a.get('cve') else ""))
