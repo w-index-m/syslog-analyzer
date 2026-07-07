@@ -4469,13 +4469,43 @@ with tab_pcap:
 
             # ── 🚩 CTF/フォレンジック機能 ────────────────
             _ctf_hits = res.get("ctf_flag_hits", [])
-            if _ctf_hits or streams:
+            _dns_tun = res.get("dns_tunneling", [])
+            _icmp_exfil = res.get("icmp_exfil", [])
+            if _ctf_hits or streams or _dns_tun or _icmp_exfil:
                 st.markdown("---")
                 st.markdown("### 🚩 CTF / フォレンジック機能")
-                st.caption("ネットワークフォレンジック系CTF問題向け。flag{...}パターン・Base64らしき"
-                           "文字列の検出と、TCPストリームの再構成（Wiresharkの「Follow TCP Stream」相当）・"
-                           "埋め込みファイルの抽出（ファイルカービング）ができます。"
+                st.caption("ネットワークフォレンジック系CTF問題向け。flag{...}/Base64検出、"
+                           "TCPストリーム再構成（Follow TCP Stream）、埋め込みファイル抽出、"
+                           "DNS/ICMPトンネリング検出、多段エンコード自動デコードができます。"
                            "いずれもヒューリスティックのため、必ず内容を目視確認してください。")
+
+                # DNSトンネリング検出
+                if _dns_tun:
+                    st.markdown("**🕳️ DNSトンネリング/エクスフィルの兆候**")
+                    for _dt in _dns_tun:
+                        st.error(f"🔴 {_dt['detail']}")
+                    df_dt = pd.DataFrame(_dns_tun)
+                    df_dt = df_dt[["domain", "query_count", "avg_subdomain_len", "max_subdomain_len",
+                                    "qtypes", "client_count"]]
+                    df_dt.columns = ["ベースドメイン", "クエリ数", "平均サブ長", "最大サブ長",
+                                      "クエリ型", "クライアント数"]
+                    st.dataframe(df_dt, use_container_width=True, hide_index=True)
+                    with st.expander("サブドメインのサンプルを見る"):
+                        for _dt in _dns_tun:
+                            st.markdown(f"**{_dt['domain']}**")
+                            for _s in _dt["sample_subdomains"]:
+                                _dec = pcap_analyzer.multi_layer_decode(_s)
+                                _note = f" → デコード: `{_dec['final'][:60]}`" if _dec["steps"] else ""
+                                st.code(_s + _note)
+
+                # ICMPエクスフィル検出
+                if _icmp_exfil:
+                    st.markdown("**🕳️ ICMPトンネリング/エクスフィルの兆候**")
+                    for _ie in _icmp_exfil:
+                        st.error(f"🔴 {_ie['detail']}")
+                        for _f in _ie["findings"]:
+                            _icon = "🚩" if _f["type"] == "flag_pattern" else "🔤"
+                            st.success(f"{_icon} {_f['text']}")
 
                 if _ctf_hits:
                     st.markdown("**🚩 検出されたflag候補・Base64候補**")
@@ -4573,6 +4603,27 @@ with tab_pcap:
                         data=_stream_full, file_name="tcp_stream.bin",
                         mime="application/octet-stream", key="dl_stream_raw",
                     )
+
+                # 多段エンコード自動デコーダー（手動入力）
+                st.markdown("**🔓 多段エンコード自動デコーダー**")
+                st.caption("Base64 / Hex / URL / gzip / zlib / ROT13 を自動で数段試し、flagが出るまでデコードします。")
+                _ml_input = st.text_area("デコードしたい文字列を貼り付け", height=80, key="ml_decode_input",
+                                          placeholder="例: 多段エンコードされた文字列（H4sIA... など）")
+                if st.button("🔓 自動デコード", key="ml_decode_btn"):
+                    if _ml_input.strip():
+                        _ml_res = pcap_analyzer.multi_layer_decode(_ml_input.strip())
+                        if _ml_res["steps"]:
+                            st.markdown("**デコード手順:** " + " → ".join(s["method"] for s in _ml_res["steps"]))
+                            for _si, _st in enumerate(_ml_res["steps"], 1):
+                                st.code(f"{_si}. [{_st['method']}] {_st['preview']}")
+                        if _ml_res["flag"]:
+                            st.success(f"🚩 flag発見: {_ml_res['flag']}")
+                        elif _ml_res["steps"]:
+                            st.info(f"最終結果: `{_ml_res['final']}`")
+                        else:
+                            st.warning("デコードできませんでした（対応形式: Base64/Hex/URL/gzip/zlib/ROT13）。")
+                    else:
+                        st.warning("文字列を入力してください。")
 
             # ── HTTP 解析 ────────────────────────────────
             _http_errs = res.get("http_errors", [])

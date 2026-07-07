@@ -759,14 +759,16 @@ def _pcap_session_id_demo() -> bytes:
 def _pcap_ctf_challenge() -> bytes:
     """
     パケットフォレンジックのCTF練習問題デモ。
-    「🚩 CTF / フォレンジック機能」で解ける3種類の仕掛けを1つのpcapに用意する。
-      ① flagが2パケットにまたがって分割されている
-         （1パケット単体のスキャンでは見つからず、TCPストリーム再構成で見える）
-      ② Base64で隠されたヒントデータ（ストリーム検索でBase64候補として検出される）
-      ③ PNGファイルが2パケットに分割して送られている（ファイルカービングで抽出可能）
+    「🚩 CTF / フォレンジック機能」で解ける仕掛けを1つのpcapに用意する。
+      ① flagが2パケットにまたがって分割（TCPストリーム再構成で見える）
+      ② Base64で隠されたヒント（ストリーム検索/自動デコード）
+      ③ PNGファイルが分割送信（ファイルカービングで抽出）
+      ④ DNSトンネリング（長いサブドメインで大量クエリ）
+      ⑤ ICMPエクスフィル（pingペイロードにflag）
+      ⑥ 多段エンコード（Base64→gzip→Base64）されたflag
     """
     pkts = []
-    t = time.time() - 90
+    t = time.time() - 120
 
     client, server = "192.168.10.30", "203.0.113.200"
 
@@ -801,6 +803,29 @@ def _pcap_ctf_challenge() -> bytes:
     t += 0.15
     pkts.append((t, _ip_tcp(server, client, 8082, 51500,
                              dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=3000 + 25, data=png_bytes[25:])))
+    t += 1.0
+
+    # ⑤ DNSトンネリング: 長いBase32サブドメインで evil ドメインへ大量クエリ
+    for i in range(30):
+        _sub = base64.b32encode(f"exfil_chunk_{i:04d}_secret_data".encode()).decode().rstrip("=").lower()
+        _q = _dns_query(client, f"{_sub}.tunnel.evil-c2.example", 20000 + i)
+        if _q:
+            pkts.append((t, _q))
+            t += 0.05
+
+    # ⑥ ICMPエクスフィル: pingペイロードにflagを埋め込む
+    for i in range(3):
+        _icmp_payload = f"flag{{icmp_ping_exfil_{i}}}".encode() + b"\x00" * 16
+        pkts.append((t, _ip_icmp("192.168.10.31", "203.0.113.201", 8, 0,
+                                  struct.pack("!HH", 1, i) + _icmp_payload)))
+        t += 0.3
+
+    # ⑦ 多段エンコード（Base64→gzip→Base64）されたflagをHTTPヘッダに埋め込む
+    import gzip as _gz
+    _ml = base64.b64encode(_gz.compress(b"flag{multi_layer_encoded}")).decode()
+    pkts.append((t, _ip_tcp(client, server, 51600, 8083,
+                             dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=5000,
+                             data=f"X-Payload: {_ml}\r\n".encode())))
 
     return _write_pcap(pkts)
 

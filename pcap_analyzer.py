@@ -4,10 +4,14 @@ ICMP redirect を中心に RIP / ARP / TCP / DNS / HTTP / TLS / DHCP /
 IPフラグメント / フロー解析 / pcap内syslog を抽出する。
 """
 import base64
+import binascii
+import gzip
 import io
 import re
 import struct
 import socket
+import urllib.parse
+import zlib
 from collections import defaultdict
 from datetime import datetime
 
@@ -134,6 +138,118 @@ def try_decode_base64(text: str) -> str | None:
     except Exception:
         pass
     return None
+
+
+def _mostly_printable(b: bytes, threshold: float = 0.85) -> bool:
+    if not b:
+        return False
+    try:
+        s = b.decode("utf-8", errors="strict")
+    except Exception:
+        return False
+    printable = sum(1 for c in s if c.isprintable() or c in "\r\n\t")
+    return printable / len(s) >= threshold
+
+
+def _dec_base64(b: bytes):
+    text = b.decode("ascii", errors="strict").strip()
+    core = re.sub(r"\s", "", text)
+    if not re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", core) or len(core) < 8 or len(core) % 4 == 1:
+        return None
+    return base64.b64decode(core + "=" * (-len(core) % 4), validate=False)
+
+
+def _dec_hex(b: bytes):
+    text = re.sub(r"\s", "", b.decode("ascii", errors="strict")).strip()
+    if len(text) < 8 or len(text) % 2 != 0 or not re.fullmatch(r"[0-9A-Fa-f]+", text):
+        return None
+    return binascii.unhexlify(text)
+
+
+def _dec_url(b: bytes):
+    text = b.decode("utf-8", errors="strict")
+    if "%" not in text:
+        return None
+    out = urllib.parse.unquote_to_bytes(text)
+    return out if out != b else None
+
+
+def _dec_gzip(b: bytes):
+    if len(b) < 2 or b[:2] != b"\x1f\x8b":
+        return None
+    return gzip.decompress(b)
+
+
+def _dec_zlib(b: bytes):
+    if len(b) < 2 or b[0] != 0x78:
+        return None
+    return zlib.decompress(b)
+
+
+_ROT13_TABLE = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+    "NOPQRSTUVWXYZABCDEFGHIJKLMnopqrstuvwxyzabcdefghijklm")
+
+_DECODERS = [
+    ("base64", _dec_base64),
+    ("hex", _dec_hex),
+    ("url", _dec_url),
+    ("gzip", _dec_gzip),
+    ("zlib", _dec_zlib),
+    ("rot13", lambda b: b.decode("ascii", errors="strict").translate(_ROT13_TABLE).encode()
+     if re.search(r"[A-Za-z]", b.decode("ascii", errors="ignore")) else None),
+]
+
+
+# よくあるflag接頭辞。多段デコードの「本物のflag」判定に使う
+# （ROT13等では中間結果も {} を持つため、接頭辞で本物を見分ける）。
+_KNOWN_FLAG_PREFIXES = ("flag", "ctf", "key", "pctf", "htb", "thm", "picoctf", "fwctf")
+
+
+def _looks_like_real_flag(m) -> bool:
+    prefix = m.group(0).split(b"{", 1)[0].decode("ascii", errors="ignore").lower()
+    return any(p in prefix for p in _KNOWN_FLAG_PREFIXES)
+
+
+def multi_layer_decode(data, max_rounds: int = 6) -> dict:
+    """
+    多段エンコードされたデータを自動デコードする。
+    base64 / hex / URL / gzip / zlib / ROT13 を順に試し、既知接頭辞のflag{...}が
+    出るか、それ以上デコードできなくなるまで繰り返す（CTFの多段エンコード問題向け）。
+    戻り値: {"steps": [{"method","preview"}], "final": str, "flag": str|None}
+    """
+    if isinstance(data, str):
+        data = data.encode("utf-8", errors="ignore")
+    steps = []
+    current = data
+    seen = {current}
+    for _ in range(max_rounds):
+        flag_m = _CTF_FLAG_RE.search(current)
+        if flag_m and _looks_like_real_flag(flag_m):
+            return {"steps": steps, "final": current.decode("utf-8", errors="ignore")[:500],
+                    "flag": flag_m.group(0).decode("utf-8", errors="ignore")}
+        progressed = False
+        for name, fn in _DECODERS:
+            try:
+                out = fn(current)
+            except Exception:
+                out = None
+            if not out or out in seen or len(out) > 1_000_000:
+                continue
+            # 意味のある結果のみ採用: 印字可能 / flagを含む / 既知の圧縮形式ヘッダ
+            if (_mostly_printable(out) or _CTF_FLAG_RE.search(out)
+                    or out[:2] == b"\x1f\x8b" or (out and out[0] == 0x78)):
+                steps.append({"method": name, "preview": out.decode("utf-8", errors="replace")[:200]})
+                seen.add(out)
+                current = out
+                progressed = True
+                break
+        if not progressed:
+            break
+    final_text = current.decode("utf-8", errors="ignore")
+    flag_m = _CTF_FLAG_RE.search(current)
+    return {"steps": steps, "final": final_text[:500],
+            "flag": flag_m.group(0).decode("utf-8", errors="ignore") if flag_m else None}
 
 
 def scan_ctf_indicators(payload: bytes) -> list:
@@ -425,6 +541,8 @@ def analyze_pcap(data: bytes) -> dict:
         "tcp_syn_no_synack": [], "tcp_zero_window": [],
         "scan_patterns": [],
         "ctf_flag_hits": [],
+        "dns_tunneling": [],
+        "icmp_exfil": [],
         "ip_fragments": [],
         "http_errors": [],    "http_summary": {},
         "tls_sessions": [],   "tls_alerts": [],
@@ -482,6 +600,12 @@ def analyze_pcap(data: bytes) -> dict:
 
     # CTF問題向け flag{...}/Base64候補の検出結果
     ctf_flag_hits: list = []
+
+    # DNSトンネリング検出用: ベースドメイン -> {queries, sub_lengths, qtypes, sample_subs, clients}
+    dns_by_domain: dict[str, dict] = {}
+
+    # ICMPエクスフィル検出用: echo(type 0/8)のペイロード収集
+    icmp_echo_payloads: list = []
 
     def _record_unknown_hint(proto_name, src, dst, sp, dp, payload, ts):
         kw = _find_unknown_proto_keywords(payload)
@@ -553,6 +677,16 @@ def analyze_pcap(data: bytes) -> dict:
                             "gateway": gw, "orig_src": orig_src, "orig_dst": orig_dst,
                             "orig_proto": orig_proto, "code": icmp.code, "code_desc": code_desc,
                         })
+                    elif t in (0, 8):  # Echo Reply / Request → エクスフィル検査用にペイロード収集
+                        try:
+                            _icmp_pl = bytes(icmp.data.data) if hasattr(icmp.data, "data") else bytes(icmp.data)
+                        except Exception:
+                            _icmp_pl = b""
+                        if _icmp_pl:
+                            icmp_echo_payloads.append({
+                                "ts": ts, "src": src, "dst": dst,
+                                "type": "request" if t == 8 else "reply", "payload": _icmp_pl,
+                            })
 
                 # ── TCP ─────────────────────────────────
                 elif isinstance(ip.data, dpkt.tcp.TCP):
@@ -705,6 +839,21 @@ def analyze_pcap(data: bytes) -> dict:
                                     "ts": ts, "src": src, "dst": dst,
                                     "name": q_name, "qtype": q_type,
                                 }
+                                # DNSトンネリング検出用にベースドメイン単位で集計
+                                if q_name and "." in q_name:
+                                    _labels = q_name.split(".")
+                                    _base = ".".join(_labels[-2:]) if len(_labels) >= 2 else q_name
+                                    _sub = ".".join(_labels[:-2]) if len(_labels) > 2 else ""
+                                    _d = dns_by_domain.setdefault(_base, {
+                                        "queries": 0, "sub_len_total": 0, "qtypes": set(),
+                                        "sample_subs": [], "clients": set(), "max_sub_len": 0})
+                                    _d["queries"] += 1
+                                    _d["sub_len_total"] += len(_sub)
+                                    _d["max_sub_len"] = max(_d["max_sub_len"], len(_sub))
+                                    _d["qtypes"].add(q_type)
+                                    _d["clients"].add(src)
+                                    if _sub and len(_d["sample_subs"]) < 5:
+                                        _d["sample_subs"].append(_sub[:60])
                             else:
                                 result["dns_summary"]["responses"] += 1
                                 rcode = dns["rcode"]
@@ -1082,6 +1231,58 @@ def analyze_pcap(data: bytes) -> dict:
         _seen_ctf.add(_ckey)
         result["ctf_flag_hits"].append(h)
     result["ctf_flag_hits"].sort(key=lambda x: 0 if x["type"] == "flag_pattern" else 1)
+
+    # ── DNSトンネリング/エクスフィルの兆候検出 ──
+    # 同一ベースドメインへの大量クエリ＋長い/高エントロピーなサブドメイン、
+    # あるいはTXT/NULL型の多用は、DNSトンネリングの典型的な兆候。
+    for _base, _d in dns_by_domain.items():
+        if _d["queries"] < 20:
+            continue
+        avg_sub = _d["sub_len_total"] / _d["queries"]
+        _suspicious = avg_sub >= 20 or _d["max_sub_len"] >= 40 or \
+            bool(_d["qtypes"] & {"TXT", "NULL", "CNAME"}) and avg_sub >= 10
+        if _suspicious:
+            result["dns_tunneling"].append({
+                "domain": _base,
+                "query_count": _d["queries"],
+                "avg_subdomain_len": round(avg_sub, 1),
+                "max_subdomain_len": _d["max_sub_len"],
+                "qtypes": ",".join(sorted(_d["qtypes"])),
+                "client_count": len(_d["clients"]),
+                "sample_subdomains": _d["sample_subs"],
+                "detail": f"ドメイン {_base} へ {_d['queries']}件のクエリ、"
+                          f"平均サブドメイン長 {avg_sub:.0f}文字（最大{_d['max_sub_len']}）"
+                          f"— DNSトンネリング/データ持ち出しの可能性",
+            })
+    result["dns_tunneling"].sort(key=lambda x: x["query_count"], reverse=True)
+
+    # ── ICMPエクスフィル検出 ──
+    # ping(echo)のペイロードに flag/Base64 やデコード可能なデータが含まれていれば
+    # データ持ち出しの疑い。通常のping(連番バイトや固定パターン)は無視する。
+    _icmp_pair_hits: dict = {}
+    for e in icmp_echo_payloads:
+        _hits = scan_ctf_indicators(e["payload"])
+        _ml = multi_layer_decode(e["payload"])
+        _has_data = bool(_hits) or bool(_ml.get("flag"))
+        if _has_data:
+            _key = (e["src"], e["dst"])
+            _entry = _icmp_pair_hits.setdefault(_key, {
+                "src": e["src"], "dst": e["dst"], "packet_count": 0,
+                "findings": [], "sample": ""})
+            _entry["packet_count"] += 1
+            if not _entry["sample"]:
+                _entry["sample"] = e["payload"][:80].decode("utf-8", errors="replace")
+            for _h in _hits:
+                if _h["text"] not in [f.get("text") for f in _entry["findings"]]:
+                    _entry["findings"].append(_h)
+            if _ml.get("flag") and _ml["flag"] not in [f.get("text") for f in _entry["findings"]]:
+                _entry["findings"].append({"type": "flag_pattern", "text": _ml["flag"], "decoded": ""})
+    for _entry in _icmp_pair_hits.values():
+        _entry["detail"] = (f"{_entry['src']} → {_entry['dst']} のICMP echoペイロードに"
+                            f"flag/エンコードデータを検出（{_entry['packet_count']}パケット）"
+                            "— ICMPトンネリング/データ持ち出しの可能性")
+        result["icmp_exfil"].append(_entry)
+    result["icmp_exfil"].sort(key=lambda x: x["packet_count"], reverse=True)
 
     return result
 
