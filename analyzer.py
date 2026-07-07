@@ -1373,6 +1373,65 @@ def diagnose_pcap(pcap_result: dict, mode: str = "auto") -> dict:
     return result
 
 
+def _run_agentic_claude_loop(prompt: str, system_prompt: str, tools: list,
+                              tool_executor, max_tool_rounds: int = 3,
+                              max_tokens: int = 1500) -> dict | None:
+    """
+    Claude tool use を使った汎用エージェントループ（LLM推定を行う各診断関数で共通利用）。
+    tool_executor(name: str, tool_input: dict) -> str（JSON文字列）を呼び出し側が渡す。
+    最終応答をJSONとしてparseし、実際に呼ばれたツール呼び出しの記録を
+    tool_calls_made（文字列リスト）として結果に含めて返す。
+    Claude APIキー未設定・応答形式エラー・ラウンド上限到達時はNoneを返す
+    （呼び出し側で通常の一括診断へフォールバックする想定）。
+    """
+    if not ANTHROPIC_API_KEY:
+        return None
+    messages = [{"role": "user", "content": prompt}]
+    tool_calls_made = []
+    try:
+        for _ in range(max_tool_rounds):
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": ANTHROPIC_API_KEY,
+                         "anthropic-version": "2023-06-01",
+                         "content-type": "application/json"},
+                json={"model": "claude-sonnet-4-6", "max_tokens": max_tokens,
+                      "system": system_prompt,
+                      "tools": tools,
+                      "messages": messages},
+                timeout=45,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            messages.append({"role": "assistant", "content": data["content"]})
+
+            if data.get("stop_reason") != "tool_use":
+                text_blocks = [b["text"] for b in data["content"] if b.get("type") == "text"]
+                text = "\n".join(text_blocks).strip().replace("```json", "").replace("```", "").strip()
+                result = json.loads(text)
+                result["tool_calls_made"] = tool_calls_made
+                return result
+
+            tool_results = []
+            for block in data["content"]:
+                if block.get("type") != "tool_use":
+                    continue
+                tool_name = block.get("name", "")
+                tool_input = block.get("input", {})
+                tool_calls_made.append(f"{tool_name}({tool_input})")
+                result_text = tool_executor(tool_name, tool_input)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block["id"],
+                    "content": result_text,
+                })
+            messages.append({"role": "user", "content": tool_results})
+        return None
+    except Exception as e:
+        print(f"[agentic loop] {e}")
+        return None
+
+
 _ID_CORRELATION_TOOL = {
     "name": "get_id_correlation_detail",
     "description": ("ID/session突き合わせで検出された特定のID値について、"
@@ -1406,60 +1465,102 @@ def diagnose_pcap_agentic(pcap_result: dict, max_tool_rounds: int = 3) -> dict |
     Claude の tool use 機能を使い、ID/session突き合わせ結果についてLLMが
     自分で「詳しく見せて」とツール呼び出しで深掘りしながらpcap診断を行う
     （エージェント的診断のMVP。ID/session相関の深掘りのみ対応）。
-    Claude APIキー未設定時、または応答形式エラー時はNoneを返す
-    （呼び出し側で通常のdiagnose_pcapへフォールバックする想定）。
     """
-    if not ANTHROPIC_API_KEY:
-        return None
     prompt = _build_pcap_prompt(pcap_result)
-    messages = [{"role": "user", "content": prompt}]
-    tool_calls_made = []
 
-    try:
-        for _ in range(max_tool_rounds):
-            resp = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={"x-api-key": ANTHROPIC_API_KEY,
-                         "anthropic-version": "2023-06-01",
-                         "content-type": "application/json"},
-                json={"model": "claude-sonnet-4-6", "max_tokens": 1500,
-                      "system": _PCAP_SYSTEM_PROMPT,
-                      "tools": [_ID_CORRELATION_TOOL],
-                      "messages": messages},
-                timeout=45,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            messages.append({"role": "assistant", "content": data["content"]})
+    def _executor(name, tool_input):
+        if name == "get_id_correlation_detail":
+            return _get_id_correlation_tool_result(pcap_result, tool_input.get("id_value", ""))
+        return json.dumps({"error": "unknown tool"})
 
-            if data.get("stop_reason") != "tool_use":
-                text_blocks = [b["text"] for b in data["content"] if b.get("type") == "text"]
-                text = "\n".join(text_blocks).strip().replace("```json", "").replace("```", "").strip()
-                result = json.loads(text)
-                result["diagnosis_model"] = "claude-sonnet-4-6 (agentic)"
-                result["tool_calls_made"] = tool_calls_made
-                return result
+    result = _run_agentic_claude_loop(prompt, _PCAP_SYSTEM_PROMPT, [_ID_CORRELATION_TOOL],
+                                       _executor, max_tool_rounds, max_tokens=1500)
+    if result:
+        result["diagnosis_model"] = "claude-sonnet-4-6 (agentic)"
+    return result
 
-            tool_results = []
-            for block in data["content"]:
-                if block.get("type") != "tool_use":
-                    continue
-                if block.get("name") == "get_id_correlation_detail":
-                    id_value = block.get("input", {}).get("id_value", "")
-                    tool_calls_made.append(id_value)
-                    result_text = _get_id_correlation_tool_result(pcap_result, id_value)
-                else:
-                    result_text = json.dumps({"error": "unknown tool"})
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block["id"],
-                    "content": result_text,
-                })
-            messages.append({"role": "user", "content": tool_results})
-        return None
-    except Exception as e:
-        print(f"[pcap diag:agentic] {e}")
-        return None
+
+_METRIC_TREND_TOOL = {
+    "name": "get_metric_trend",
+    "description": ("指定した機器のメトリクス（CPU使用率・メモリ使用率など）の過去の推移(トレンド)を"
+                     "取得する。急上昇なのか継続的な高負荷なのかを判断する際に使う。"),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "oid_name": {"type": "string",
+                         "description": "確認したいメトリクス名（機器情報セクションのメトリクス名から選ぶ）"},
+            "hours": {"type": "integer", "description": "遡って確認する時間数（デフォルト6）"},
+        },
+        "required": ["oid_name"],
+    },
+}
+
+
+def diagnose_health_agentic(device_health: dict, recent_logs: list,
+                             config_context: str = "", max_tool_rounds: int = 3) -> dict | None:
+    """
+    Claude の tool use 機能を使い、機器のメトリクス推移を自分で確認しながら
+    ヘルス診断を行う（エージェント的診断のMVP。get_metric_trendによる深掘りのみ対応）。
+    """
+    ip = device_health.get("source_ip", "")
+    prompt = _build_health_prompt(device_health, recent_logs, config_context)
+
+    def _executor(name, tool_input):
+        if name == "get_metric_trend":
+            import snmp_poller as sp
+            oid_name = tool_input.get("oid_name", "")
+            hours = int(tool_input.get("hours") or 6)
+            trend = sp.get_metric_trend(ip, oid_name, hours=hours)
+            if not trend:
+                return json.dumps({"error": f"'{oid_name}' のトレンドデータが見つかりません。"}, ensure_ascii=False)
+            return json.dumps({"oid_name": oid_name, "hours": hours, "data_points": trend[:100]},
+                               ensure_ascii=False)
+        return json.dumps({"error": "unknown tool"})
+
+    return _run_agentic_claude_loop(prompt, HEALTH_SYSTEM_PROMPT, [_METRIC_TREND_TOOL],
+                                     _executor, max_tool_rounds, max_tokens=1200)
+
+
+_ROUTE_LOOKUP_TOOL = {
+    "name": "get_route_lookup",
+    "description": ("対象機器のルーティングテーブルから、指定した宛先IPに一致するルートを検索する。"
+                     "特定の宛先へのredirectがルーティング上妥当か確認する際に使う。"),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "dest_ip": {"type": "string", "description": "確認したい宛先IPアドレス"},
+        },
+        "required": ["dest_ip"],
+    },
+}
+
+
+def diagnose_icmp_redirect_agentic(ip: str, snmp_data: list, redirect_logs: list,
+                                    routing_summary: str = "", max_tool_rounds: int = 3) -> dict | None:
+    """
+    Claude の tool use 機能を使い、特定の宛先IPについてルーティングテーブルを
+    自分で検索しながらICMP redirectの根本原因を診断する
+    （エージェント的診断のMVP。get_route_lookupによる深掘りのみ対応）。
+    """
+    prompt = _build_icmp_redirect_prompt(ip, snmp_data, redirect_logs, routing_summary)
+
+    def _executor(name, tool_input):
+        if name == "get_route_lookup":
+            import snmp_poller as sp
+            dest_ip = tool_input.get("dest_ip", "")
+            match = sp.route_lookup(ip, dest_ip)
+            if not match:
+                return json.dumps(
+                    {"error": f"宛先 '{dest_ip}' に一致するルートが見つかりません（スタティックルート欠落の可能性）。"},
+                    ensure_ascii=False)
+            return json.dumps(match, ensure_ascii=False)
+        return json.dumps({"error": "unknown tool"})
+
+    result = _run_agentic_claude_loop(prompt, ICMP_REDIRECT_SYSTEM_PROMPT, [_ROUTE_LOOKUP_TOOL],
+                                       _executor, max_tool_rounds, max_tokens=1000)
+    if result:
+        result["diagnosis_model"] = "claude-sonnet-4-6 (agentic)"
+    return result
 
 
 def diagnose_pcap_with_ollama_model(pcap_result: dict, model_name: str) -> dict | None:

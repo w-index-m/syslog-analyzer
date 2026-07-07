@@ -324,6 +324,26 @@ def _render_pcap_ai_diagnosis(res: dict, key_prefix: str = "main"):
                                 st.markdown(f"- {_sev_icon} [{_iss.get('category','')}] {_iss.get('description','')}")
                             st.caption(f"🚨 最優先対応: {_mres.get('priority_action','')}")
 
+
+def _render_icmp_redirect_diagnosis_result(result: dict):
+    """analyzer.diagnose_icmp_redirect / diagnose_icmp_redirect_agentic の結果表示（共通部品）。"""
+    if not result:
+        return
+    if result.get("tool_calls_made"):
+        st.caption("🔍 確認したルート: " + ", ".join(result["tool_calls_made"]))
+    st.markdown(f"**🎯 根本原因:** {result.get('root_cause','')}")
+    if result.get("causal_chain"):
+        st.markdown("**🔗 因果連鎖:** " + " → ".join(result["causal_chain"]))
+    if result.get("routing_issue"):
+        st.markdown(f"**⚙️ ルーティング問題:** {result.get('routing_issue','')}")
+    st.markdown(f"**🚨 最優先対処:** {result.get('priority_action','')}")
+    if result.get("additional_checks"):
+        st.markdown("**📋 追加確認事項:**")
+        for c in result["additional_checks"]:
+            st.markdown(f"  - {c}")
+    st.markdown(f"**⚠️ 放置リスク:** {result.get('risk_if_ignored','')}")
+    st.caption(f"診断モデル: {result.get('diagnosis_model','')}")
+
 # ─────────────────────────────────────────
 # ページ設定
 # ─────────────────────────────────────────
@@ -1524,6 +1544,26 @@ with tab_health:
                         st.info(f"**⚡ 最優先アクション:** {diag['priority_action']}")
                     if diag.get("risk_if_ignored"):
                         st.warning(f"**⚠️ 放置リスク:** {diag['risk_if_ignored']}")
+
+                # ── エージェント診断（Claude tool use、メトリクス推移深掘りMVP） ──
+                if analyzer.check_claude_available():
+                    _hdev_ip = dh["source_ip"]
+                    if st.button("🕵️ エージェント診断（メトリクス推移を深掘り）",
+                                 key=f"health_agentic_{_hdev_ip}", use_container_width=True):
+                        with st.spinner("Claudeがメトリクス推移を確認しながら分析中..."):
+                            _recent_logs = db.get_logs(limit=10, source_ip=_hdev_ip)
+                            st.session_state[f"_health_agentic_{_hdev_ip}"] = \
+                                analyzer.diagnose_health_agentic(dh, _recent_logs)
+
+                    _hdiag = st.session_state.get(f"_health_agentic_{_hdev_ip}")
+                    if _hdiag:
+                        if _hdiag.get("tool_calls_made"):
+                            st.caption("🔍 確認したメトリクス: " + ", ".join(_hdiag["tool_calls_made"]))
+                        st.markdown(f"**診断:** {_hdiag.get('diagnosis','')}")
+                        if _hdiag.get("root_cause") and _hdiag["root_cause"] != "特になし":
+                            st.markdown(f"**🎯 根本原因:** {_hdiag['root_cause']}")
+                        if _hdiag.get("priority_action"):
+                            st.info(f"**⚡ 最優先アクション:** {_hdiag['priority_action']}")
 
                 trend = he.get_health_trend(dh["source_ip"], hours=6)
                 if len(trend) >= 2:
@@ -3215,31 +3255,30 @@ end""", language="text")
             st.markdown("**🤖 AI自動原因推定**")
             llm_ok = analyzer.check_claude_available() or analyzer.check_gemini_available() or analyzer.check_groq_available() or analyzer.check_ollama_available()
             if llm_ok:
-                if st.button("🤖 ICMP redirect根本原因をAIで診断", key="icmp_ai_diag",
-                            type="primary", use_container_width=True):
+                _icmp_c1, _icmp_c2 = st.columns(2)
+                if _icmp_c1.button("🤖 ICMP redirect根本原因をAIで診断", key="icmp_ai_diag",
+                                    type="primary", use_container_width=True):
                     with st.spinner("AIがICMP redirect原因を分析中..."):
                         dev_snmp = [r for r in icmp_rows if r["source_ip"] == sel_icmp_ip]
                         dev_logs = [l for l in redirect_logs if l.get("source_ip") == sel_icmp_ip]
-                        result = analyzer.diagnose_icmp_redirect(
+                        st.session_state["_icmp_diag_main"] = analyzer.diagnose_icmp_redirect(
                             ip=sel_icmp_ip,
                             snmp_data=dev_snmp,
                             redirect_logs=dev_logs,
                             routing_summary=routing_summary,
                             mode=st.session_state.get("llm_mode", "auto")
                         )
-                    if result:
-                        st.markdown(f"**🎯 根本原因:** {result.get('root_cause','')}")
-                        if result.get("causal_chain"):
-                            st.markdown("**🔗 因果連鎖:** " + " ".join(result["causal_chain"]))
-                        if result.get("routing_issue"):
-                            st.markdown(f"**⚙️ ルーティング問題:** {result.get('routing_issue','')}")
-                        st.markdown(f"**🚨 最優先対処:** {result.get('priority_action','')}")
-                        if result.get("additional_checks"):
-                            st.markdown("**📋 追加確認事項:**")
-                            for c in result["additional_checks"]:
-                                st.markdown(f"  - {c}")
-                        st.markdown(f"**⚠️ 放置リスク:** {result.get('risk_if_ignored','')}")
-                        st.caption(f"診断モデル: {result.get('diagnosis_model','')}")
+                if analyzer.check_claude_available():
+                    if _icmp_c2.button("🕵️ エージェント診断（ルート検索を深掘り）", key="icmp_agentic",
+                                        use_container_width=True):
+                        with st.spinner("Claudeがルーティングテーブルを検索しながら分析中..."):
+                            dev_snmp = [r for r in icmp_rows if r["source_ip"] == sel_icmp_ip]
+                            dev_logs = [l for l in redirect_logs if l.get("source_ip") == sel_icmp_ip]
+                            st.session_state["_icmp_diag_main"] = analyzer.diagnose_icmp_redirect_agentic(
+                                ip=sel_icmp_ip, snmp_data=dev_snmp,
+                                redirect_logs=dev_logs, routing_summary=routing_summary,
+                            )
+                _render_icmp_redirect_diagnosis_result(st.session_state.get("_icmp_diag_main"))
             else:
                 st.caption("AI診断を使うにはClaude APIまたはOllamaの設定が必要です")
 
@@ -4081,9 +4120,7 @@ with tab_pcap:
 
                 llm_ok = analyzer.check_claude_available() or analyzer.check_gemini_available() or analyzer.check_groq_available() or analyzer.check_ollama_available()
                 if llm_ok:
-                    if st.button("🤖 統合AI診断を実行", key="pcap_ai_diag",
-                                type="primary", use_container_width=True):
-                        # ルーターIPを自動検出
+                    def _build_integrated_icmp_context():
                         router_ips = df_red["router_ip"].unique().tolist()
                         sel_router = router_ips[0] if router_ips else ""
 
@@ -4121,29 +4158,30 @@ with tab_pcap:
 
                         dev_logs = [l for l in all_syslog_redirect
                                     if l.get("source_ip") == sel_router]
+                        return sel_router, routing_summary + "\n" + pcap_ctx, dev_logs
 
+                    _int_c1, _int_c2 = st.columns(2)
+                    if _int_c1.button("🤖 統合AI診断を実行", key="pcap_ai_diag",
+                                       type="primary", use_container_width=True):
+                        sel_router, full_routing_ctx, dev_logs = _build_integrated_icmp_context()
                         with st.spinner("AIが pcap + syslog + SNMP を統合分析中..."):
-                            result_ai = analyzer.diagnose_icmp_redirect(
+                            st.session_state["_icmp_diag_integrated"] = analyzer.diagnose_icmp_redirect(
                                 ip=sel_router,
                                 snmp_data=snmp_latest,
                                 redirect_logs=dev_logs,
-                                routing_summary=routing_summary + "\n" + pcap_ctx,
+                                routing_summary=full_routing_ctx,
                                 mode=st.session_state.get("llm_mode", "auto")
                             )
-                        if result_ai:
-                            st.markdown(f"**🎯 根本原因:** {result_ai.get('root_cause','')}")
-                            if result_ai.get("causal_chain"):
-                                st.markdown("**🔗 因果連鎖:** " + " → ".join(result_ai["causal_chain"]))
-                            if result_ai.get("routing_issue"):
-                                st.markdown(f"**⚙️ ルーティング問題:** {result_ai.get('routing_issue','')}")
-                            st.markdown(f"**🚨 最優先対処:** {result_ai.get('priority_action','')}")
-                            if result_ai.get("additional_checks"):
-                                st.markdown("**📋 追加確認事項:**")
-                                for c in result_ai["additional_checks"]:
-                                    st.markdown(f"  - {c}")
-                            st.warning(f"**⚠️ 放置リスク:** {result_ai.get('risk_if_ignored','')}")
-                            st.caption(f"診断モデル: {result_ai.get('diagnosis_model','')} | "
-                                       f"データソース: pcapng + syslog + SNMP")
+                    if analyzer.check_claude_available():
+                        if _int_c2.button("🕵️ エージェント診断（ルート検索を深掘り）", key="pcap_icmp_agentic",
+                                           use_container_width=True):
+                            sel_router, full_routing_ctx, dev_logs = _build_integrated_icmp_context()
+                            with st.spinner("Claudeがルーティングテーブルを検索しながら分析中..."):
+                                st.session_state["_icmp_diag_integrated"] = analyzer.diagnose_icmp_redirect_agentic(
+                                    ip=sel_router, snmp_data=snmp_latest,
+                                    redirect_logs=dev_logs, routing_summary=full_routing_ctx,
+                                )
+                    _render_icmp_redirect_diagnosis_result(st.session_state.get("_icmp_diag_integrated"))
                 else:
                     st.caption("AI診断にはClaude APIまたはOllamaの設定が必要です（サイドバー参照）")
 
