@@ -4715,6 +4715,7 @@ with tab_pcap:
                     _embedded = pcap_analyzer.find_embedded_files(_stream_full)
                     if _embedded:
                         st.markdown(f"**📁 埋め込みファイル候補（{len(_embedded)}件・ベストエフォート抽出）**")
+                        _img_exts = {"png", "jpg", "jpeg", "gif"}
                         for _fi, _ef in enumerate(_embedded):
                             _fc1, _fc2 = st.columns([3, 1])
                             _fc1.markdown(f"`.{_ef['ext']}` — オフセット{_ef['offset']} / {_ef['size']} bytes")
@@ -4724,6 +4725,38 @@ with tab_pcap:
                                 mime="application/octet-stream",
                                 key=f"dl_embedded_{_fi}_{_sel_stream['src']}_{_sel_stream['src_port']}",
                             )
+                            # 画像は末尾追記・ポリグロット・メタデータを深掘り検査
+                            if _ef["ext"] in _img_exts:
+                                _imgf = pcap_analyzer.analyze_image_forensics(_ef["ext"], _ef["data"])
+                                _found = (_imgf["appended_data"] or _imgf["embedded_files"]
+                                          or _imgf["string_hits"])
+                                if _found:
+                                    with _fc1.expander("🔬 画像フォレンジック（隠しデータ検出）", expanded=True):
+                                        for _sh in _imgf["string_hits"]:
+                                            _ic = "🚩" if _sh["type"] == "flag_pattern" else "🔤"
+                                            st.success(f"{_ic} メタデータ/文字列: {_sh['text']}"
+                                                       + (f" → `{_sh['decoded']}`" if _sh.get("decoded") else ""))
+                                        _ap = _imgf["appended_data"]
+                                        if _ap:
+                                            st.warning(f"📎 末尾追記データ {_ap['size']}バイト"
+                                                       f"（オフセット{_ap['offset']}以降）を検出")
+                                            for _sh in _ap["ctf_hits"]:
+                                                _ic = "🚩" if _sh["type"] == "flag_pattern" else "🔤"
+                                                st.success(f"{_ic} 追記内に: {_sh['text']}"
+                                                           + (f" → `{_sh['decoded']}`" if _sh.get("decoded") else ""))
+                                            st.download_button(
+                                                "📥 末尾追記データを取り出す", data=_ap["data"],
+                                                file_name=f"appended_{_fi}.bin",
+                                                mime="application/octet-stream",
+                                                key=f"dl_appended_{_fi}_{_sel_stream['src']}_{_sel_stream['src_port']}")
+                                        for _pj_i, _pj in enumerate(_imgf["embedded_files"]):
+                                            st.warning(f"🧬 ポリグロット: 画像内に .{_pj['ext']} を検出"
+                                                       f"（オフセット{_pj['offset']} / {_pj['size']}バイト）")
+                                            st.download_button(
+                                                f"📥 埋め込み.{_pj['ext']}を取り出す", data=_pj["data"],
+                                                file_name=f"polyglot_{_fi}_{_pj_i}.{_pj['ext']}",
+                                                mime="application/octet-stream",
+                                                key=f"dl_poly_{_fi}_{_pj_i}_{_sel_stream['src']}_{_sel_stream['src_port']}")
 
                     st.download_button(
                         "📥 このストリームの生データをダウンロード（送信+応答結合）",

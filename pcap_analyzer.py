@@ -1991,6 +1991,79 @@ def find_embedded_files(stream_bytes: bytes) -> list:
 
 
 # ══════════════════════════════════════════════════════════════════
+#  画像フォレンジック（CTF: 画像に隠されたflag/ファイルの検出）
+# ══════════════════════════════════════════════════════════════════
+_IMAGE_EXTS = {"png", "jpg", "jpeg", "gif"}
+
+
+def _extract_strings(data: bytes, min_len: int = 5) -> list:
+    """バイナリから印字可能なASCII文字列を抽出する（stringsコマンド相当）。"""
+    result, cur = [], []
+    for b in data[:2_000_000]:
+        if 32 <= b < 127:
+            cur.append(chr(b))
+        else:
+            if len(cur) >= min_len:
+                result.append("".join(cur))
+            cur = []
+    if len(cur) >= min_len:
+        result.append("".join(cur))
+    return result
+
+
+def analyze_image_forensics(ext: str, data: bytes) -> dict:
+    """
+    抽出した画像に対しCTF頻出の隠し手口を検査する:
+      ① 末尾追記データ（画像の終端マーカー以降のデータ）
+      ② ポリグロット/埋め込みファイル（画像内のZIP等）
+      ③ メタデータ/文字列内の flag / Base64
+    戻り値: {"appended_data", "embedded_files", "string_hits"}
+    """
+    result = {"appended_data": None, "embedded_files": [], "string_hits": []}
+    if not data:
+        return result
+    ext = (ext or "").lower()
+
+    # ① 末尾追記データ（終端マーカー以降）
+    end_off = None
+    if ext == "png":
+        idx = data.rfind(b"IEND\xae\x42\x60\x82")  # IEND チャンク型+固定CRC
+        if idx != -1:
+            end_off = idx + 8
+    elif ext in ("jpg", "jpeg"):
+        idx = data.rfind(b"\xff\xd9")               # JPEG EOI マーカー
+        if idx != -1:
+            end_off = idx + 2
+    elif ext == "gif":
+        idx = data.rfind(b"\x00\x3b")               # GIF トレーラ（0x3B）
+        if idx != -1:
+            end_off = idx + 2
+    if end_off is not None and 0 < end_off < len(data):
+        appended = data[end_off:]
+        if len(appended) >= 4:
+            result["appended_data"] = {
+                "offset": end_off, "size": len(appended), "data": appended,
+                "preview": appended[:100].decode("latin-1", errors="replace"),
+                "ctf_hits": scan_ctf_indicators(appended),
+            }
+
+    # ② ポリグロット/埋め込みファイル（オフセット0の画像本体以外・同種は除外）
+    for f in find_embedded_files(data):
+        if f["offset"] > 0 and f["ext"] != ext:
+            result["embedded_files"].append(
+                {"ext": f["ext"], "offset": f["offset"], "size": f["size"], "data": f["data"]})
+
+    # ③ メタデータ/文字列内の flag / Base64
+    _seen = set()
+    for s in _extract_strings(data, 6):
+        for h in scan_ctf_indicators(s.encode("latin-1", errors="ignore")):
+            if h["text"] not in _seen:
+                _seen.add(h["text"])
+                result["string_hits"].append(h)
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════
 #  メール添付ファイルのウイルスチェック（SMTP/POP3/IMAP）
 # ══════════════════════════════════════════════════════════════════
 _MAIL_PORTS = {25, 587, 465, 110, 143, 993, 995}

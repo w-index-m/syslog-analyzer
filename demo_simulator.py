@@ -797,14 +797,26 @@ def _pcap_ctf_challenge() -> bytes:
                              data=f"X-Debug-Data: {hidden}\r\n".encode())))
     t += 1.0
 
-    # ④ 埋め込みファイル（PNGシグネチャ）を2パケットに分割
-    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 40 + b"IEND\xaeB`\x82"
+    # ④ 画像に隠されたflag（メタデータtEXt/末尾追記/ポリグロットZIP）を転送
+    import zlib as _zlib
+    def _png_chunk(typ, d):
+        c = typ + d
+        return struct.pack(">I", len(d)) + c + struct.pack(">I", _zlib.crc32(c) & 0xffffffff)
+    _png = (b"\x89PNG\r\n\x1a\n"
+            + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+            + _png_chunk(b"tEXt", b"Comment\x00flag{hidden_in_png_metadata}")
+            + _png_chunk(b"IDAT", _zlib.compress(b"\x00\xff\xff\xff"))
+            + _png_chunk(b"IEND", b""))
+    # IEND後に平文flag＋ポリグロットZIP（PKヘッダ）を追記
+    png_bytes = _png + b"\nSECRET: flag{appended_after_iend}\n" + b"PK\x03\x04" + b"\x00" * 40
+    _hdr = b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n\r\n"
+    _full = _hdr + png_bytes
+    _mid = len(_full) // 2
     pkts.append((t, _ip_tcp(server, client, 8082, 51500,
-                             dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=3000,
-                             data=b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n\r\n" + png_bytes[:25])))
+                             dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=3000, data=_full[:_mid])))
     t += 0.15
     pkts.append((t, _ip_tcp(server, client, 8082, 51500,
-                             dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=3000 + 25, data=png_bytes[25:])))
+                             dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=3000 + _mid, data=_full[_mid:])))
     t += 1.0
 
     # ⑤ DNSトンネリング: 長いBase32サブドメインで evil ドメインへ大量クエリ
