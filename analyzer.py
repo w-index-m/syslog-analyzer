@@ -1174,6 +1174,17 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
                      "top_issuesで「ポートスキャンが実行されています」"
                      "「DDoS(SYNフラッド)を受けています」のように断定的に報告してください。")
 
+    if r.get("ips_alerts"):
+        lines.append("")
+        lines.append("【🛡️ IPSシグネチャ検知（既知の攻撃パターンに一致・確定情報）】")
+        for a in r["ips_alerts"][:10]:
+            lines.append(f"    - [{a.get('severity','')}] {a.get('category','')}: "
+                         f"{a.get('src','')}→{a.get('dst','')}:{a.get('dst_port','')} "
+                         f"({a.get('count',0)}回) 一致=「{a.get('matched','')[:50]}」")
+        lines.append("    ※既知の攻撃シグネチャに一致した通信です。top_issuesで攻撃種別"
+                     "（SQLi/XSS/Log4Shell/リバースシェル等）を明記し、severityを高めに評価して"
+                     "断定的に報告してください。")
+
     lines += [
         "",
         "【DNS】",

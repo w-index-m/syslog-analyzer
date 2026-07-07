@@ -268,6 +268,85 @@ def scan_ctf_indicators(payload: bytes) -> list:
                          "decoded": try_decode_base64(text) or ""})
     return hits
 
+
+# ══════════════════════════════════════════════════════════════════
+#  シグネチャ型IPS: 既知の攻撃パターンをペイロードから検出（Snort/Suricata風）
+#  シグネチャ定義はリポジトリ内の ips_signatures.json で一元管理する
+#  （GitHubを唯一の正とし、各デプロイはpull時に最新を取得する。サーバ個別の
+#   シグネチャ保持は不要）。ファイルが無い/壊れている場合は空で動作する。
+#  ※ヒューリスティックな簡易シグネチャです。誤検知もあり得るため参考情報として扱う。
+# ══════════════════════════════════════════════════════════════════
+import json as _json_ips
+from pathlib import Path as _Path_ips
+
+_IPS_SIGNATURES_PATH = _Path_ips(__file__).parent / "ips_signatures.json"
+
+
+def _load_ips_signatures(path=_IPS_SIGNATURES_PATH) -> list:
+    """ips_signatures.json を読み込み、正規表現をコンパイルして返す。"""
+    sigs = []
+    try:
+        doc = _json_ips.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"[ips] シグネチャ定義の読み込みに失敗: {e}")
+        return sigs
+    for s in doc.get("signatures", []):
+        try:
+            sigs.append({
+                "id": s["id"], "cat": s["category"], "sev": s["severity"],
+                "bin": bool(s.get("binary", False)),
+                "re": re.compile(s["pattern"].encode("latin-1")),
+            })
+        except Exception as e:
+            print(f"[ips] 不正なシグネチャ {s.get('id')}: {e}")
+    return sigs
+
+
+_IPS_SIGNATURES = _load_ips_signatures()
+
+
+def reload_ips_signatures() -> int:
+    """シグネチャ定義を再読み込みする（更新後に呼ぶ）。読み込んだ件数を返す。"""
+    global _IPS_SIGNATURES
+    _IPS_SIGNATURES = _load_ips_signatures()
+    return len(_IPS_SIGNATURES)
+
+
+def scan_ips_signatures(payload: bytes) -> list:
+    """ペイロードを簡易IPSシグネチャと照合し、一致した攻撃パターンを返す。"""
+    hits = []
+    if not payload:
+        return hits
+    chunk = payload[:2000]
+    # テキスト系シグネチャは印字可能なペイロードのみ対象（バイナリでの誤検知防止）。
+    # バイナリ系シグネチャ(binary=true)は暗号化されていない生バイト列を常に検査する。
+    is_text = _mostly_printable(chunk, threshold=0.75)
+    # URLエンコードを回避した攻撃も拾えるよう、デコード版でも照合する
+    try:
+        decoded = urllib.parse.unquote_to_bytes(chunk)
+    except Exception:
+        decoded = chunk
+    text_targets = [chunk] if decoded == chunk else [chunk, decoded]
+    for sig in _IPS_SIGNATURES:
+        if sig.get("bin"):
+            targets = [chunk]
+        elif is_text:
+            targets = text_targets
+        else:
+            continue
+        m = None
+        for tgt in targets:
+            m = sig["re"].search(tgt)
+            if m:
+                break
+        if m:
+            hits.append({
+                "sig_id": sig["id"], "category": sig["cat"], "severity": sig["sev"],
+                "matched": m.group(0)[:80].decode("utf-8", errors="replace"),
+            })
+    return hits
+
+
 # ── VoIP/RTP ────────────────────────────────────────────────────
 RTP_CLOCK_RATES = {
     0: 8000, 8: 8000,   # G.711 u-law / a-law
@@ -543,6 +622,7 @@ def analyze_pcap(data: bytes) -> dict:
         "ctf_flag_hits": [],
         "dns_tunneling": [],
         "icmp_exfil": [],
+        "ips_alerts": [],
         "ip_fragments": [],
         "http_errors": [],    "http_summary": {},
         "tls_sessions": [],   "tls_alerts": [],
@@ -600,6 +680,24 @@ def analyze_pcap(data: bytes) -> dict:
 
     # CTF問題向け flag{...}/Base64候補の検出結果
     ctf_flag_hits: list = []
+
+    # シグネチャ型IPS: (src,dst,dport,sig_id) -> {count, sample, ...} で重複集約
+    ips_hits: dict = {}
+
+    def _record_ips(proto_name, src, dst, sp, dp, payload, ts):
+        for sig in scan_ips_signatures(payload):
+            key = (src, dst, dp, sig["sig_id"])
+            entry = ips_hits.get(key)
+            if entry is None:
+                ips_hits[key] = {
+                    "protocol": proto_name, "src": src, "dst": dst,
+                    "src_port": sp, "dst_port": dp,
+                    "sig_id": sig["sig_id"], "category": sig["category"],
+                    "severity": sig["severity"], "matched": sig["matched"],
+                    "count": 1, "first_seen": _ts_str(ts),
+                }
+            else:
+                entry["count"] += 1
 
     # DNSトンネリング検出用: ベースドメイン -> {queries, sub_lengths, qtypes, sample_subs, clients}
     dns_by_domain: dict[str, dict] = {}
@@ -724,6 +822,8 @@ def analyze_pcap(data: bytes) -> dict:
                                 "src": src, "dst": dst, "src_port": sport, "dst_port": dport,
                                 **_ctf_hit,
                             })
+                        # シグネチャ型IPS検査
+                        _record_ips("TCP", src, dst, sport, dport, bytes(tcp.data), ts)
 
                     # ── HTTP (平文) ──────────────────────
                     if data_len > 0:
@@ -814,6 +914,8 @@ def analyze_pcap(data: bytes) -> dict:
                                 "src": src, "dst": dst, "src_port": udp.sport, "dst_port": udp.dport,
                                 **_ctf_hit,
                             })
+                        # シグネチャ型IPS検査
+                        _record_ips("UDP", src, dst, udp.sport, udp.dport, bytes(udp.data), ts)
 
                     # RIP
                     if udp.dport == RIP_PORT or udp.sport == RIP_PORT:
@@ -1283,6 +1385,12 @@ def analyze_pcap(data: bytes) -> dict:
                             "— ICMPトンネリング/データ持ち出しの可能性")
         result["icmp_exfil"].append(_entry)
     result["icmp_exfil"].sort(key=lambda x: x["packet_count"], reverse=True)
+
+    # ── シグネチャ型IPSアラート（重大度順にソート） ──
+    _sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    result["ips_alerts"] = sorted(
+        ips_hits.values(),
+        key=lambda x: (_sev_rank.get(x["severity"], 9), -x["count"]))
 
     return result
 

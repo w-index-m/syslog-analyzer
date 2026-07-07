@@ -4025,6 +4025,46 @@ with tab_pcap:
                           delta="⚠️ 要確認" if res.get("dhcp_issues") else None)
             st.caption(f"📅 キャプチャ範囲: {res['capture_start']} 〜 {res['capture_end']}")
 
+            # ── 🛡️ IPS検査（シグネチャ型 + アノマリ型） ──────
+            _ips_alerts = res.get("ips_alerts", [])
+            _anomaly_items = (res.get("scan_patterns", []) + res.get("dns_tunneling", [])
+                              + res.get("icmp_exfil", []))
+            if _ips_alerts or _anomaly_items:
+                st.markdown("---")
+                st.markdown("### 🛡️ IPS検査（不正侵入の兆候）")
+                st.caption("Catalyst等でミラー/インライン取得したパケットを、IPS的に検査します。"
+                           "**シグネチャ型**（既知の攻撃パターン照合）と**アノマリ型**（統計的な異常検出）の"
+                           "両面でチェックします。簡易ヒューリスティックのため、検知は参考情報として扱ってください。")
+
+                # シグネチャ型
+                if _ips_alerts:
+                    _crit = sum(1 for a in _ips_alerts if a["severity"] == "critical")
+                    _high = sum(1 for a in _ips_alerts if a["severity"] == "high")
+                    st.markdown(f"**🔴 シグネチャ型検知: {len(_ips_alerts)}件**"
+                                f"（重大 {_crit} / 高 {_high}）")
+                    _sev_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
+                    df_ips = pd.DataFrame(_ips_alerts)
+                    df_ips["重大度"] = df_ips["severity"].map(
+                        lambda s: f"{_sev_icon.get(s,'⚪')} {s}")
+                    df_ips = df_ips[["重大度", "category", "protocol", "src", "dst", "dst_port",
+                                      "count", "matched", "first_seen"]]
+                    df_ips.columns = ["重大度", "攻撃カテゴリ", "プロトコル", "送信元IP", "宛先IP",
+                                       "宛先Port", "回数", "一致パターン", "初検知"]
+                    _show_table_top_n(df_ips, "ips_signature_alerts.csv", "dl_ips_csv")
+                else:
+                    st.success("✅ シグネチャ型：既知の攻撃パターンは検出されませんでした。")
+
+                # アノマリ型（既存の統計検出を集約表示）
+                if _anomaly_items:
+                    st.markdown("**🟠 アノマリ型検知（統計的異常）**")
+                    for _sp in res.get("scan_patterns", []):
+                        _t = "ポートスキャン" if _sp["type"] == "port_scan" else "DDoS(SYNフラッド)"
+                        st.markdown(f"- 🔴 **{_t}**: {_sp['detail']}")
+                    for _dt in res.get("dns_tunneling", []):
+                        st.markdown(f"- 🔴 **DNSトンネリング**: {_dt['detail']}")
+                    for _ie in res.get("icmp_exfil", []):
+                        st.markdown(f"- 🔴 **ICMPエクスフィル**: {_ie['detail']}")
+
             # ── pcap 総合 AI 診断（全ページ共通部品） ──────
             _render_pcap_ai_diagnosis(res, key_prefix="main")
 

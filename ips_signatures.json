@@ -1,0 +1,153 @@
+{
+  "_comment": "IPSシグネチャ定義。GitHubで一元管理し、全デプロイがここから読み込む。patternはPython re のバイト列パターン（latin-1）。binary=trueは印字可能判定をスキップ。",
+  "version": "2026.07.08",
+  "signatures": [
+    {
+      "id": "WEB-SQLI-1",
+      "category": "SQLインジェクション",
+      "severity": "high",
+      "binary": false,
+      "pattern": "(?i)(union\\s+select|'\\s*or\\s*'?1'?\\s*=\\s*'?1|or\\s+1\\s*=\\s*1\\s*(--|#)|information_schema|sleep\\s*\\(\\s*\\d|benchmark\\s*\\()"
+    },
+    {
+      "id": "WEB-XSS-1",
+      "category": "クロスサイトスクリプティング(XSS)",
+      "severity": "high",
+      "binary": false,
+      "pattern": "(?i)(<script[\\s>]|javascript:|onerror\\s*=|onload\\s*=|<img[^>]+onerror)"
+    },
+    {
+      "id": "WEB-TRAVERSAL-1",
+      "category": "ディレクトリトラバーサル",
+      "severity": "high",
+      "binary": false,
+      "pattern": "(\\.\\./\\.\\./|\\.\\.\\\\\\.\\.\\\\|/etc/passwd|/etc/shadow|c:\\\\windows\\\\|%2e%2e%2f)"
+    },
+    {
+      "id": "WEB-CMDI-1",
+      "category": "コマンドインジェクション",
+      "severity": "critical",
+      "binary": false,
+      "pattern": "(?i)(;\\s*(cat|ls|id|whoami|uname)\\s|\\|\\s*(cat|nc|bash|sh)\\s|\\$\\(\\s*(cat|id|whoami|uname|nc|bash|sh|curl|wget)|`\\s*(cat|id|whoami|uname|nc|bash|sh|curl|wget)[^`]*`)"
+    },
+    {
+      "id": "WEB-WEBSHELL-1",
+      "category": "Webシェル/コード実行",
+      "severity": "critical",
+      "binary": false,
+      "pattern": "(?i)(eval\\s*\\(\\s*base64_decode|system\\s*\\(\\s*\\$_|passthru\\s*\\(\\s*\\$_|shell_exec\\s*\\(|assert\\s*\\(\\s*\\$_)"
+    },
+    {
+      "id": "CVE-LOG4SHELL",
+      "category": "Log4Shell (CVE-2021-44228)",
+      "severity": "critical",
+      "binary": false,
+      "pattern": "(?i)\\$\\{jndi:(ldap|rmi|dns|ldaps|iiop)://"
+    },
+    {
+      "id": "CVE-SHELLSHOCK",
+      "category": "Shellshock (CVE-2014-6271)",
+      "severity": "critical",
+      "binary": false,
+      "pattern": "\\(\\)\\s*\\{\\s*:;\\s*\\}\\s*;"
+    },
+    {
+      "id": "MAL-REVSHELL-1",
+      "category": "リバースシェル/バインドシェル",
+      "severity": "critical",
+      "binary": false,
+      "pattern": "(?i)(/bin/(bash|sh)\\s+-i|nc\\s+-e\\s|bash\\s+-c\\s+['\\\"]?bash\\s+-i|python\\s+-c\\s+['\\\"]?import\\s+socket|/dev/tcp/)"
+    },
+    {
+      "id": "SCAN-TOOL-UA",
+      "category": "スキャナー/攻撃ツール",
+      "severity": "medium",
+      "binary": false,
+      "pattern": "(?i)(sqlmap|nikto|nmap\\s+scripting|masscan|nessus|dirbuster|gobuster|wpscan|acunetix|nuclei)"
+    },
+    {
+      "id": "WEB-SENSITIVE",
+      "category": "機密ファイルへのアクセス試行",
+      "severity": "medium",
+      "binary": false,
+      "pattern": "(?i)(wp-config\\.php|/\\.env(\\s|\\?|$)|/\\.git/config|/\\.aws/credentials|id_rsa|/proc/self/environ)"
+    },
+    {
+      "id": "WORM-CODERED",
+      "category": "Code Red ワーム (2001)",
+      "severity": "high",
+      "binary": false,
+      "pattern": "(?i)(default\\.ida\\?(N{20,}|X{20,})|\\.ida\\?.*%u9090|%u6858%ucbd3)"
+    },
+    {
+      "id": "WORM-NIMDA",
+      "category": "Nimda ワーム (2001)",
+      "severity": "high",
+      "binary": false,
+      "pattern": "(?i)(cmd\\.exe\\?/c\\+|/(scripts|MSADC|_vti_bin|_mem_bin|c|d)/.*(root\\.exe|cmd\\.exe)|%255c|%c1%1c|%c0%af|/winnt/system32/cmd\\.exe|readme\\.eml|admin\\.dll)"
+    },
+    {
+      "id": "WORM-BLASTER",
+      "category": "Blaster/MSBlast ワーム (2003)",
+      "severity": "high",
+      "binary": false,
+      "pattern": "(?i)(msblast\\.exe|mblast\\.exe|penis32\\.exe|windowsupdate\\.com.*billy|tftp\\s+-i\\s+\\S+\\s+get\\s+\\S+\\.exe)"
+    },
+    {
+      "id": "WORM-SASSER",
+      "category": "Sasser ワーム (2004)",
+      "severity": "high",
+      "binary": false,
+      "pattern": "(?i)(_up\\.exe|avserve2?\\.exe|skynetave\\.exe|\\d{4,5}_up\\.exe)"
+    },
+    {
+      "id": "WORM-WANNACRY",
+      "category": "WannaCry (killswitchドメイン, 2017)",
+      "severity": "critical",
+      "binary": false,
+      "pattern": "(?i)iuqerfsodp9ifjaposdfjhgosurijfaewrwergwea\\.com"
+    },
+    {
+      "id": "WORM-MIRAI",
+      "category": "Mirai ボット (2016)",
+      "severity": "high",
+      "binary": false,
+      "pattern": "(?i)(/bin/busybox\\s+MIRAI|/bin/busybox\\s+ECCHI|MIRAI:\\s|root(:|/)(xc3511|vizxv|admin|888888|54321|klv123|juantech|anko))"
+    },
+    {
+      "id": "WORM-SANTY",
+      "category": "Santy ワーム (phpBB, 2004)",
+      "severity": "medium",
+      "binary": false,
+      "pattern": "(?i)(highlight=%2527|viewtopic\\.php\\?.*highlight=.*(system|passthru|phpinfo))"
+    },
+    {
+      "id": "MAL-EICAR",
+      "category": "EICARテスト文字列（マルウェア検査用）",
+      "severity": "medium",
+      "binary": false,
+      "pattern": "X5O!P%@AP\\[4\\\\PZX54\\(P\\^\\)7CC\\)7\\}\\$EICAR"
+    },
+    {
+      "id": "WORM-SLAMMER",
+      "category": "SQL Slammer ワーム (UDP1434, 2003)",
+      "severity": "critical",
+      "binary": true,
+      "pattern": "h\\.dllhel32hkernQhounthickChGetTf|\\x68\\x2e\\x64\\x6c\\x6c\\x68\\x65\\x6c\\x33\\x32\\x68\\x6b\\x65\\x72\\x6e"
+    },
+    {
+      "id": "EXP-ETERNALBLUE",
+      "category": "EternalBlue/WannaCry SMB搾取 (MS17-010)",
+      "severity": "critical",
+      "binary": true,
+      "pattern": "\\xff\\x53\\x4d\\x42.{0,200}(\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00)?.{0,10}\\\\\\x00P\\x00I\\x00P\\x00E\\x00|SMBu.{0,50}\\\\PIPE\\\\"
+    },
+    {
+      "id": "EXP-MSRPC-DCOM",
+      "category": "MSRPC DCOM搾取 (Blaster系, MS03-026)",
+      "severity": "high",
+      "binary": true,
+      "pattern": "\\x05\\x00\\x0b\\x03\\x10\\x00\\x00\\x00.{0,20}\\xa0\\x01\\x00\\x00|\\x5c\\x00\\x5c\\x00.{0,60}\\x5c\\x00\\x5c\\x00.{0,20}\\xcc\\xe0\\xfd\\x7f"
+    }
+  ]
+}

