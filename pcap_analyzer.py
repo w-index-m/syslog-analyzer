@@ -352,28 +352,42 @@ import json as _json_ips
 from pathlib import Path as _Path_ips
 
 _IPS_SIGNATURES_PATH = _Path_ips(__file__).parent / "ips_signatures.json"
+# Snort/Suricata から取り込んだシグネチャ（ips_rule_import.py が生成）。あればマージ。
+_IPS_IMPORTED_PATH = _Path_ips(__file__).parent / "ips_signatures_imported.json"
 
 
-def _load_ips_signatures(path=_IPS_SIGNATURES_PATH) -> list:
-    """ips_signatures.json を読み込み、正規表現をコンパイルして返す。"""
+def _load_signatures_from(path) -> list:
     sigs = []
     try:
         doc = _json_ips.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:
-        print(f"[ips] シグネチャ定義の読み込みに失敗: {e}")
+    except Exception:
         return sigs
     for s in doc.get("signatures", []):
         try:
             sigs.append({
                 "id": s["id"], "cat": s["category"], "sev": s["severity"],
                 "bin": bool(s.get("binary", False)),
-                "re": re.compile(s["pattern"].encode("latin-1")),
+                "re": re.compile(s["pattern"].encode("utf-8")),
                 "cve": s.get("cve", ""), "desc": s.get("description", ""),
                 "action": s.get("recommended_action", ""), "ref": s.get("reference", ""),
                 "source": s.get("source", ""),
             })
         except Exception as e:
             print(f"[ips] 不正なシグネチャ {s.get('id')}: {e}")
+    return sigs
+
+
+def _load_ips_signatures(path=_IPS_SIGNATURES_PATH) -> list:
+    """組み込みシグネチャ＋取り込みシグネチャ(あれば)をマージして返す。"""
+    if not path.exists():
+        print(f"[ips] シグネチャ定義が見つかりません: {path}")
+        return []
+    sigs = _load_signatures_from(path)
+    if _IPS_IMPORTED_PATH.exists():
+        _imported = _load_signatures_from(_IPS_IMPORTED_PATH)
+        if _imported:
+            print(f"[ips] 取り込みシグネチャ {len(_imported)}件をマージ")
+            sigs += _imported
     return sigs
 
 
@@ -719,6 +733,7 @@ def analyze_pcap(data: bytes) -> dict:
         "host_risk": [],
         "suggested_lang": "ja",
         "region_hint": {},
+        "threat_intel_hits": [],
         "ip_fragments": [],
         "http_errors": [],    "http_summary": {},
         "tls_sessions": [],   "tls_alerts": [],
@@ -1660,6 +1675,58 @@ def analyze_pcap(data: bytes) -> dict:
         # アジア優勢・同数・地域判定不能（汎用TLDのみ）は日本語を既定（日本向けツールのため）
         result["suggested_lang"] = "ja"
     result["region_hint"] = {"asian_domains": _asian, "western_domains": _western}
+
+    # ── 脅威インテリジェンス照合（abuse.ch等の既知C2/マルウェアIP・ドメイン） ──
+    try:
+        import threat_intel as _ti
+        _ti_seen = set()
+        for _dom, _info in accessed_domains.items():
+            _hit = _ti.check_domain(_dom)
+            if _hit and _dom not in _ti_seen:
+                _ti_seen.add(_dom)
+                result["threat_intel_hits"].append({
+                    "type": "domain", "indicator": _dom, "feed": _hit,
+                    "clients": sorted(_info["clients"])[:10],
+                    "detail": f"既知の悪性ドメイン {_dom} へアクセス（脅威フィード: {_hit}）",
+                })
+        # 外部宛て通信先IPを照合（データ送信・接続試行の両方の宛先）
+        _ext_ips = set()
+        for (src, dst) in outbound_bytes:
+            if not _is_private_ip(dst):
+                _ext_ips.add((src, dst))
+        for (src, dst, _dp) in conn_times:
+            if not _is_private_ip(dst):
+                _ext_ips.add((src, dst))
+        for (src, dst) in _ext_ips:
+            _hit = _ti.check_ip(dst)
+            if _hit and dst not in _ti_seen:
+                _ti_seen.add(dst)
+                result["threat_intel_hits"].append({
+                    "type": "ip", "indicator": dst, "feed": _hit, "src": src,
+                    "detail": f"既知の悪性IP {dst} と通信（送信元 {src} / 脅威フィード: {_hit}）",
+                })
+    except Exception as _ti_err:
+        print(f"[threat_intel] 照合スキップ: {_ti_err}")
+
+    # 脅威フィード一致はホストリスクにも加点（既存の host_risk に反映）
+    if result["threat_intel_hits"]:
+        _risk_map = {h["host"]: h for h in result["host_risk"]}
+        for _th in result["threat_intel_hits"]:
+            _hosts = _th.get("clients") or ([_th["src"]] if _th.get("src") else [])
+            for _h in _hosts:
+                if _h in _risk_map:
+                    _risk_map[_h]["risk_score"] = min(100, _risk_map[_h]["risk_score"] + 30)
+                    if "既知悪性先と通信" not in _risk_map[_h]["factors"]:
+                        _risk_map[_h]["factors"].append("既知悪性先と通信")
+                else:
+                    _new = {"host": _h, "risk_score": 30, "risk_level": "中",
+                            "factor_count": 1, "factors": ["既知悪性先と通信"]}
+                    result["host_risk"].append(_new)
+                    _risk_map[_h] = _new
+        for _h in result["host_risk"]:
+            _s = _h["risk_score"]
+            _h["risk_level"] = "重大" if _s >= 70 else "高" if _s >= 40 else "中" if _s >= 20 else "低"
+        result["host_risk"].sort(key=lambda x: x["risk_score"], reverse=True)
 
     return result
 

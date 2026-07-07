@@ -5,3 +5,7 @@ venv/
 .venv/
 user_settings.json
 .streamlit/secrets.toml
+
+# 生成物: Snort/Suricataルールの取り込み結果・ダウンロードした脅威フィード
+ips_signatures_imported.json
+threat_intel/downloaded_*.txt

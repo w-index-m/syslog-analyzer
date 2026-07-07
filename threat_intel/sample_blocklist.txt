@@ -1,0 +1,11 @@
+# サンプル脅威インテリジェンス（デモ用・RFC5737テスト範囲/.exampleのみ）
+# 実運用では threat_intel.fetch_feeds() で abuse.ch 等の実フィードを取得して上書きする。
+# 形式: 1行1エントリ。IP または ドメイン。# はコメント。
+#
+# --- 既知C2 IP（デモ: malware_behaviorシナリオのC2に一致） ---
+203.0.113.200
+198.51.100.9
+# --- 既知マルウェア配布/フィッシングドメイン（デモ） ---
+evil-c2.example
+malware-drop.example
+phishing-login.example

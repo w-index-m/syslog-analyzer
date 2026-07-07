@@ -1,6 +1,6 @@
 {
   "_comment": "IPSシグネチャ定義。GitHubで一元管理し、全デプロイがここから読み込む。patternはPython re のバイト列パターン（latin-1）。binary=trueは印字可能判定をスキップ。cve/description/recommended_action/reference は検知時の対応判断用メタデータ（任意）。",
-  "version": "2026.07.08.2",
+  "version": "2026.07.08.3",
   "signatures": [
     {
       "id": "WEB-SQLI-1",
@@ -252,6 +252,42 @@
       "description": "MS RPC DCOMインターフェースのバッファオーバーフロー搾取。",
       "recommended_action": "MS03-026適用、TCP135の露出制限。",
       "reference": "https://nvd.nist.gov/vuln/detail/CVE-2003-0352",
+      "source": "builtin"
+    },
+    {
+      "id": "AI-PROMPTINJ-1",
+      "category": "プロンプトインジェクション/AIワーム兆候",
+      "severity": "high",
+      "binary": false,
+      "pattern": "(?i)(ignore\\s+(all\\s+)?previous\\s+instructions|disregard\\s+(the\\s+)?(above|prior)|ignore\\s+the\\s+system\\s+prompt|you\\s+are\\s+now\\s+(dan|in\\s+developer\\s+mode)|以前の(指示|命令)を無視|上記(を|は)無視|これまでの指示を(無視|忘れ))",
+      "cve": "",
+      "description": "LLM/AIアシスタントを騙す敵対的プロンプト（AIワームMorris II型の拡散手口・プロンプトインジェクション）の兆候。",
+      "recommended_action": "該当メール/リクエストを隔離し、AIアシスタントの入力無害化(サニタイズ)・最小権限を確認。",
+      "reference": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+      "source": "builtin"
+    },
+    {
+      "id": "AI-PROMPTINJ-2",
+      "category": "プロンプトインジェクション/AIワーム兆候",
+      "severity": "medium",
+      "binary": false,
+      "pattern": "(?i)(jailbreak|do\\s+anything\\s+now|reveal\\s+your\\s+system\\s+prompt|print\\s+your\\s+instructions|repeat\\s+the\\s+words\\s+above|system:\\s*you\\s+are)",
+      "cve": "",
+      "description": "LLMのjailbreak/システムプロンプト暴露を狙う典型的な文字列。",
+      "recommended_action": "入力元を確認し、AI連携部の防御(ガードレール)を点検。",
+      "reference": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+      "source": "builtin"
+    },
+    {
+      "id": "AI-WORM-SELFPROP",
+      "category": "プロンプトインジェクション/AIワーム兆候",
+      "severity": "high",
+      "binary": false,
+      "pattern": "(?i)(forward\\s+this\\s+(email|message)\\s+to\\s+all|send\\s+this\\s+prompt\\s+to|replicate\\s+this\\s+(instruction|prompt)|自己複製|このプロンプトを(全員|次の宛先)へ)",
+      "cve": "",
+      "description": "AIアシスタントに自己複製・拡散を指示する文言（AIワームの自律拡散の手口）。",
+      "recommended_action": "メールAIアシスタントの自動送信を停止し、感染範囲を調査。",
+      "reference": "https://www.wired.com/story/here-come-the-ai-worms/",
       "source": "builtin"
     }
   ],

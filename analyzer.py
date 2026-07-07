@@ -1211,6 +1211,14 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
             lines.append("    ※複数の怪しい挙動が同一ホストに集中しています。top_issuesで"
                          "「感染/侵害の可能性が高いホスト」として最優先で報告してください。")
 
+    if r.get("threat_intel_hits"):
+        lines.append("")
+        lines.append("【🌐 脅威インテリジェンス一致（既知の悪性IP/ドメイン・確定情報）】")
+        for th in r["threat_intel_hits"][:8]:
+            lines.append(f"    - {th.get('detail','')}")
+        lines.append("    ※既知の脅威フィード(abuse.ch等)に一致した通信先です。severityを最高レベルで"
+                     "評価し、感染/C2通信として断定的に報告してください。")
+
     lines += [
         "",
         "【DNS】",

@@ -4038,13 +4038,21 @@ with tab_pcap:
             _anomaly_items = (res.get("scan_patterns", []) + res.get("dns_tunneling", [])
                               + res.get("icmp_exfil", []))
             _host_risk = res.get("host_risk", [])
-            if _ips_alerts or _anomaly_items or _behavior_items or _host_risk:
+            _ti_hits = res.get("threat_intel_hits", [])
+            if _ips_alerts or _anomaly_items or _behavior_items or _host_risk or _ti_hits:
                 st.markdown("---")
                 st.markdown("### 🛡️ IPS検査（不正侵入・マルウェアの兆候）")
                 st.caption("Catalyst等でミラー/インライン取得したパケットを、IPS/IDS的に検査します。"
                            "**シグネチャ型**（既知攻撃パターン照合）・**アノマリ型**（統計的異常）・"
-                           "**振る舞い型**（ワーム拡散/C2/持ち出し等の挙動）の3面で検査し、"
+                           "**振る舞い型**（ワーム拡散/C2/持ち出し等の挙動）・**脅威インテリジェンス**"
+                           "（既知C2/マルウェアIP・ドメイン照合）の各面で検査し、"
                            "最後にホスト別のリスクスコアに束ねます。簡易ヒューリスティックのため参考情報として扱ってください。")
+
+                # ── 🌐 脅威インテリジェンス一致（最優先・確度高） ──
+                if _ti_hits:
+                    st.markdown("**🌐 脅威インテリジェンス一致（既知の悪性IP/ドメイン）**")
+                    for _th in _ti_hits:
+                        st.error(f"🔴 {_th['detail']}")
 
                 # ── ⚠️ ホスト別リスクスコア（相関検知の要約・最上部） ──
                 if _host_risk:
