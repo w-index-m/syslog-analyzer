@@ -40,6 +40,32 @@ _SUSPICIOUS_HOST_RE = __import__("re").compile(
 # マルウェアに悪用されやすい無料/動的DNS・TLD（誤検知を避けるため低〜中重大度）。
 _SUSPICIOUS_TLD_RE = __import__("re").compile(
     r"(?i)\.(tk|ml|ga|cf|gq|top|xyz|duckdns\.org|no-ip\.\w+|ddns\.net|hopto\.org)$")
+
+# 表示言語の自動判定用: 日本を含むアジア圏 ccTLD / 明確に非アジア圏の ccTLD。
+# アクセス先ドメインの地域が「日本含むアジア圏中心」なら日本語、それ以外なら英語を既定にする。
+_ASIAN_CCTLDS = {
+    "jp", "cn", "kr", "tw", "hk", "mo", "sg", "th", "vn", "in", "id", "my",
+    "ph", "kh", "la", "mm", "bn", "np", "lk", "bd", "pk", "mn",
+}
+_WESTERN_CCTLDS = {
+    "uk", "de", "fr", "us", "ca", "au", "nz", "ru", "br", "es", "it", "nl",
+    "se", "no", "fi", "pl", "ch", "at", "be", "dk", "ie", "pt", "mx", "ar",
+}
+
+
+def _tld_region(domain: str) -> str:
+    """ドメインのccTLDから地域を判定する: 'asian' / 'western' / 'neutral'。"""
+    labels = domain.lower().rstrip(".").split(".")
+    if len(labels) < 2:
+        return "neutral"
+    tld = labels[-1]
+    if tld in _ASIAN_CCTLDS:
+        return "asian"
+    if tld in _WESTERN_CCTLDS:
+        return "western"
+    return "neutral"  # com/net/org/io 等の汎用TLDは地域中立
+
+
 DNS_PORT     = 53
 DHCP_PORTS   = {67, 68}
 TLS_PORTS    = {443, 8443, 465, 993, 995, 636, 5061}
@@ -691,6 +717,8 @@ def analyze_pcap(data: bytes) -> dict:
         "suspicious_destinations": [],
         "data_exfil": [],
         "host_risk": [],
+        "suggested_lang": "ja",
+        "region_hint": {},
         "ip_fragments": [],
         "http_errors": [],    "http_summary": {},
         "tls_sessions": [],   "tls_alerts": [],
@@ -1616,6 +1644,22 @@ def analyze_pcap(data: bytes) -> dict:
             "factor_count": len(_uniq_factors), "factors": _uniq_factors,
         })
     result["host_risk"].sort(key=lambda x: x["risk_score"], reverse=True)
+
+    # ── 表示言語の自動判定（アクセス先ドメインの地域から） ──
+    # 日本を含むアジア圏のドメインが中心なら日本語、明確に非アジア圏なら英語を既定にする。
+    _asian = _western = 0
+    for _dom in accessed_domains:
+        _rg = _tld_region(_dom)
+        if _rg == "asian":
+            _asian += 1
+        elif _rg == "western":
+            _western += 1
+    if _western > _asian:
+        result["suggested_lang"] = "en"
+    else:
+        # アジア優勢・同数・地域判定不能（汎用TLDのみ）は日本語を既定（日本向けツールのため）
+        result["suggested_lang"] = "ja"
+    result["region_hint"] = {"asian_domains": _asian, "western_domains": _western}
 
     return result
 

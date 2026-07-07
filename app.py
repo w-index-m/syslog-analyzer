@@ -216,6 +216,12 @@ def _render_pcap_ai_diagnosis(res: dict, key_prefix: str = "main"):
     _ai_col1, _ai_col2 = st.columns([5, 1])
     _ai_col1.markdown("### 🤖 pcap 総合 AI 診断")
     _ai_col1.caption("TCP / DNS / DHCP / HTTP / TLS / VoIP / ICMP / ARP の全解析結果を LLM に投げて根本原因を推定します。")
+    _lang = res.get("suggested_lang", "ja")
+    _rh = res.get("region_hint", {})
+    _ai_col1.caption(
+        f"🌐 出力言語: **{'日本語' if _lang == 'ja' else 'English'}**"
+        f"（アクセス先ドメインの地域から自動判定 / アジア圏{_rh.get('asian_domains',0)}・"
+        f"非アジア圏{_rh.get('western_domains',0)}）")
     with _ai_col2:
         _pcap_ai_btn = st.button("🤖 AI診断実行", key=f"pcap_ai_diag_{key_prefix}",
                                  disabled=not _llm_ok, use_container_width=True,

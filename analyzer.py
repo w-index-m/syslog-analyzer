@@ -1308,6 +1308,16 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
             lines.append(f"    - {s.get('src_ip','')}→{s.get('dst_ip','')} MOS={s.get('mos','')} "
                          f"ジッター={s.get('jitter_ms','')}ms ロス={s.get('loss_pct','')}%")
 
+    # 出力言語: アクセス先ドメインの地域に合わせる（アジア圏=日本語 / それ以外=英語）
+    if r.get("suggested_lang") == "en":
+        lines.append("")
+        lines.append("[OUTPUT LANGUAGE] The accessed domains are mainly outside Asia. "
+                     "Respond in ENGLISH. All JSON string values (summary, descriptions, "
+                     "actions, etc.) must be written in English.")
+    else:
+        lines.append("")
+        lines.append("【出力言語】アクセス先は日本を含むアジア圏中心です。日本語で回答してください。")
+
     return "\n".join(lines)
 
 
