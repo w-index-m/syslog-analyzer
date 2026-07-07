@@ -111,6 +111,28 @@ def _extract_id_values(payload: bytes) -> list:
         return []
     return _ID_VALUE_RE.findall(text)
 
+
+# ── CTF問題向け: flag{...}パターン / Base64らしき文字列の検出 ────────
+# ネットワークフォレンジック系CTF問題で頻出する「flagがパケット内の
+# どこかに平文/Base64で埋まっている」ケースをハントするヒューリスティック。
+_CTF_FLAG_RE = re.compile(rb"[A-Za-z0-9_]{2,20}\{[^{}\r\n]{2,200}\}")
+_BASE64_CANDIDATE_RE = re.compile(rb"(?:[A-Za-z0-9+/]{4}){5,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?")
+
+
+def scan_ctf_indicators(payload: bytes) -> list:
+    """CTF問題でよくある flag{...} パターンやBase64らしき文字列を検出する（ヒューリスティック）。"""
+    hits = []
+    if not payload:
+        return hits
+    for m in _CTF_FLAG_RE.finditer(payload):
+        text = m.group(0).decode("utf-8", errors="ignore")
+        hits.append({"type": "flag_pattern", "text": text[:200]})
+    for m in _BASE64_CANDIDATE_RE.finditer(payload):
+        raw = m.group(0)
+        if len(raw) >= 20:
+            hits.append({"type": "base64_candidate", "text": raw.decode("ascii", errors="ignore")[:200]})
+    return hits
+
 # ── VoIP/RTP ────────────────────────────────────────────────────
 RTP_CLOCK_RATES = {
     0: 8000, 8: 8000,   # G.711 u-law / a-law
@@ -372,6 +394,7 @@ def analyze_pcap(data: bytes) -> dict:
         syslog_packets      pcap内syslog
         unknown_proto_hints プロトコル不明な通信でID/sessionキーワードを検出したフロー
         session_id_correlations  同一ID値が複数フローにまたがって出現した突き合わせ結果
+        ctf_flag_hits       flag{...}パターン/Base64らしき文字列の検出結果（CTF向け）
         total_packets       int
         capture_start / capture_end  str
         error               str | None
@@ -382,6 +405,7 @@ def analyze_pcap(data: bytes) -> dict:
         "tcp_issues": [],     "tcp_retransmissions": [],
         "tcp_syn_no_synack": [], "tcp_zero_window": [],
         "scan_patterns": [],
+        "ctf_flag_hits": [],
         "ip_fragments": [],
         "http_errors": [],    "http_summary": {},
         "tls_sessions": [],   "tls_alerts": [],
@@ -436,6 +460,9 @@ def analyze_pcap(data: bytes) -> dict:
     # 人手では困難な「同じID値が複数フローにまたがって出現していないか」の突き合わせと、
     # 出現順（シーケンス）チェックに使う。
     session_id_index: dict[str, dict] = {}
+
+    # CTF問題向け flag{...}/Base64候補の検出結果
+    ctf_flag_hits: list = []
 
     def _record_unknown_hint(proto_name, src, dst, sp, dp, payload, ts):
         kw = _find_unknown_proto_keywords(payload)
@@ -536,6 +563,15 @@ def analyze_pcap(data: bytes) -> dict:
                     if tcp.win == 0 and not is_syn and not is_rst:
                         zero_win_count[(src, dst, sport, dport)] += 1
 
+                    # CTF flag{...}/Base64候補の検出（暗号化されたTLSポートは除く）
+                    if data_len > 0 and not (sport in TLS_PORTS or dport in TLS_PORTS):
+                        for _ctf_hit in scan_ctf_indicators(bytes(tcp.data)):
+                            ctf_flag_hits.append({
+                                "timestamp": _ts_str(ts), "protocol": "TCP",
+                                "src": src, "dst": dst, "src_port": sport, "dst_port": dport,
+                                **_ctf_hit,
+                            })
+
                     # ── HTTP (平文) ──────────────────────
                     if data_len > 0:
                         try:
@@ -616,6 +652,15 @@ def analyze_pcap(data: bytes) -> dict:
                 # ── UDP ─────────────────────────────────
                 elif isinstance(ip.data, dpkt.udp.UDP):
                     udp = ip.data
+
+                    # CTF flag{...}/Base64候補の検出（プロトコル種別によらず全UDPペイロード対象）
+                    if udp.data:
+                        for _ctf_hit in scan_ctf_indicators(bytes(udp.data)):
+                            ctf_flag_hits.append({
+                                "timestamp": _ts_str(ts), "protocol": "UDP",
+                                "src": src, "dst": dst, "src_port": udp.sport, "dst_port": udp.dport,
+                                **_ctf_hit,
+                            })
 
                     # RIP
                     if udp.dport == RIP_PORT or udp.sport == RIP_PORT:
@@ -1009,6 +1054,16 @@ def analyze_pcap(data: bytes) -> dict:
     result["session_id_correlations"].sort(
         key=lambda x: (x["anomaly_multi_src"], x["total_occurrences"]), reverse=True)
 
+    # CTF flag / Base64候補（重複排除: 同一フロー・種別・文字列は1件にまとめる）
+    _seen_ctf = set()
+    for h in ctf_flag_hits:
+        _ckey = (h["src"], h["dst"], h["src_port"], h["dst_port"], h["type"], h["text"])
+        if _ckey in _seen_ctf:
+            continue
+        _seen_ctf.add(_ckey)
+        result["ctf_flag_hits"].append(h)
+    result["ctf_flag_hits"].sort(key=lambda x: 0 if x["type"] == "flag_pattern" else 1)
+
     return result
 
 
@@ -1139,6 +1194,136 @@ def get_top_talkers(data: bytes, top_n: int = 20) -> list:
     ]
     result.sort(key=lambda x: x["total_bytes"], reverse=True)
     return result[:top_n]
+
+
+# ══════════════════════════════════════════════════════════════════
+#  TCPストリーム再構成（Wiresharkの「Follow TCP Stream」相当）
+#  CTF問題（ネットワークフォレンジック）でのファイル抽出・flag探索を想定。
+# ══════════════════════════════════════════════════════════════════
+def _reassemble_segments(segments: list) -> bytes:
+    """(seq, payload)のリストをseq順に並べ替え・重複排除して連結する（簡易再構成）。"""
+    if not segments:
+        return b""
+    segments = sorted(segments, key=lambda s: s[0])
+    buf = bytearray()
+    next_seq = None
+    for seq, payload in segments:
+        if next_seq is None:
+            buf.extend(payload)
+            next_seq = seq + len(payload)
+            continue
+        if seq >= next_seq:
+            buf.extend(payload)
+            next_seq = seq + len(payload)
+        else:
+            overlap = next_seq - seq
+            if overlap < len(payload):
+                buf.extend(payload[overlap:])
+                next_seq = seq + len(payload)
+    return bytes(buf)
+
+
+def get_tcp_streams(data: bytes) -> list:
+    """
+    TCPストリームを方向別（client→server / server→client）に再構成する。
+    シーケンス番号順の並べ替え・重複除去のみを行う簡易実装で、大きく順序が
+    乱れたキャプチャでの完全な正確性は保証しない（CTF問題等の比較的単純な
+    キャプチャでの利用を想定）。
+    """
+    try:
+        reader, _ = _open_capture(data)
+    except Exception:
+        return []
+
+    flows: dict = {}
+    for ts, raw_pkt in reader:
+        try:
+            eth = dpkt.ethernet.Ethernet(raw_pkt)
+        except Exception:
+            continue
+        if not isinstance(eth.data, dpkt.ip.IP):
+            continue
+        ip = eth.data
+        if not isinstance(ip.data, dpkt.tcp.TCP):
+            continue
+        tcp = ip.data
+        if not tcp.data:
+            continue
+        src, dst = _ip_str(ip.src), _ip_str(ip.dst)
+        sport, dport = tcp.sport, tcp.dport
+
+        if (src, sport) <= (dst, dport):
+            ckey, is_c2s = (src, dst, sport, dport), True
+        else:
+            ckey, is_c2s = (dst, src, dport, sport), False
+
+        f = flows.setdefault(ckey, {
+            "src": ckey[0], "dst": ckey[1], "src_port": ckey[2], "dst_port": ckey[3],
+            "c2s_segments": [], "s2c_segments": [], "packets": 0,
+            "start_ts": ts, "end_ts": ts,
+        })
+        f["packets"] += 1
+        f["start_ts"] = min(f["start_ts"], ts)
+        f["end_ts"] = max(f["end_ts"], ts)
+        (f["c2s_segments"] if is_c2s else f["s2c_segments"]).append((tcp.seq, bytes(tcp.data)))
+
+    result = []
+    for f in flows.values():
+        c2s_bytes = _reassemble_segments(f["c2s_segments"])
+        s2c_bytes = _reassemble_segments(f["s2c_segments"])
+        if not c2s_bytes and not s2c_bytes:
+            continue
+        result.append({
+            "src": f["src"], "dst": f["dst"], "src_port": f["src_port"], "dst_port": f["dst_port"],
+            "packets": f["packets"],
+            "start_ts": _ts_str(f["start_ts"]), "end_ts": _ts_str(f["end_ts"]),
+            "client_to_server": c2s_bytes, "server_to_client": s2c_bytes,
+            "c2s_bytes": len(c2s_bytes), "s2c_bytes": len(s2c_bytes),
+        })
+    result.sort(key=lambda x: x["c2s_bytes"] + x["s2c_bytes"], reverse=True)
+    return result
+
+
+# 既知のファイルシグネチャ(マジックバイト)。CTFのpcap問題で頻出する
+# 「HTTP/FTP等の通信に隠されたファイル」の抽出（ファイルカービング）用。
+_FILE_SIGNATURES = [
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"\xff\xd8\xff", "jpg"),
+    (b"GIF87a", "gif"),
+    (b"GIF89a", "gif"),
+    (b"PK\x03\x04", "zip"),
+    (b"%PDF-", "pdf"),
+    (b"\x7fELF", "elf"),
+    (b"Rar!\x1a\x07\x00", "rar"),
+]
+
+
+def find_embedded_files(stream_bytes: bytes) -> list:
+    """
+    再構成したTCPストリームから既知のファイルシグネチャを検出し、
+    そこから次のシグネチャ出現位置（または末尾）までを候補として切り出す。
+    正確なファイル長は保証しないベストエフォート実装（ファイルカービング）。
+    """
+    if not stream_bytes:
+        return []
+    hits = []
+    for sig, ext in _FILE_SIGNATURES:
+        start = 0
+        while True:
+            idx = stream_bytes.find(sig, start)
+            if idx == -1:
+                break
+            hits.append({"offset": idx, "ext": ext})
+            start = idx + len(sig)
+    hits.sort(key=lambda h: h["offset"])
+    files = []
+    for i, h in enumerate(hits):
+        end = hits[i + 1]["offset"] if i + 1 < len(hits) else len(stream_bytes)
+        chunk = stream_bytes[h["offset"]:end]
+        if len(chunk) < 8:
+            continue
+        files.append({"ext": h["ext"], "offset": h["offset"], "size": len(chunk), "data": chunk})
+    return files
 
 
 def filter_pcap(

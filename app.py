@@ -834,10 +834,12 @@ with st.sidebar:
             _demo_pcap_res   = _pa_demo.analyze_pcap(_demo_result["pcap_bytes"])
             _demo_pcap_convs = _pa_demo.get_conversations(_demo_result["pcap_bytes"])
             _demo_pcap_tlk   = _pa_demo.get_top_talkers(_demo_result["pcap_bytes"])
+            _demo_pcap_streams = _pa_demo.get_tcp_streams(_demo_result["pcap_bytes"])
             st.session_state["_pcap_key"]     = f"demo_{_demo_scenario}"
             st.session_state["_pcap_res"]     = _demo_pcap_res
             st.session_state["_pcap_convs"]   = _demo_pcap_convs
             st.session_state["_pcap_talkers"] = _demo_pcap_tlk
+            st.session_state["_pcap_streams"] = _demo_pcap_streams
         st.success(
             f"生成完了 — syslog: {_demo_result['syslog_count']}件 | "
             f"NetFlow: {_demo_result['flow_count']}件 | "
@@ -3196,6 +3198,7 @@ snmp-server trap enable
                             pcap_result = pcap_analyzer.analyze_pcap(pcap_bytes)
                             pcap_convs   = pcap_analyzer.get_conversations(pcap_bytes)
                             pcap_talkers = pcap_analyzer.get_top_talkers(pcap_bytes)
+                            pcap_streams = pcap_analyzer.get_tcp_streams(pcap_bytes)
                         # 「📦 パケット解析」タブと同じセッション状態に格納する。
                         # これにより取得経路（アップロード/SCP/EPC）によらず同じ解析結果表示・
                         # 同じ「🤖 AI診断実行」ボタンが使えるようになる。
@@ -3203,6 +3206,7 @@ snmp-server trap enable
                         st.session_state["_pcap_res"]     = pcap_result
                         st.session_state["_pcap_convs"]   = pcap_convs
                         st.session_state["_pcap_talkers"] = pcap_talkers
+                        st.session_state["_pcap_streams"] = pcap_streams
 
                         # 解析結果を表示
                         st.markdown("#### 📊 pcap 解析結果")
@@ -3893,10 +3897,12 @@ with tab_pcap:
                     _dl_res   = pcap_analyzer.analyze_pcap(_dl_bytes)
                     _dl_convs = pcap_analyzer.get_conversations(_dl_bytes)
                     _dl_tlk   = pcap_analyzer.get_top_talkers(_dl_bytes)
+                    _dl_streams = pcap_analyzer.get_tcp_streams(_dl_bytes)
                 st.session_state["_pcap_key"]     = f"_dl_{_sel_dev['ip']}_{_dl_file}"
                 st.session_state["_pcap_res"]     = _dl_res
                 st.session_state["_pcap_convs"]   = _dl_convs
                 st.session_state["_pcap_talkers"] = _dl_tlk
+                st.session_state["_pcap_streams"] = _dl_streams
                 st.download_button(
                     "💾 ローカルに保存", data=_dl_bytes,
                     file_name=_dl_file.split("/")[-1],
@@ -3930,22 +3936,27 @@ with tab_pcap:
                 res      = pcap_analyzer.analyze_pcap(raw_bytes)
                 convs    = pcap_analyzer.get_conversations(raw_bytes)
                 talkers  = pcap_analyzer.get_top_talkers(raw_bytes)
+                streams  = pcap_analyzer.get_tcp_streams(raw_bytes)
             st.session_state["_pcap_key"]     = _pcap_key
             st.session_state["_pcap_res"]     = res
             st.session_state["_pcap_convs"]   = convs
             st.session_state["_pcap_talkers"] = talkers
+            st.session_state["_pcap_streams"] = streams
         else:
             res     = st.session_state["_pcap_res"]
             convs   = st.session_state["_pcap_convs"]
             talkers = st.session_state["_pcap_talkers"]
+            streams = st.session_state.get("_pcap_streams", [])
     elif st.session_state.get("_pcap_res"):
         # SCP/EPCなど、アップロード以外の経路で取得済みのpcap結果があればそちらを使う
         # （取得経路によらず、同じ解析結果表示・同じAI診断ボタンを使うための統一処理）
         res     = st.session_state["_pcap_res"]
         convs   = st.session_state.get("_pcap_convs", [])
         talkers = st.session_state.get("_pcap_talkers", [])
+        streams = st.session_state.get("_pcap_streams", [])
     else:
         res = None
+        streams = []
 
     if res is not None:
         if res["error"]:
@@ -4419,6 +4430,105 @@ with tab_pcap:
                         df_sid_tl.columns = ["時刻", "プロトコル", "送信元IP", "宛先IP",
                                               "送信元Port", "宛先Port", "前回からの間隔(秒)"]
                         st.dataframe(df_sid_tl, use_container_width=True, hide_index=True)
+
+                    # TCPフローであれば、再構成したストリームとして中身を確認できるようにする
+                    _sid_tcp_flows = [f for f in _sel_c["flows"] if f["protocol"] == "TCP"]
+                    if _sid_tcp_flows and streams:
+                        _sid_flow_labels = {
+                            f"{f['src']}:{f['src_port']} ⇄ {f['dst']}:{f['dst_port']}": f
+                            for f in _sid_tcp_flows
+                        }
+                        _sid_flow_pick = st.selectbox("ストリームで見るフローを選択",
+                                                       list(_sid_flow_labels.keys()),
+                                                       key="sid_flow_to_stream")
+                        if st.button("🔗 このフローをストリームで見る", key="sid_jump_to_stream"):
+                            _pf = _sid_flow_labels[_sid_flow_pick]
+                            st.session_state["_stream_jump_flow"] = (_pf["src"], _pf["dst"],
+                                                                      _pf["src_port"], _pf["dst_port"])
+                            st.rerun()
+
+            # ── 🚩 CTF/フォレンジック機能 ────────────────
+            _ctf_hits = res.get("ctf_flag_hits", [])
+            if _ctf_hits or streams:
+                st.markdown("---")
+                st.markdown("### 🚩 CTF / フォレンジック機能")
+                st.caption("ネットワークフォレンジック系CTF問題向け。flag{...}パターン・Base64らしき"
+                           "文字列の検出と、TCPストリームの再構成（Wiresharkの「Follow TCP Stream」相当）・"
+                           "埋め込みファイルの抽出（ファイルカービング）ができます。"
+                           "いずれもヒューリスティックのため、必ず内容を目視確認してください。")
+
+                if _ctf_hits:
+                    st.markdown("**🚩 検出されたflag候補・Base64候補**")
+                    df_ctf = pd.DataFrame(_ctf_hits)
+                    df_ctf = df_ctf[["type", "protocol", "src", "dst", "src_port", "dst_port",
+                                      "timestamp", "text"]]
+                    df_ctf.columns = ["種別", "プロトコル", "送信元IP", "宛先IP",
+                                       "送信元Port", "宛先Port", "時刻", "検出文字列"]
+                    df_ctf["種別"] = df_ctf["種別"].map(
+                        {"flag_pattern": "🚩 flagパターン", "base64_candidate": "🔤 Base64候補"})
+                    _show_table_top_n(df_ctf, "ctf_flag_hits.csv", "dl_ctf_flag_csv")
+
+                if streams:
+                    st.markdown("**🔗 TCPストリーム再構成（Follow TCP Stream）**")
+                    _stream_labels = {
+                        f"#{i} {s['src']}:{s['src_port']} ⇄ {s['dst']}:{s['dst_port']} "
+                        f"({s['c2s_bytes']+s['s2c_bytes']}B, {s['packets']}pkt)": s
+                        for i, s in enumerate(streams)
+                    }
+                    _jump = st.session_state.pop("_stream_jump_flow", None)
+                    _default_idx = 0
+                    _label_list = list(_stream_labels.keys())
+                    if _jump:
+                        for _i, (_lbl, _s) in enumerate(_stream_labels.items()):
+                            if (_s["src"], _s["dst"], _s["src_port"], _s["dst_port"]) == _jump:
+                                _default_idx = _i
+                                break
+                    _sel_stream_lbl = st.selectbox("ストリームを選択", _label_list,
+                                                    index=_default_idx, key="ctf_stream_sel")
+                    _sel_stream = _stream_labels[_sel_stream_lbl]
+                    _stream_full = _sel_stream["client_to_server"] + _sel_stream["server_to_client"]
+
+                    _st_c1, _st_c2 = st.columns(2)
+                    with _st_c1:
+                        st.markdown(f"**→ 送信 ({_sel_stream['c2s_bytes']} bytes)**")
+                        st.text_area("client_to_server",
+                                     _sel_stream["client_to_server"].decode("utf-8", errors="replace"),
+                                     height=200, key=f"ctf_stream_c2s_{_sel_stream_lbl}",
+                                     label_visibility="collapsed")
+                    with _st_c2:
+                        st.markdown(f"**← 応答 ({_sel_stream['s2c_bytes']} bytes)**")
+                        st.text_area("server_to_client",
+                                     _sel_stream["server_to_client"].decode("utf-8", errors="replace"),
+                                     height=200, key=f"ctf_stream_s2c_{_sel_stream_lbl}",
+                                     label_visibility="collapsed")
+
+                    if st.button("🚩 このストリームでflag/Base64を検索", key="ctf_stream_scan"):
+                        _stream_hits = pcap_analyzer.scan_ctf_indicators(_stream_full)
+                        if _stream_hits:
+                            for _sh in _stream_hits:
+                                _icon = "🚩" if _sh["type"] == "flag_pattern" else "🔤"
+                                st.success(f"{_icon} {_sh['text']}")
+                        else:
+                            st.info("このストリームからは検出されませんでした。")
+
+                    _embedded = pcap_analyzer.find_embedded_files(_stream_full)
+                    if _embedded:
+                        st.markdown(f"**📁 埋め込みファイル候補（{len(_embedded)}件・ベストエフォート抽出）**")
+                        for _fi, _ef in enumerate(_embedded):
+                            _fc1, _fc2 = st.columns([3, 1])
+                            _fc1.markdown(f"`.{_ef['ext']}` — オフセット{_ef['offset']} / {_ef['size']} bytes")
+                            _fc2.download_button(
+                                "📥 ダウンロード", data=_ef["data"],
+                                file_name=f"extracted_{_fi}.{_ef['ext']}",
+                                mime="application/octet-stream",
+                                key=f"dl_embedded_{_fi}_{_sel_stream['src']}_{_sel_stream['src_port']}",
+                            )
+
+                    st.download_button(
+                        "📥 このストリームの生データをダウンロード（送信+応答結合）",
+                        data=_stream_full, file_name="tcp_stream.bin",
+                        mime="application/octet-stream", key="dl_stream_raw",
+                    )
 
             # ── HTTP 解析 ────────────────────────────────
             _http_errs = res.get("http_errors", [])
