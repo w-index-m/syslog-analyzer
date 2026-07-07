@@ -4107,7 +4107,15 @@ with tab_pcap:
                         st.markdown(f"- 🔴 **ICMPエクスフィル**: {_ie['detail']}")
 
             # ── 📧 メール添付ファイルのウイルスチェック ──────
-            _mail_atts = pcap_analyzer.scan_email_attachments(streams=streams)
+            # 付加機能のため、万一失敗してもページ全体を落とさないよう防御的に呼ぶ
+            # （モジュールのバージョン差異・特殊なMIME等でも安全に無視する）。
+            _mail_atts = []
+            try:
+                if hasattr(pcap_analyzer, "scan_email_attachments"):
+                    _mail_atts = pcap_analyzer.scan_email_attachments(streams=streams)
+            except Exception as _mail_err:
+                _mail_atts = []
+                print(f"[app] メール添付チェックをスキップ: {_mail_err}")
             if _mail_atts:
                 st.markdown("---")
                 st.markdown("### 📧 メール添付ファイルのウイルスチェック")
