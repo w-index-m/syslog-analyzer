@@ -254,6 +254,38 @@ def pull_ollama_model(name: str, progress_cb=None) -> tuple[bool, str]:
     except Exception as e:
         return False, f"pull 通信エラー: {e}"
 
+
+def create_packet_analyst_model(base_model: str, target_name: str = "packet-analyst") -> tuple[bool, str]:
+    """
+    既存のOllamaベースモデルに pcap解析用システムプロンプトを焼き込んだ
+    「専用モデル」をOllamaのModelfile機構で作成する。
+    ※重みを調整する本格的なファインチューニングではなく、システムプロンプト・
+    パラメータを固定した軽量版。作成後は list_ollama_models() に他モデルと
+    同様に表示され、通常のモデルとして選択・呼び出しできる。
+    戻り値: (成功したか, メッセージ)
+    """
+    base_model = (base_model or "").strip()
+    target_name = (target_name or "packet-analyst").strip()
+    if not base_model:
+        return False, "ベースモデルを指定してください。"
+    modelfile = (
+        f"FROM {base_model}\n"
+        f'SYSTEM """{_PCAP_SYSTEM_PROMPT}"""\n'
+        f"PARAMETER temperature 0.1\n"
+    )
+    try:
+        resp = requests.post(
+            f"{OLLAMA_BASE_URL}/api/create",
+            json={"model": target_name, "modelfile": modelfile, "stream": False},
+            timeout=300,
+        )
+        if resp.status_code == 200:
+            return True, f"専用モデル '{target_name}' を作成しました（ベース: {base_model}）。"
+        return False, f"作成失敗 (HTTP {resp.status_code}): {resp.text[:200]}"
+    except Exception as e:
+        return False, f"作成エラー: {e}"
+
+
 def check_claude_available() -> bool:
     return bool(ANTHROPIC_API_KEY)
 
@@ -1339,6 +1371,95 @@ def diagnose_pcap(pcap_result: dict, mode: str = "auto") -> dict:
             "diagnosis_model": "ルールベース",
         }
     return result
+
+
+_ID_CORRELATION_TOOL = {
+    "name": "get_id_correlation_detail",
+    "description": ("ID/session突き合わせで検出された特定のID値について、"
+                     "出現した全フローと時系列タイムラインの詳細を取得する。"),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "id_value": {"type": "string", "description": "詳細を取得したいID/session値"},
+        },
+        "required": ["id_value"],
+    },
+}
+
+
+def _get_id_correlation_tool_result(pcap_result: dict, id_value: str) -> str:
+    for c in pcap_result.get("session_id_correlations", []):
+        if c.get("id_value") == id_value:
+            return json.dumps({
+                "id_value": c["id_value"],
+                "total_occurrences": c["total_occurrences"],
+                "distinct_flows": c["distinct_flows"],
+                "distinct_src_ips": c["distinct_src_ips"],
+                "flows": c["flows"],
+                "timeline": c["timeline"],
+            }, ensure_ascii=False)
+    return json.dumps({"error": f"ID値 '{id_value}' の突き合わせ結果が見つかりません。"}, ensure_ascii=False)
+
+
+def diagnose_pcap_agentic(pcap_result: dict, max_tool_rounds: int = 3) -> dict | None:
+    """
+    Claude の tool use 機能を使い、ID/session突き合わせ結果についてLLMが
+    自分で「詳しく見せて」とツール呼び出しで深掘りしながらpcap診断を行う
+    （エージェント的診断のMVP。ID/session相関の深掘りのみ対応）。
+    Claude APIキー未設定時、または応答形式エラー時はNoneを返す
+    （呼び出し側で通常のdiagnose_pcapへフォールバックする想定）。
+    """
+    if not ANTHROPIC_API_KEY:
+        return None
+    prompt = _build_pcap_prompt(pcap_result)
+    messages = [{"role": "user", "content": prompt}]
+    tool_calls_made = []
+
+    try:
+        for _ in range(max_tool_rounds):
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": ANTHROPIC_API_KEY,
+                         "anthropic-version": "2023-06-01",
+                         "content-type": "application/json"},
+                json={"model": "claude-sonnet-4-6", "max_tokens": 1500,
+                      "system": _PCAP_SYSTEM_PROMPT,
+                      "tools": [_ID_CORRELATION_TOOL],
+                      "messages": messages},
+                timeout=45,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            messages.append({"role": "assistant", "content": data["content"]})
+
+            if data.get("stop_reason") != "tool_use":
+                text_blocks = [b["text"] for b in data["content"] if b.get("type") == "text"]
+                text = "\n".join(text_blocks).strip().replace("```json", "").replace("```", "").strip()
+                result = json.loads(text)
+                result["diagnosis_model"] = "claude-sonnet-4-6 (agentic)"
+                result["tool_calls_made"] = tool_calls_made
+                return result
+
+            tool_results = []
+            for block in data["content"]:
+                if block.get("type") != "tool_use":
+                    continue
+                if block.get("name") == "get_id_correlation_detail":
+                    id_value = block.get("input", {}).get("id_value", "")
+                    tool_calls_made.append(id_value)
+                    result_text = _get_id_correlation_tool_result(pcap_result, id_value)
+                else:
+                    result_text = json.dumps({"error": "unknown tool"})
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block["id"],
+                    "content": result_text,
+                })
+            messages.append({"role": "user", "content": tool_results})
+        return None
+    except Exception as e:
+        print(f"[pcap diag:agentic] {e}")
+        return None
 
 
 def diagnose_pcap_with_ollama_model(pcap_result: dict, model_name: str) -> dict | None:

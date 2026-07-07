@@ -252,6 +252,39 @@ def _render_pcap_ai_diagnosis(res: dict, key_prefix: str = "main"):
         st.caption(f"診断モデル: {_pcap_diag.get('diagnosis_model','')} | "
                    f"LLMモード: {st.session_state.get('llm_mode','auto')}")
 
+    # ── エージェント診断（Claude tool use、ID/session深掘りMVP） ──
+    if analyzer.check_claude_available() and res.get("session_id_correlations"):
+        st.markdown("")
+        _ag_col1, _ag_col2 = st.columns([5, 1])
+        _ag_col1.markdown("**🕵️ エージェント診断（Claude, ID/session深掘り）**")
+        _ag_col1.caption("通常診断と異なり、LLMが自分でID/session突き合わせの詳細（タイムライン等）を"
+                         "ツール呼び出しで取得してから診断します（Claude APIのみ対応・MVP）。")
+        with _ag_col2:
+            _agentic_btn = st.button("🕵️ 実行", key=f"pcap_agentic_{key_prefix}",
+                                      use_container_width=True)
+        _agentic_state_key = f"_pcap_agentic_{key_prefix}"
+        if _agentic_btn:
+            with st.spinner("Claudeがツール呼び出しで深掘りしながら分析中..."):
+                st.session_state[_agentic_state_key] = analyzer.diagnose_pcap_agentic(res)
+
+        _agentic_diag = st.session_state.get(_agentic_state_key)
+        if _agentic_diag:
+            if _agentic_diag.get("tool_calls_made"):
+                st.caption("🔍 深掘りしたID値: " + ", ".join(_agentic_diag["tool_calls_made"]))
+            _ah = _agentic_diag.get("overall_health", "")
+            _ahc = {"正常": "🟢", "要注意": "🟡", "問題あり": "🟠", "重大": "🔴"}.get(_ah, "⚪")
+            st.markdown(f"**総合評価: {_ahc} {_ah}**")
+            st.markdown(_agentic_diag.get("summary", ""))
+            for _iss in _agentic_diag.get("top_issues", []):
+                _sev_icon = {"高": "🔴", "中": "🟡", "低": "🟢"}.get(_iss.get("severity", ""), "⚪")
+                with st.expander(f"{_sev_icon} [{_iss.get('category','')}] {_iss.get('description','')}"):
+                    st.markdown(f"**原因推定:** {_iss.get('root_cause','')}")
+                    st.markdown(f"**推奨対応:** {_iss.get('action','')}")
+            st.info(f"**🚨 最優先対応:** {_agentic_diag.get('priority_action','')}")
+            st.caption(f"診断モデル: {_agentic_diag.get('diagnosis_model','')}")
+        elif _agentic_btn:
+            st.error("エージェント診断に失敗しました（応答形式エラー等）。通常のAI診断をご利用ください。")
+
     # ── 複数Ollamaモデルによる多面解析（ローカル限定） ──
     # クラウドAPIと違いOllamaは呼び出し課金・レート制限がないため、
     # 導入済みモデルが複数あれば同じデータを全モデルに投げて比較する価値がある。
@@ -729,6 +762,23 @@ with st.sidebar:
                     st.rerun()
                 else:
                     st.error(_msg)
+
+        # ── pcap解析専用モデルを作成（Modelfileにシステムプロンプトを焼き込み） ──
+        with st.expander("🏗️ pcap解析専用モデルを作成（packet-analyst）"):
+            st.caption("導入済みモデルをベースに、pcap解析用のシステムプロンプトを焼き込んだ"
+                       "専用モデルを作成します（重み調整の本格的なファインチューニングではなく、"
+                       "Ollama Modelfileによる軽量版）。作成後は他のモデルと同様に選択して使えます。")
+            if _installed:
+                _base_model_sel = st.selectbox("ベースモデル", _installed, key="packet_analyst_base")
+            else:
+                _base_model_sel = st.text_input("ベースモデル名", value="gemma3", key="packet_analyst_base_txt")
+            _target_name = st.text_input("作成するモデル名", value="packet-analyst", key="packet_analyst_name")
+            if st.button("🏗️ 専用モデルを作成", key="packet_analyst_create_btn", use_container_width=True):
+                with st.spinner(f"'{_target_name}' を作成中…"):
+                    _pa_ok, _pa_msg = analyzer.create_packet_analyst_model(_base_model_sel, _target_name)
+                (st.success if _pa_ok else st.error)(_pa_msg)
+                if _pa_ok:
+                    st.rerun()
     else:
         # Ollama 自体が起動していない場合の案内（モデル取得もできない）
         st.caption("💡 完全ローカルで使うには Ollama を起動してください（https://ollama.com）。"
