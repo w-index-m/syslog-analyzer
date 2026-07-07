@@ -851,8 +851,9 @@ with st.sidebar:
     if _demo_r:
         st.caption(f"最終実行: {_demo_r['scenario']} シナリオ")
         if _demo_r.get("pcap_bytes"):
+            st.info("📦 生成したpcapは「📦 パケット解析」タブで**ダウンロード不要でそのまま解析済み**です。")
             st.download_button(
-                "💾 demo.pcap をダウンロード",
+                "💾 demo.pcap をダウンロード（任意）",
                 data=_demo_r["pcap_bytes"],
                 file_name=f"demo_{_demo_r['scenario']}.pcap",
                 mime="application/octet-stream",
@@ -3815,6 +3816,25 @@ with tab_pcap:
     import restconf_client as _rc
 
     st.markdown("## 📦 パケット解析（Wireshark pcap/pcapng）")
+
+    # ── 解析済みpcapがあれば最上部で明示（デモ/SCP/EPC/アップロードいずれの経路でも） ──
+    _loaded_key = st.session_state.get("_pcap_key", "")
+    if st.session_state.get("_pcap_res") and _loaded_key:
+        if _loaded_key.startswith("demo_"):
+            _src_label = f"🎮 デモシミュレーター（{_loaded_key[5:]} シナリオ）で生成したpcap"
+        elif _loaded_key.startswith("_dl_"):
+            _src_label = "📡 SCPでダウンロードしたpcap"
+        elif _loaded_key.startswith("epc_"):
+            _src_label = "📡 EPC（機器キャプチャ）でダウンロードしたpcap"
+        else:
+            _src_label = "📁 アップロードしたpcap"
+        _lc1, _lc2 = st.columns([4, 1])
+        _lc1.success(f"✅ {_src_label} を解析済みです。**このページ下部**に結果を表示しています"
+                     "（ダウンロード不要でそのまま解析されています）。")
+        if _lc2.button("🗑️ クリア", key="pcap_clear_loaded", use_container_width=True):
+            for _k in ("_pcap_key", "_pcap_res", "_pcap_convs", "_pcap_talkers", "_pcap_streams"):
+                st.session_state.pop(_k, None)
+            st.rerun()
 
     # ══════════════════════════════════════════
     # デバイス登録 & SSH/SCP ダウンロード
