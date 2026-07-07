@@ -37,6 +37,7 @@ SCENARIOS = {
     "f5_bigip":      "🅵 F5 BIG-IP（プール障害・HA切替）",
     "paloalto":      "🛡️ Palo Alto（脅威検知・HAダウン）",
     "sir":           "📡 富士通 Si-R（回線断・エラーコード）",
+    "session_id_demo": "🔑 セッションID使い回し（乗っ取り疑い）",
 }
 
 # ─── サンプル IP ───────────────────────────────────────────────────
@@ -709,6 +710,50 @@ def _pcap_ddos() -> bytes:
     return _write_pcap(pkts)
 
 
+def _pcap_session_id_demo() -> bytes:
+    """
+    「ID/session突き合わせ」機能のデモ用サンプル。
+    ① 正常な1セッション（1つの送信元IPのみで複数リクエスト）
+    ② 同じsession_idが正規クライアントとは別の送信元IPから後になって
+       使われる「セッションの使い回し/乗っ取り」疑いのケース
+    を1つのpcapにまとめる（session_id_correlationsで検出される想定）。
+    """
+    pkts = []
+    t = time.time() - 120
+
+    app_server    = "10.0.0.100"
+    normal_client = "192.168.10.20"
+    attacker_ip   = "203.0.113.99"
+
+    # ① 正常セッション（1送信元IPのみ）
+    normal_sid = "a1b2c3d4e5"
+    pkts.append((t, _ip_tcp(normal_client, app_server, 51000, 8080,
+                             dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=1000,
+                             data=f"GET /login HTTP/1.1\r\nCookie: session_id={normal_sid}\r\n\r\n".encode())))
+    t += 2.0
+    pkts.append((t, _ip_tcp(normal_client, app_server, 51000, 8080,
+                             dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=1100,
+                             data=f"GET /profile HTTP/1.1\r\nCookie: session_id={normal_sid}\r\n\r\n".encode())))
+    t += 30.0
+
+    # ② セッション使い回し疑い: 正規クライアントが使っていたsession_idを
+    #    後から別の送信元IPが使う（乗っ取り/共有の疑い）
+    hijack_sid = "f9e8d7c6b5"
+    pkts.append((t, _ip_tcp(normal_client, app_server, 51500, 8080,
+                             dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=2000,
+                             data=f"POST /transfer HTTP/1.1\r\nCookie: session_id={hijack_sid}\r\n\r\namount=100".encode())))
+    t += 5.0
+    pkts.append((t, _ip_tcp(attacker_ip, app_server, 44444, 8080,
+                             dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=3000,
+                             data=f"POST /transfer HTTP/1.1\r\nCookie: session_id={hijack_sid}\r\n\r\namount=99999".encode())))
+    t += 3.0
+    pkts.append((t, _ip_tcp(attacker_ip, app_server, 44445, 8080,
+                             dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=4000,
+                             data=f"GET /admin/export HTTP/1.1\r\nCookie: session_id={hijack_sid}\r\n\r\n".encode())))
+
+    return _write_pcap(pkts)
+
+
 def _pcap_showcase() -> bytes:
     """
     パケット解析タブの全機能を一度に試せる総合サンプル。
@@ -861,6 +906,7 @@ def run_scenario(scenario: str) -> dict:
         "f5_bigip":       _pcap_normal,
         "paloalto":       _pcap_normal,
         "sir":            _pcap_normal,
+        "session_id_demo": _pcap_session_id_demo,
     }.get(scenario, _pcap_normal)
 
     try:
