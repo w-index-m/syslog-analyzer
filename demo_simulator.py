@@ -41,6 +41,7 @@ SCENARIOS = {
     "session_id_demo": "🔑 セッションID使い回し（乗っ取り疑い）",
     "ctf_challenge": "🚩 CTF練習問題（パケットフォレンジック）",
     "ips_attack": "🛡️ Web攻撃/侵入試行（IPSシグネチャ検知）",
+    "malware_behavior": "🦠 マルウェア挙動（横展開・C2・怪しい外部・添付ウイルス）",
 }
 
 # ─── サンプル IP ───────────────────────────────────────────────────
@@ -871,6 +872,68 @@ def _pcap_ips_attack() -> bytes:
     return _write_pcap(pkts)
 
 
+def _pcap_malware_behavior() -> bytes:
+    """
+    振る舞い検知のデモ。1台の感染端末が「複数の怪しい挙動」を示し、
+    ホスト別リスクスコアで重大判定される様子を再現する。
+      ① ワーム横展開: 445(SMB)へ内部25台に連続接続
+      ② C2ビーコニング: 外部C2へ約30秒間隔で規則的に接続
+      ③ 怪しい外部アクセス: raw.githubusercontent系＋DGAらしきドメイン
+      ④ 大容量持ち出し: 外部へ2MB送信
+      ⑤ メール添付ウイルス: SMTPでEICAR入り .exe を送信
+    """
+    pkts = []
+    t = time.time() - 300
+    infected = "192.168.10.66"
+
+    # ① ワーム横展開（SMB 445 → 内部25台）
+    for i in range(25):
+        pkts.append((t, _ip_tcp(infected, f"192.168.10.{100 + i}", 40000 + i, 445,
+                                 dpkt.tcp.TH_SYN, seq=i))); t += 0.2
+
+    # ② C2ビーコニング（約30秒間隔×10回）
+    _tb = t
+    for i in range(10):
+        pkts.append((_tb + i * 30.0, _ip_tcp(infected, "203.0.113.200", 50000 + i, 443,
+                                             dpkt.tcp.TH_SYN, seq=i * 7)))
+    t = _tb + 320
+
+    # ③ 怪しい外部アクセス（DNS）
+    for name in ["raw.githubusercontent.com", "kq3x9zp1v7mn4bq8w2.example.net"]:
+        q = _dns_query(infected, name, random.randint(1, 65535))
+        if q:
+            pkts.append((t, q)); t += 0.2
+
+    # ④ 大容量持ち出し（外部へ2MB）
+    for i in range(1500):
+        pkts.append((t, _ip_tcp(infected, "198.51.100.9", 51000, 443,
+                                 dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK,
+                                 seq=i * 1400, data=b"X" * 1400))); t += 0.001
+
+    # ⑤ メール添付ウイルス（SMTPでEICAR入り .exe）
+    eicar = (r'X5O!P%@AP[4\PZX54(P^)7CC)7}$'
+             'EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*')
+    b64 = base64.b64encode(eicar.encode()).decode()
+    mime = (
+        "EHLO evil\r\nMAIL FROM:<a@evil.com>\r\nRCPT TO:<v@corp.com>\r\nDATA\r\n"
+        "From: a@evil.com\r\nTo: v@corp.com\r\nSubject: Invoice_urgent\r\n"
+        "MIME-Version: 1.0\r\n"
+        'Content-Type: multipart/mixed; boundary="BND"\r\n\r\n'
+        "--BND\r\nContent-Type: text/plain\r\n\r\nPlease open the attached invoice.\r\n"
+        "--BND\r\nContent-Type: application/octet-stream; name=\"invoice.exe\"\r\n"
+        'Content-Disposition: attachment; filename="invoice.exe"\r\n'
+        "Content-Transfer-Encoding: base64\r\n\r\n" + b64 + "\r\n--BND--\r\n.\r\n"
+    ).encode()
+    _half = len(mime) // 2
+    pkts.append((t, _ip_tcp(infected, "203.0.113.25", 52000, 25,
+                             dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=1000, data=mime[:_half]))); t += 0.1
+    pkts.append((t, _ip_tcp(infected, "203.0.113.25", 52000, 25,
+                             dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=1000 + _half, data=mime[_half:])))
+
+    pkts.sort(key=lambda x: x[0])
+    return _write_pcap(pkts)
+
+
 def _pcap_showcase() -> bytes:
     """
     パケット解析タブの全機能を一度に試せる総合サンプル。
@@ -1026,6 +1089,7 @@ def run_scenario(scenario: str) -> dict:
         "session_id_demo": _pcap_session_id_demo,
         "ctf_challenge":   _pcap_ctf_challenge,
         "ips_attack":      _pcap_ips_attack,
+        "malware_behavior": _pcap_malware_behavior,
     }.get(scenario, _pcap_normal)
 
     try:

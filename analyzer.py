@@ -1185,6 +1185,32 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
                      "（SQLi/XSS/Log4Shell/リバースシェル等）を明記し、severityを高めに評価して"
                      "断定的に報告してください。")
 
+    _behav = (r.get("worm_propagation", []) + r.get("beaconing", [])
+              + r.get("suspicious_destinations", []) + r.get("data_exfil", []))
+    if _behav:
+        lines.append("")
+        lines.append("【🦠 振る舞い型検知（ワーム拡散/C2/持ち出し等の挙動・確定情報）】")
+        for wp in r.get("worm_propagation", [])[:3]:
+            lines.append(f"    - [ワーム横展開] {wp.get('detail','')}")
+        for bc in r.get("beaconing", [])[:3]:
+            lines.append(f"    - [C2ビーコニング] {bc.get('detail','')}")
+        for de in r.get("data_exfil", [])[:3]:
+            lines.append(f"    - [大容量持ち出し] {de.get('detail','')}")
+        for sd in r.get("suspicious_destinations", [])[:3]:
+            lines.append(f"    - [怪しい外部アクセス] {sd.get('detail','')}")
+        lines.append("    ※シグネチャに現れない挙動ベースの検知です（新型/AI生成マルウェアも捕捉）。")
+
+    if r.get("host_risk"):
+        _hr_top = [h for h in r["host_risk"] if h.get("risk_score", 0) >= 40]
+        if _hr_top:
+            lines.append("")
+            lines.append("【⚠️ ホスト別リスクスコア（複数挙動を束ねた危険度・確定情報）】")
+            for h in _hr_top[:5]:
+                lines.append(f"    - {h.get('host','')}: リスク{h.get('risk_score',0)}/100"
+                             f"（{h.get('risk_level','')}）要因: {' + '.join(h.get('factors', []))}")
+            lines.append("    ※複数の怪しい挙動が同一ホストに集中しています。top_issuesで"
+                         "「感染/侵害の可能性が高いホスト」として最優先で報告してください。")
+
     lines += [
         "",
         "【DNS】",

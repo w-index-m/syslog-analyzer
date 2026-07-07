@@ -1,153 +1,270 @@
 {
-  "_comment": "IPSシグネチャ定義。GitHubで一元管理し、全デプロイがここから読み込む。patternはPython re のバイト列パターン（latin-1）。binary=trueは印字可能判定をスキップ。",
-  "version": "2026.07.08",
+  "_comment": "IPSシグネチャ定義。GitHubで一元管理し、全デプロイがここから読み込む。patternはPython re のバイト列パターン（latin-1）。binary=trueは印字可能判定をスキップ。cve/description/recommended_action/reference は検知時の対応判断用メタデータ（任意）。",
+  "version": "2026.07.08.2",
   "signatures": [
     {
       "id": "WEB-SQLI-1",
       "category": "SQLインジェクション",
       "severity": "high",
       "binary": false,
-      "pattern": "(?i)(union\\s+select|'\\s*or\\s*'?1'?\\s*=\\s*'?1|or\\s+1\\s*=\\s*1\\s*(--|#)|information_schema|sleep\\s*\\(\\s*\\d|benchmark\\s*\\()"
+      "pattern": "(?i)(union\\s+select|'\\s*or\\s*'?1'?\\s*=\\s*'?1|or\\s+1\\s*=\\s*1\\s*(--|#)|information_schema|sleep\\s*\\(\\s*\\d|benchmark\\s*\\()",
+      "cve": "",
+      "description": "SQL文を注入しDB操作・情報窃取を狙う攻撃。",
+      "recommended_action": "入力値のパラメータ化/プリペアドステートメント適用、WAF導入、該当リクエスト元の遮断。",
+      "reference": "https://owasp.org/www-community/attacks/SQL_Injection",
+      "source": "builtin"
     },
     {
       "id": "WEB-XSS-1",
       "category": "クロスサイトスクリプティング(XSS)",
       "severity": "high",
       "binary": false,
-      "pattern": "(?i)(<script[\\s>]|javascript:|onerror\\s*=|onload\\s*=|<img[^>]+onerror)"
+      "pattern": "(?i)(<script[\\s>]|javascript:|onerror\\s*=|onload\\s*=|<img[^>]+onerror)",
+      "cve": "",
+      "description": "悪意あるスクリプトを注入し利用者ブラウザで実行させる攻撃。",
+      "recommended_action": "出力エスケープ/CSP設定、入力検証の強化。",
+      "reference": "https://owasp.org/www-community/attacks/xss/",
+      "source": "builtin"
     },
     {
       "id": "WEB-TRAVERSAL-1",
       "category": "ディレクトリトラバーサル",
       "severity": "high",
       "binary": false,
-      "pattern": "(\\.\\./\\.\\./|\\.\\.\\\\\\.\\.\\\\|/etc/passwd|/etc/shadow|c:\\\\windows\\\\|%2e%2e%2f)"
+      "pattern": "(\\.\\./\\.\\./|\\.\\.\\\\\\.\\.\\\\|/etc/passwd|/etc/shadow|c:\\\\windows\\\\|%2e%2e%2f)",
+      "cve": "",
+      "description": "../等で想定外のファイルへアクセスするパストラバーサル。",
+      "recommended_action": "パス正規化・許可リスト方式、Webサーバの権限最小化。",
+      "reference": "https://owasp.org/www-community/attacks/Path_Traversal",
+      "source": "builtin"
     },
     {
       "id": "WEB-CMDI-1",
       "category": "コマンドインジェクション",
       "severity": "critical",
       "binary": false,
-      "pattern": "(?i)(;\\s*(cat|ls|id|whoami|uname)\\s|\\|\\s*(cat|nc|bash|sh)\\s|\\$\\(\\s*(cat|id|whoami|uname|nc|bash|sh|curl|wget)|`\\s*(cat|id|whoami|uname|nc|bash|sh|curl|wget)[^`]*`)"
+      "pattern": "(?i)(;\\s*(cat|ls|id|whoami|uname)\\s|\\|\\s*(cat|nc|bash|sh)\\s|\\$\\(\\s*(cat|id|whoami|uname|nc|bash|sh|curl|wget)|`\\s*(cat|id|whoami|uname|nc|bash|sh|curl|wget)[^`]*`)",
+      "cve": "",
+      "description": "OSコマンドを注入して任意コマンドを実行させる攻撃。",
+      "recommended_action": "シェル呼び出しの排除/引数エスケープ、該当ホストの隔離と調査。",
+      "reference": "https://owasp.org/www-community/attacks/Command_Injection",
+      "source": "builtin"
     },
     {
       "id": "WEB-WEBSHELL-1",
       "category": "Webシェル/コード実行",
       "severity": "critical",
       "binary": false,
-      "pattern": "(?i)(eval\\s*\\(\\s*base64_decode|system\\s*\\(\\s*\\$_|passthru\\s*\\(\\s*\\$_|shell_exec\\s*\\(|assert\\s*\\(\\s*\\$_)"
+      "pattern": "(?i)(eval\\s*\\(\\s*base64_decode|system\\s*\\(\\s*\\$_|passthru\\s*\\(\\s*\\$_|shell_exec\\s*\\(|assert\\s*\\(\\s*\\$_)",
+      "cve": "",
+      "description": "Webシェル設置・サーバ側コード実行の試み。",
+      "recommended_action": "アップロード先の実行権限剥奪、設置ファイルの捜索・削除、フォレンジック。",
+      "reference": "https://owasp.org/www-community/attacks/Code_Injection",
+      "source": "builtin"
     },
     {
       "id": "CVE-LOG4SHELL",
       "category": "Log4Shell (CVE-2021-44228)",
       "severity": "critical",
       "binary": false,
-      "pattern": "(?i)\\$\\{jndi:(ldap|rmi|dns|ldaps|iiop)://"
+      "pattern": "(?i)\\$\\{jndi:(ldap|rmi|dns|ldaps|iiop)://",
+      "cve": "CVE-2021-44228",
+      "description": "Log4jのJNDIルックアップを悪用したRCE。",
+      "recommended_action": "Log4jを2.17+へ更新、jndiルックアップ無効化、該当通信の遮断。",
+      "reference": "https://nvd.nist.gov/vuln/detail/CVE-2021-44228",
+      "source": "builtin"
     },
     {
       "id": "CVE-SHELLSHOCK",
       "category": "Shellshock (CVE-2014-6271)",
       "severity": "critical",
       "binary": false,
-      "pattern": "\\(\\)\\s*\\{\\s*:;\\s*\\}\\s*;"
+      "pattern": "\\(\\)\\s*\\{\\s*:;\\s*\\}\\s*;",
+      "cve": "CVE-2014-6271",
+      "description": "Bash環境変数経由の任意コマンド実行(Shellshock)。",
+      "recommended_action": "Bashをパッチ適用、CGIの見直し。",
+      "reference": "https://nvd.nist.gov/vuln/detail/CVE-2014-6271",
+      "source": "builtin"
     },
     {
       "id": "MAL-REVSHELL-1",
       "category": "リバースシェル/バインドシェル",
       "severity": "critical",
       "binary": false,
-      "pattern": "(?i)(/bin/(bash|sh)\\s+-i|nc\\s+-e\\s|bash\\s+-c\\s+['\\\"]?bash\\s+-i|python\\s+-c\\s+['\\\"]?import\\s+socket|/dev/tcp/)"
+      "pattern": "(?i)(/bin/(bash|sh)\\s+-i|nc\\s+-e\\s|bash\\s+-c\\s+['\\\"]?bash\\s+-i|python\\s+-c\\s+['\\\"]?import\\s+socket|/dev/tcp/)",
+      "cve": "",
+      "description": "外部へ接続を張り遠隔操作を可能にするリバース/バインドシェル。",
+      "recommended_action": "該当ホストをネットワークから隔離し侵害調査、C2先を遮断。",
+      "reference": "https://attack.mitre.org/techniques/T1059/",
+      "source": "builtin"
     },
     {
       "id": "SCAN-TOOL-UA",
       "category": "スキャナー/攻撃ツール",
       "severity": "medium",
       "binary": false,
-      "pattern": "(?i)(sqlmap|nikto|nmap\\s+scripting|masscan|nessus|dirbuster|gobuster|wpscan|acunetix|nuclei)"
+      "pattern": "(?i)(sqlmap|nikto|nmap\\s+scripting|masscan|nessus|dirbuster|gobuster|wpscan|acunetix|nuclei)",
+      "cve": "",
+      "description": "既知の脆弱性スキャナ/攻撃ツールのUser-Agentを検出。",
+      "recommended_action": "送信元IPの評価・必要に応じ遮断、対象資産の脆弱性確認。",
+      "reference": "https://attack.mitre.org/techniques/T1595/",
+      "source": "builtin"
     },
     {
       "id": "WEB-SENSITIVE",
       "category": "機密ファイルへのアクセス試行",
       "severity": "medium",
       "binary": false,
-      "pattern": "(?i)(wp-config\\.php|/\\.env(\\s|\\?|$)|/\\.git/config|/\\.aws/credentials|id_rsa|/proc/self/environ)"
+      "pattern": "(?i)(wp-config\\.php|/\\.env(\\s|\\?|$)|/\\.git/config|/\\.aws/credentials|id_rsa|/proc/self/environ)",
+      "cve": "",
+      "description": ".env/認証情報等の機密ファイルへのアクセス試行。",
+      "recommended_action": "機密ファイルの公開ディレクトリ配置を是正、認証情報のローテーション。",
+      "reference": "https://attack.mitre.org/techniques/T1552/",
+      "source": "builtin"
     },
     {
       "id": "WORM-CODERED",
       "category": "Code Red ワーム (2001)",
       "severity": "high",
       "binary": false,
-      "pattern": "(?i)(default\\.ida\\?(N{20,}|X{20,})|\\.ida\\?.*%u9090|%u6858%ucbd3)"
+      "pattern": "(?i)(default\\.ida\\?(N{20,}|X{20,})|\\.ida\\?.*%u9090|%u6858%ucbd3)",
+      "cve": "CVE-2001-0500",
+      "description": "IIS .idaバッファオーバーフローを悪用するCode Redワーム。",
+      "recommended_action": "IISをパッチ適用、感染ホストの隔離・再構築。",
+      "reference": "https://nvd.nist.gov/vuln/detail/CVE-2001-0500",
+      "source": "builtin"
     },
     {
       "id": "WORM-NIMDA",
       "category": "Nimda ワーム (2001)",
       "severity": "high",
       "binary": false,
-      "pattern": "(?i)(cmd\\.exe\\?/c\\+|/(scripts|MSADC|_vti_bin|_mem_bin|c|d)/.*(root\\.exe|cmd\\.exe)|%255c|%c1%1c|%c0%af|/winnt/system32/cmd\\.exe|readme\\.eml|admin\\.dll)"
+      "pattern": "(?i)(cmd\\.exe\\?/c\\+|/(scripts|MSADC|_vti_bin|_mem_bin|c|d)/.*(root\\.exe|cmd\\.exe)|%255c|%c1%1c|%c0%af|/winnt/system32/cmd\\.exe|readme\\.eml|admin\\.dll)",
+      "cve": "CVE-2000-0884",
+      "description": "複数経路で拡散するNimdaワーム(IIS Unicode等)。",
+      "recommended_action": "IIS/クライアントのパッチ適用、感染ホストの隔離・駆除。",
+      "reference": "https://nvd.nist.gov/vuln/detail/CVE-2000-0884",
+      "source": "builtin"
     },
     {
       "id": "WORM-BLASTER",
       "category": "Blaster/MSBlast ワーム (2003)",
       "severity": "high",
       "binary": false,
-      "pattern": "(?i)(msblast\\.exe|mblast\\.exe|penis32\\.exe|windowsupdate\\.com.*billy|tftp\\s+-i\\s+\\S+\\s+get\\s+\\S+\\.exe)"
+      "pattern": "(?i)(msblast\\.exe|mblast\\.exe|penis32\\.exe|windowsupdate\\.com.*billy|tftp\\s+-i\\s+\\S+\\s+get\\s+\\S+\\.exe)",
+      "cve": "CVE-2003-0352",
+      "description": "MS RPC DCOMを悪用するBlaster/MSBlastワーム。",
+      "recommended_action": "MS03-026適用、TCP135の露出制限、感染ホスト駆除。",
+      "reference": "https://nvd.nist.gov/vuln/detail/CVE-2003-0352",
+      "source": "builtin"
     },
     {
       "id": "WORM-SASSER",
       "category": "Sasser ワーム (2004)",
       "severity": "high",
       "binary": false,
-      "pattern": "(?i)(_up\\.exe|avserve2?\\.exe|skynetave\\.exe|\\d{4,5}_up\\.exe)"
+      "pattern": "(?i)(_up\\.exe|avserve2?\\.exe|skynetave\\.exe|\\d{4,5}_up\\.exe)",
+      "cve": "CVE-2003-0533",
+      "description": "LSASSの脆弱性を悪用するSasserワーム。",
+      "recommended_action": "MS04-011適用、TCP445の露出制限、感染ホスト駆除。",
+      "reference": "https://nvd.nist.gov/vuln/detail/CVE-2003-0533",
+      "source": "builtin"
     },
     {
       "id": "WORM-WANNACRY",
       "category": "WannaCry (killswitchドメイン, 2017)",
       "severity": "critical",
       "binary": false,
-      "pattern": "(?i)iuqerfsodp9ifjaposdfjhgosurijfaewrwergwea\\.com"
+      "pattern": "(?i)iuqerfsodp9ifjaposdfjhgosurijfaewrwergwea\\.com",
+      "cve": "CVE-2017-0144",
+      "description": "EternalBlue(SMBv1)で拡散するWannaCryのkillswitchドメイン通信。",
+      "recommended_action": "MS17-010適用、SMBv1無効化、感染ホストの隔離。",
+      "reference": "https://nvd.nist.gov/vuln/detail/CVE-2017-0144",
+      "source": "builtin"
     },
     {
       "id": "WORM-MIRAI",
       "category": "Mirai ボット (2016)",
       "severity": "high",
       "binary": false,
-      "pattern": "(?i)(/bin/busybox\\s+MIRAI|/bin/busybox\\s+ECCHI|MIRAI:\\s|root(:|/)(xc3511|vizxv|admin|888888|54321|klv123|juantech|anko))"
+      "pattern": "(?i)(/bin/busybox\\s+MIRAI|/bin/busybox\\s+ECCHI|MIRAI:\\s|root(:|/)(xc3511|vizxv|admin|888888|54321|klv123|juantech|anko))",
+      "cve": "",
+      "description": "IoT機器を初期パスワードで乗っ取るMiraiボット。",
+      "recommended_action": "初期認証情報の変更、Telnet/管理面の閉塞、感染機器の隔離。",
+      "reference": "https://attack.mitre.org/software/S0016/",
+      "source": "builtin"
     },
     {
       "id": "WORM-SANTY",
       "category": "Santy ワーム (phpBB, 2004)",
       "severity": "medium",
       "binary": false,
-      "pattern": "(?i)(highlight=%2527|viewtopic\\.php\\?.*highlight=.*(system|passthru|phpinfo))"
+      "pattern": "(?i)(highlight=%2527|viewtopic\\.php\\?.*highlight=.*(system|passthru|phpinfo))",
+      "cve": "CVE-2004-1315",
+      "description": "phpBBのhighlight脆弱性を悪用するSantyワーム。",
+      "recommended_action": "phpBBのパッチ適用、該当パラメータの入力検証。",
+      "reference": "https://nvd.nist.gov/vuln/detail/CVE-2004-1315",
+      "source": "builtin"
     },
     {
       "id": "MAL-EICAR",
       "category": "EICARテスト文字列（マルウェア検査用）",
       "severity": "medium",
       "binary": false,
-      "pattern": "X5O!P%@AP\\[4\\\\PZX54\\(P\\^\\)7CC\\)7\\}\\$EICAR"
+      "pattern": "X5O!P%@AP\\[4\\\\PZX54\\(P\\^\\)7CC\\)7\\}\\$EICAR",
+      "cve": "",
+      "description": "アンチウイルス動作確認用のEICARテスト文字列。",
+      "recommended_action": "検査目的なら無害。意図しない場合は経路と設置元を確認。",
+      "reference": "https://www.eicar.org/download-anti-malware-testfile/",
+      "source": "builtin"
     },
     {
       "id": "WORM-SLAMMER",
       "category": "SQL Slammer ワーム (UDP1434, 2003)",
       "severity": "critical",
       "binary": true,
-      "pattern": "h\\.dllhel32hkernQhounthickChGetTf|\\x68\\x2e\\x64\\x6c\\x6c\\x68\\x65\\x6c\\x33\\x32\\x68\\x6b\\x65\\x72\\x6e"
+      "pattern": "h\\.dllhel32hkernQhounthickChGetTf|\\x68\\x2e\\x64\\x6c\\x6c\\x68\\x65\\x6c\\x33\\x32\\x68\\x6b\\x65\\x72\\x6e",
+      "cve": "CVE-2002-0649",
+      "description": "MS SQL Server(UDP1434)を悪用するSQL Slammerワーム。",
+      "recommended_action": "MS02-039適用、UDP1434の露出制限、感染ホスト駆除。",
+      "reference": "https://nvd.nist.gov/vuln/detail/CVE-2002-0649",
+      "source": "builtin"
     },
     {
       "id": "EXP-ETERNALBLUE",
       "category": "EternalBlue/WannaCry SMB搾取 (MS17-010)",
       "severity": "critical",
       "binary": true,
-      "pattern": "\\xff\\x53\\x4d\\x42.{0,200}(\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00)?.{0,10}\\\\\\x00P\\x00I\\x00P\\x00E\\x00|SMBu.{0,50}\\\\PIPE\\\\"
+      "pattern": "\\xff\\x53\\x4d\\x42.{0,200}(\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00)?.{0,10}\\\\\\x00P\\x00I\\x00P\\x00E\\x00|SMBu.{0,50}\\\\PIPE\\\\",
+      "cve": "CVE-2017-0144",
+      "description": "SMBv1の脆弱性を悪用するEternalBlue搾取(WannaCry/NotPetya等)。",
+      "recommended_action": "MS17-010適用、SMBv1無効化、TCP445の露出制限。",
+      "reference": "https://nvd.nist.gov/vuln/detail/CVE-2017-0144",
+      "source": "builtin"
     },
     {
       "id": "EXP-MSRPC-DCOM",
       "category": "MSRPC DCOM搾取 (Blaster系, MS03-026)",
       "severity": "high",
       "binary": true,
-      "pattern": "\\x05\\x00\\x0b\\x03\\x10\\x00\\x00\\x00.{0,20}\\xa0\\x01\\x00\\x00|\\x5c\\x00\\x5c\\x00.{0,60}\\x5c\\x00\\x5c\\x00.{0,20}\\xcc\\xe0\\xfd\\x7f"
+      "pattern": "\\x05\\x00\\x0b\\x03\\x10\\x00\\x00\\x00.{0,20}\\xa0\\x01\\x00\\x00|\\x5c\\x00\\x5c\\x00.{0,60}\\x5c\\x00\\x5c\\x00.{0,20}\\xcc\\xe0\\xfd\\x7f",
+      "cve": "CVE-2003-0352",
+      "description": "MS RPC DCOMインターフェースのバッファオーバーフロー搾取。",
+      "recommended_action": "MS03-026適用、TCP135の露出制限。",
+      "reference": "https://nvd.nist.gov/vuln/detail/CVE-2003-0352",
+      "source": "builtin"
     }
-  ]
+  ],
+  "_schema": {
+    "id": "一意なシグネチャID",
+    "category": "攻撃カテゴリ(表示名)",
+    "severity": "critical|high|medium|low",
+    "binary": "trueなら印字可能判定をスキップして生バイト検査",
+    "pattern": "Python re バイト列パターン(latin-1)",
+    "cve": "関連CVE(任意)",
+    "description": "攻撃の説明(任意)",
+    "recommended_action": "推奨対応(任意)",
+    "reference": "参考URL(任意)",
+    "source": "由来(手書き/ET等・任意)"
+  }
 }

@@ -21,6 +21,25 @@ import dpkt
 # ── ポート定数 ──────────────────────────────────────────────────
 SYSLOG_PORTS = {514, 5140, 5141, 516, 601}
 RIP_PORT     = 520
+
+# ワーム/ボットが横展開でよく狙うポート（振る舞い検知の重大度判定に使う）
+_WORM_TARGET_PORTS = {
+    22: "SSH", 23: "Telnet", 135: "MS-RPC", 139: "NetBIOS", 445: "SMB",
+    1433: "MSSQL", 3306: "MySQL", 3389: "RDP", 5432: "PostgreSQL",
+    5555: "ADB", 6379: "Redis", 7547: "TR-069", 1900: "UPnP", 5900: "VNC",
+    2323: "Telnet(IoT)", 9200: "Elasticsearch", 27017: "MongoDB", 11211: "Memcached",
+}
+
+# マルウェアがコード保管/持ち出しに悪用しがちな公開サービス（配下端末が
+# サーバ的にこれらへアクセスしていたら要確認 = GitPaste-12型/C2の兆候）。
+_SUSPICIOUS_HOST_RE = __import__("re").compile(
+    r"(?i)(pastebin\.com|hastebin\.com|ghostbin\.|controlc\.com|0x0\.st|ix\.io|"
+    r"termbin\.com|transfer\.sh|anonfiles\.|file\.io|paste\.ee|"
+    r"raw\.githubusercontent\.com|gist\.githubusercontent\.com)")
+
+# マルウェアに悪用されやすい無料/動的DNS・TLD（誤検知を避けるため低〜中重大度）。
+_SUSPICIOUS_TLD_RE = __import__("re").compile(
+    r"(?i)\.(tk|ml|ga|cf|gq|top|xyz|duckdns\.org|no-ip\.\w+|ddns\.net|hopto\.org)$")
 DNS_PORT     = 53
 DHCP_PORTS   = {67, 68}
 TLS_PORTS    = {443, 8443, 465, 993, 995, 636, 5061}
@@ -149,6 +168,33 @@ def _mostly_printable(b: bytes, threshold: float = 0.85) -> bool:
         return False
     printable = sum(1 for c in s if c.isprintable() or c in "\r\n\t")
     return printable / len(s) >= threshold
+
+
+def _shannon_entropy(s: str) -> float:
+    if not s:
+        return 0.0
+    from math import log2
+    counts = {}
+    for c in s:
+        counts[c] = counts.get(c, 0) + 1
+    n = len(s)
+    return -sum((c / n) * log2(c / n) for c in counts.values())
+
+
+def _is_dga_like(domain: str) -> bool:
+    """ドメイン生成アルゴリズム(DGA)らしい高エントロピー/ランダムなドメインか判定する。"""
+    labels = domain.split(".")
+    if len(labels) < 2:
+        return False
+    # 判定対象は2nd-levelラベル（例: xn3k9fq2.example.com なら example ではなく…最も長いラベル）
+    cand = max((l for l in labels[:-1]), key=len, default="")
+    if len(cand) < 12:
+        return False
+    ent = _shannon_entropy(cand)
+    digits = sum(c.isdigit() for c in cand)
+    vowels = sum(c in "aeiou" for c in cand.lower())
+    # 高エントロピー かつ (数字が多い または 母音が極端に少ない)
+    return ent >= 3.6 and (digits / len(cand) >= 0.25 or vowels / len(cand) <= 0.20)
 
 
 def _dec_base64(b: bytes):
@@ -296,6 +342,9 @@ def _load_ips_signatures(path=_IPS_SIGNATURES_PATH) -> list:
                 "id": s["id"], "cat": s["category"], "sev": s["severity"],
                 "bin": bool(s.get("binary", False)),
                 "re": re.compile(s["pattern"].encode("latin-1")),
+                "cve": s.get("cve", ""), "desc": s.get("description", ""),
+                "action": s.get("recommended_action", ""), "ref": s.get("reference", ""),
+                "source": s.get("source", ""),
             })
         except Exception as e:
             print(f"[ips] 不正なシグネチャ {s.get('id')}: {e}")
@@ -343,6 +392,8 @@ def scan_ips_signatures(payload: bytes) -> list:
             hits.append({
                 "sig_id": sig["id"], "category": sig["cat"], "severity": sig["sev"],
                 "matched": m.group(0)[:80].decode("utf-8", errors="replace"),
+                "cve": sig.get("cve", ""), "description": sig.get("desc", ""),
+                "recommended_action": sig.get("action", ""), "reference": sig.get("ref", ""),
             })
     return hits
 
@@ -379,6 +430,18 @@ MOS_LABELS = {
 def _ip_str(raw: bytes) -> str:
     try:   return socket.inet_ntoa(raw)
     except Exception: return "?"
+
+
+def _is_private_ip(ip: str) -> bool:
+    """RFC1918プライベート/ローカルIPか判定する（外部宛て持ち出し判定用）。"""
+    try:
+        o = [int(x) for x in ip.split(".")]
+    except Exception:
+        return False
+    if len(o) != 4:
+        return False
+    return (o[0] == 10 or (o[0] == 172 and 16 <= o[1] <= 31) or (o[0] == 192 and o[1] == 168)
+            or o[0] == 127 or (o[0] == 169 and o[1] == 254) or o[0] == 0)
 
 
 def _ts_str(ts: float) -> str:
@@ -623,6 +686,11 @@ def analyze_pcap(data: bytes) -> dict:
         "dns_tunneling": [],
         "icmp_exfil": [],
         "ips_alerts": [],
+        "worm_propagation": [],
+        "beaconing": [],
+        "suspicious_destinations": [],
+        "data_exfil": [],
+        "host_risk": [],
         "ip_fragments": [],
         "http_errors": [],    "http_summary": {},
         "tls_sessions": [],   "tls_alerts": [],
@@ -656,6 +724,19 @@ def analyze_pcap(data: bytes) -> dict:
     syn_ack_received: set            = set()
     zero_win_count: dict[tuple, int] = defaultdict(int)
     ip_frag_count:  dict[tuple, int] = defaultdict(int)
+    # 振る舞い検知用
+    horiz_scan: dict[tuple, set]     = defaultdict(set)   # (src, dport) -> {dst,...} 横展開/ラテラルムーブメント
+    conn_times: dict[tuple, list]    = defaultdict(list)  # (src, dst, dport) -> [ts,...] ビーコニング
+    accessed_domains: dict[str, dict] = {}               # domain -> {clients:set, count, via:set} アクセス先ドメイン
+    outbound_bytes: dict[tuple, int] = defaultdict(int)  # (src, dst) -> 送信バイト数 大容量エクスフィル用
+
+    def _record_domain(domain, client, via):
+        if not domain or "." not in domain:
+            return
+        d = accessed_domains.setdefault(domain.lower(), {"clients": set(), "count": 0, "via": set()})
+        d["clients"].add(client)
+        d["count"] += 1
+        d["via"].add(via)
 
     # TLS: canonical flow key -> {sni, tls_version}
     tls_flow_info: dict[tuple, dict] = {}
@@ -694,6 +775,9 @@ def analyze_pcap(data: bytes) -> dict:
                     "src_port": sp, "dst_port": dp,
                     "sig_id": sig["sig_id"], "category": sig["category"],
                     "severity": sig["severity"], "matched": sig["matched"],
+                    "cve": sig.get("cve", ""), "description": sig.get("description", ""),
+                    "recommended_action": sig.get("recommended_action", ""),
+                    "reference": sig.get("reference", ""),
                     "count": 1, "first_seen": _ts_str(ts),
                 }
             else:
@@ -801,6 +885,9 @@ def analyze_pcap(data: bytes) -> dict:
                     if is_syn and not is_ack:
                         key = (src, dst, sport, dport)
                         if key not in syn_sent: syn_sent[key] = ts
+                        # 振る舞い検知: 横展開（同一ポートへ多数の宛先）とビーコニング
+                        horiz_scan[(src, dport)].add(dst)
+                        conn_times[(src, dst, dport)].append(ts)
                     elif is_syn and is_ack:
                         syn_ack_received.add((src, dst, sport, dport))
                     data_len = len(tcp.data)
@@ -811,6 +898,7 @@ def analyze_pcap(data: bytes) -> dict:
                             tcp_retrans_count[flow_key] += 1
                         else:
                             tcp_flow_seqs[flow_key].add(pkt_sig)
+                        outbound_bytes[(src, dst)] += data_len
                     if tcp.win == 0 and not is_syn and not is_rst:
                         zero_win_count[(src, dst, sport, dport)] += 1
 
@@ -864,7 +952,9 @@ def analyze_pcap(data: bytes) -> dict:
                                     tls_flow_info[ck] = ch
                                     ver = ch.get("tls_version", "")
                                     sni = ch.get("sni") or ""
-                                    if sni: tls_unique_sites.add(sni)
+                                    if sni:
+                                        tls_unique_sites.add(sni)
+                                        _record_domain(sni, src, "TLS-SNI")
                                     result["tls_sessions"].append({
                                         "timestamp":   _ts_str(ts),
                                         "client":      src,
@@ -941,6 +1031,7 @@ def analyze_pcap(data: bytes) -> dict:
                                     "ts": ts, "src": src, "dst": dst,
                                     "name": q_name, "qtype": q_type,
                                 }
+                                _record_domain(q_name, src, "DNS")
                                 # DNSトンネリング検出用にベースドメイン単位で集計
                                 if q_name and "." in q_name:
                                     _labels = q_name.split(".")
@@ -1392,6 +1483,140 @@ def analyze_pcap(data: bytes) -> dict:
         ips_hits.values(),
         key=lambda x: (_sev_rank.get(x["severity"], 9), -x["count"]))
 
+    # ── 振る舞い検知①: ワーム横展開/ラテラルムーブメント（横スキャン） ──
+    # 1台の送信元が「同じ宛先ポート」へ多数の異なる宛先IPへ接続 = ワーム拡散の典型。
+    # 既知のワーム/管理系ポート宛ては重大度を上げる（シグネチャ無しの新型ワームも捕捉）。
+    _dur = result.get("capture_duration_sec", 0) or 0
+    for (src, dport), dsts in horiz_scan.items():
+        if len(dsts) >= 10:
+            _worm_port = dport in _WORM_TARGET_PORTS
+            _sev = "critical" if (_worm_port and len(dsts) >= 20) else "high" if _worm_port else "medium"
+            _rate = f"（約{len(dsts)/_dur*60:.0f}宛先/分）" if _dur > 0 else ""
+            _pname = _WORM_TARGET_PORTS.get(dport, "")
+            result["worm_propagation"].append({
+                "src": src, "dst_port": dport, "port_name": _pname,
+                "distinct_dsts": len(dsts), "severity": _sev,
+                "detail": f"{src} が ポート{dport}"
+                          + (f"({_pname})" if _pname else "")
+                          + f" へ {len(dsts)}個の異なる宛先に接続{_rate}"
+                            " — ワーム横展開/ラテラルムーブメントの可能性",
+            })
+    result["worm_propagation"].sort(key=lambda x: x["distinct_dsts"], reverse=True)
+
+    # ── 振る舞い検知②: ビーコニング（C2への定期コールバック） ──
+    # 同一(src,dst,port)への接続が、ほぼ一定間隔で繰り返される = C2ビーコンの典型。
+    # AI生成でシグネチャの無いマルウェアも「振る舞い」で捕捉できる。
+    for (src, dst, dport), times in conn_times.items():
+        if len(times) < 6:
+            continue
+        ts_sorted = sorted(times)
+        intervals = [ts_sorted[i + 1] - ts_sorted[i] for i in range(len(ts_sorted) - 1)]
+        intervals = [iv for iv in intervals if iv > 0.5]  # 高速連続(スキャン)は除外
+        if len(intervals) < 5:
+            continue
+        mean_iv = sum(intervals) / len(intervals)
+        if mean_iv <= 0:
+            continue
+        var = sum((iv - mean_iv) ** 2 for iv in intervals) / len(intervals)
+        cv = (var ** 0.5) / mean_iv  # 変動係数。小さいほど「一定間隔」
+        if cv <= 0.25:  # 間隔が非常に規則的
+            result["beaconing"].append({
+                "src": src, "dst": dst, "dst_port": dport,
+                "count": len(ts_sorted), "interval_sec": round(mean_iv, 1),
+                "regularity": round(1 - cv, 2),
+                "detail": f"{src} → {dst}:{dport} へ 約{mean_iv:.0f}秒間隔で{len(ts_sorted)}回の"
+                          "規則的な接続 — C2ビーコニング（マルウェアの定期通信）の可能性",
+            })
+    result["beaconing"].sort(key=lambda x: x["count"], reverse=True)
+
+    # ── 振る舞い検知③: 配下端末→怪しい外部サイトへのアクセス ──
+    # アクセス先ドメイン(DNS/TLS-SNI)から、コード共有/持ち出しサイト・DGAらしき
+    # ランダムドメイン・悪用されやすいTLDを検出する（C2/持ち出しの兆候）。
+    _tunnel_bases = {d["domain"] for d in result["dns_tunneling"]}  # 重複報告を避ける
+    for _dom, _info in accessed_domains.items():
+        _labels2 = _dom.split(".")
+        _dom_base = ".".join(_labels2[-2:]) if len(_labels2) >= 2 else _dom
+        if _dom_base in _tunnel_bases:
+            continue  # DNSトンネリングとして別途報告済み
+        _reason = ""
+        _sev = "medium"
+        if _SUSPICIOUS_HOST_RE.search(_dom):
+            _reason = "コード共有/ファイル持ち出しに悪用されやすいサービス"
+        elif _is_dga_like(_dom):
+            _reason = "DGA(自動生成)らしい高エントロピーなドメイン"
+            _sev = "high"
+        elif _SUSPICIOUS_TLD_RE.search(_dom):
+            _reason = "マルウェアに悪用されやすい無料/動的DNS・TLD"
+        if _reason:
+            result["suspicious_destinations"].append({
+                "domain": _dom, "severity": _sev,
+                "clients": sorted(_info["clients"])[:10], "client_count": len(_info["clients"]),
+                "access_count": _info["count"], "via": ",".join(sorted(_info["via"])),
+                "detail": f"配下端末({len(_info['clients'])}台) が {_dom} へアクセス — {_reason}",
+            })
+    _sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    result["suspicious_destinations"].sort(
+        key=lambda x: (_sev_rank.get(x["severity"], 9), -x["access_count"]))
+
+    # ── 振る舞い検知④: 大容量の外部送信（データ持ち出し） ──
+    # 単一の送信元→宛先で送信量が突出している場合、データ持ち出しの疑い。
+    # ローカル同士は除外し、外部宛て(グローバルIP)のみを対象にする。
+    for (src, dst), nbytes in outbound_bytes.items():
+        if nbytes >= 1_000_000 and _is_private_ip(src) and not _is_private_ip(dst):
+            result["data_exfil"].append({
+                "src": src, "dst": dst, "bytes": nbytes, "mb": round(nbytes / 1_048_576, 1),
+                "detail": f"{src} → {dst} へ {nbytes/1_048_576:.1f}MB を送信 "
+                          "— 大容量データ持ち出しの可能性（外部宛て）",
+            })
+    result["data_exfil"].sort(key=lambda x: x["bytes"], reverse=True)
+
+    # ── 振る舞い検知⑤: ホスト別リスクスコアリング ──
+    # 個々の検知を送信元ホスト単位で束ね、重み付き合計で危険度(0-100)を算出する。
+    # 「単一行動では安全でも、複数の怪しい挙動が重なると危険」を定量化する。
+    _risk: dict = {}
+
+    def _add_risk(host, points, factor):
+        if not host:
+            return
+        r = _risk.setdefault(host, {"score": 0, "factors": []})
+        r["score"] += points
+        r["factors"].append(factor)
+
+    for a in result["ips_alerts"]:
+        _pts = {"critical": 40, "high": 25, "medium": 12, "low": 5}.get(a["severity"], 5)
+        _add_risk(a["src"], _pts, f"IPS検知:{a['category']}")
+    for wp in result["worm_propagation"]:
+        _pts = {"critical": 35, "high": 25, "medium": 15}.get(wp["severity"], 15)
+        _add_risk(wp["src"], _pts, "ワーム横展開")
+    for b in result["beaconing"]:
+        _add_risk(b["src"], 25, "C2ビーコニング")
+    for sp_item in result.get("scan_patterns", []):
+        if sp_item["type"] == "port_scan":
+            _add_risk(sp_item.get("src"), 20, "ポートスキャン")
+    for dt in result.get("dns_tunneling", []):
+        # DNSトンネリングはクライアント側をリスク計上
+        for _c in dns_by_domain.get(dt["domain"], {}).get("clients", []):
+            _add_risk(_c, 25, "DNSトンネリング")
+    for ie in result.get("icmp_exfil", []):
+        _add_risk(ie["src"], 25, "ICMPエクスフィル")
+    for sd in result["suspicious_destinations"]:
+        _pts = 20 if sd["severity"] == "high" else 12
+        for _c in sd["clients"]:
+            _add_risk(_c, _pts, f"怪しい外部アクセス:{sd['domain']}")
+    for de in result["data_exfil"]:
+        _add_risk(de["src"], 25, "大容量外部送信")
+
+    for host, r in _risk.items():
+        score = min(100, r["score"])
+        level = "重大" if score >= 70 else "高" if score >= 40 else "中" if score >= 20 else "低"
+        # 複数種別の挙動が重なっているものを上位に（相関検知）
+        _uniq_factors = list(dict.fromkeys(r["factors"]))
+        result["host_risk"].append({
+            "host": host, "risk_score": score, "risk_level": level,
+            "factor_count": len(_uniq_factors), "factors": _uniq_factors,
+        })
+    result["host_risk"].sort(key=lambda x: x["risk_score"], reverse=True)
+
     return result
 
 
@@ -1652,6 +1877,118 @@ def find_embedded_files(stream_bytes: bytes) -> list:
             continue
         files.append({"ext": h["ext"], "offset": h["offset"], "size": len(chunk), "data": chunk})
     return files
+
+
+# ══════════════════════════════════════════════════════════════════
+#  メール添付ファイルのウイルスチェック（SMTP/POP3/IMAP）
+# ══════════════════════════════════════════════════════════════════
+_MAIL_PORTS = {25, 587, 465, 110, 143, 993, 995}
+_DANGEROUS_EXT_RE = __import__("re").compile(
+    r"(?i)\.(exe|scr|pif|com|bat|cmd|js|jse|vbs|vbe|wsf|wsh|hta|jar|ps1|lnk|"
+    r"dll|cpl|msi|reg|docm|xlsm|pptm|iso|img|ace)$")
+
+
+def _extract_rfc822_messages(blob: bytes) -> list:
+    """メールストリームから RFC822 メッセージ本体（ヘッダ+MIME）を抽出する。"""
+    msgs = []
+    # SMTP: DATA コマンド後～ \r\n.\r\n までが本文
+    lo = 0
+    while True:
+        di = blob.find(b"\r\nDATA\r\n", lo)
+        if di == -1:
+            break
+        start = di + len(b"\r\nDATA\r\n")
+        end = blob.find(b"\r\n.\r\n", start)
+        if end == -1:
+            end = len(blob)
+        msgs.append(blob[start:end])
+        lo = end + 1
+    if msgs:
+        return msgs
+    # SMTP以外(POP3/IMAP等): MIMEヘッダらしき箇所から末尾までを1通として扱う
+    for marker in (b"MIME-Version:", b"Content-Type: multipart", b"Content-Type: text"):
+        mi = blob.find(marker)
+        if mi != -1:
+            return [blob[mi:]]
+    return []
+
+
+def _check_attachment(filename: str, payload: bytes) -> list:
+    """添付ファイルのマルウェア兆候を検査する（EICAR/実行ファイル/危険拡張子/マクロ/シグネチャ）。"""
+    verdicts = []
+    if _CTF_FLAG_RE and b"EICAR-STANDARD-ANTIVIRUS-TEST-FILE" in payload:
+        verdicts.append({"severity": "critical", "type": "EICAR",
+                         "detail": "EICARテストウイルス文字列を検出（AV動作確認用の既知パターン）"})
+    if payload[:2] == b"MZ":
+        verdicts.append({"severity": "high", "type": "実行ファイル",
+                         "detail": "Windows実行ファイル(PE/MZヘッダ)の添付を検出"})
+    if payload[:4] == b"\x7fELF":
+        verdicts.append({"severity": "high", "type": "実行ファイル",
+                         "detail": "Linux実行ファイル(ELFヘッダ)の添付を検出"})
+    if _DANGEROUS_EXT_RE.search(filename or ""):
+        verdicts.append({"severity": "high", "type": "危険な拡張子",
+                         "detail": f"危険な拡張子の添付ファイル: {filename}"})
+    if b"vbaProject.bin" in payload or b"ActiveMime" in payload[:200]:
+        verdicts.append({"severity": "high", "type": "マクロ",
+                         "detail": "Officeマクロ(VBA)を含む添付ファイルの可能性"})
+    if payload[:4] == b"PK\x03\x04" and _DANGEROUS_EXT_RE.search(
+            payload[:4000].decode("latin-1", errors="ignore")):
+        verdicts.append({"severity": "medium", "type": "圧縮内の実行ファイル",
+                         "detail": "ZIP/書庫内に実行ファイル・スクリプトを含む可能性"})
+    for sig in scan_ips_signatures(payload):
+        verdicts.append({"severity": sig["severity"], "type": f"シグネチャ:{sig['category']}",
+                         "detail": f"添付内容がシグネチャに一致: {sig['category']}"})
+    return verdicts
+
+
+def scan_email_attachments(data: bytes = b"", streams: list = None) -> list:
+    """
+    pcap内のメール通信(SMTP/POP3/IMAP)から添付ファイルを取り出し、
+    「一旦開いて」中身をウイルスチェックする。
+    streams（get_tcp_streamsの結果）を渡せば再解析を省略する。
+    戻り値: 検知した添付の一覧（filename, verdicts[], size, flow）。
+    """
+    import email as _email_mod
+    results = []
+    if streams is None:
+        try:
+            streams = get_tcp_streams(data)
+        except Exception:
+            return results
+    for s in streams:
+        if s["dst_port"] not in _MAIL_PORTS and s["src_port"] not in _MAIL_PORTS:
+            continue
+        blob = s["client_to_server"] + b"\r\n" + s["server_to_client"]
+        for raw_msg in _extract_rfc822_messages(blob):
+            try:
+                msg = _email_mod.message_from_bytes(raw_msg)
+            except Exception:
+                continue
+            subject = str(msg.get("Subject", ""))[:120]
+            for part in msg.walk():
+                if part.is_multipart():
+                    continue
+                fname = part.get_filename()
+                cdisp = part.get_content_disposition()
+                if not fname and cdisp != "attachment":
+                    continue
+                try:
+                    payload = part.get_payload(decode=True) or b""
+                except Exception:
+                    payload = b""
+                if not payload:
+                    continue
+                verdicts = _check_attachment(fname or "(名前なし)", payload)
+                if verdicts:
+                    _worst = min(verdicts, key=lambda v: {"critical":0,"high":1,"medium":2,"low":3}.get(v["severity"],9))
+                    results.append({
+                        "filename": fname or "(名前なし)", "subject": subject,
+                        "size": len(payload), "src": s["src"], "dst": s["dst"],
+                        "dst_port": s["dst_port"], "severity": _worst["severity"],
+                        "verdicts": verdicts, "data": payload,
+                    })
+    results.sort(key=lambda x: {"critical":0,"high":1,"medium":2,"low":3}.get(x["severity"],9))
+    return results
 
 
 def filter_pcap(

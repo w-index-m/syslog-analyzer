@@ -4025,36 +4025,71 @@ with tab_pcap:
                           delta="⚠️ 要確認" if res.get("dhcp_issues") else None)
             st.caption(f"📅 キャプチャ範囲: {res['capture_start']} 〜 {res['capture_end']}")
 
-            # ── 🛡️ IPS検査（シグネチャ型 + アノマリ型） ──────
+            # ── 🛡️ IPS検査（シグネチャ型 + アノマリ型 + 振る舞い型） ──
             _ips_alerts = res.get("ips_alerts", [])
+            _behavior_items = (res.get("worm_propagation", []) + res.get("beaconing", [])
+                               + res.get("suspicious_destinations", []) + res.get("data_exfil", []))
             _anomaly_items = (res.get("scan_patterns", []) + res.get("dns_tunneling", [])
                               + res.get("icmp_exfil", []))
-            if _ips_alerts or _anomaly_items:
+            _host_risk = res.get("host_risk", [])
+            if _ips_alerts or _anomaly_items or _behavior_items or _host_risk:
                 st.markdown("---")
-                st.markdown("### 🛡️ IPS検査（不正侵入の兆候）")
-                st.caption("Catalyst等でミラー/インライン取得したパケットを、IPS的に検査します。"
-                           "**シグネチャ型**（既知の攻撃パターン照合）と**アノマリ型**（統計的な異常検出）の"
-                           "両面でチェックします。簡易ヒューリスティックのため、検知は参考情報として扱ってください。")
+                st.markdown("### 🛡️ IPS検査（不正侵入・マルウェアの兆候）")
+                st.caption("Catalyst等でミラー/インライン取得したパケットを、IPS/IDS的に検査します。"
+                           "**シグネチャ型**（既知攻撃パターン照合）・**アノマリ型**（統計的異常）・"
+                           "**振る舞い型**（ワーム拡散/C2/持ち出し等の挙動）の3面で検査し、"
+                           "最後にホスト別のリスクスコアに束ねます。簡易ヒューリスティックのため参考情報として扱ってください。")
 
-                # シグネチャ型
+                # ── ⚠️ ホスト別リスクスコア（相関検知の要約・最上部） ──
+                if _host_risk:
+                    st.markdown("**⚠️ ホスト別リスクスコア（複数の怪しい挙動を束ねた危険度）**")
+                    _lv_icon = {"重大": "🔴", "高": "🟠", "中": "🟡", "低": "🟢"}
+                    for _hr in _host_risk[:10]:
+                        if _hr["risk_score"] < 20:
+                            continue
+                        st.markdown(f"{_lv_icon.get(_hr['risk_level'],'⚪')} **{_hr['host']}** — "
+                                    f"リスク {_hr['risk_score']}/100（{_hr['risk_level']}）: "
+                                    + " + ".join(_hr["factors"]))
+
+                # シグネチャ型（CVE/推奨対応つき）
                 if _ips_alerts:
                     _crit = sum(1 for a in _ips_alerts if a["severity"] == "critical")
                     _high = sum(1 for a in _ips_alerts if a["severity"] == "high")
-                    st.markdown(f"**🔴 シグネチャ型検知: {len(_ips_alerts)}件**"
-                                f"（重大 {_crit} / 高 {_high}）")
+                    st.markdown(f"**🔴 シグネチャ型検知: {len(_ips_alerts)}件**（重大 {_crit} / 高 {_high}）")
                     _sev_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
                     df_ips = pd.DataFrame(_ips_alerts)
-                    df_ips["重大度"] = df_ips["severity"].map(
-                        lambda s: f"{_sev_icon.get(s,'⚪')} {s}")
-                    df_ips = df_ips[["重大度", "category", "protocol", "src", "dst", "dst_port",
-                                      "count", "matched", "first_seen"]]
-                    df_ips.columns = ["重大度", "攻撃カテゴリ", "プロトコル", "送信元IP", "宛先IP",
-                                       "宛先Port", "回数", "一致パターン", "初検知"]
-                    _show_table_top_n(df_ips, "ips_signature_alerts.csv", "dl_ips_csv")
-                else:
-                    st.success("✅ シグネチャ型：既知の攻撃パターンは検出されませんでした。")
+                    df_ips["重大度"] = df_ips["severity"].map(lambda s: f"{_sev_icon.get(s,'⚪')} {s}")
+                    _ips_cols = ["重大度", "category", "cve", "protocol", "src", "dst", "dst_port", "count"]
+                    df_ips_show = df_ips[_ips_cols].rename(columns={
+                        "category": "攻撃カテゴリ", "cve": "CVE", "protocol": "プロトコル",
+                        "src": "送信元IP", "dst": "宛先IP", "dst_port": "宛先Port", "count": "回数"})
+                    _show_table_top_n(df_ips_show, "ips_signature_alerts.csv", "dl_ips_csv")
+                    with st.expander("検知の詳細・推奨対応を見る"):
+                        for _a in _ips_alerts[:20]:
+                            st.markdown(f"**{_sev_icon.get(_a['severity'],'⚪')} {_a['category']}** "
+                                        f"({_a['src']}→{_a['dst']}:{_a['dst_port']})"
+                                        + (f" / {_a['cve']}" if _a.get('cve') else ""))
+                            if _a.get("description"):
+                                st.caption(f"内容: {_a['description']}")
+                            if _a.get("recommended_action"):
+                                st.caption(f"推奨対応: {_a['recommended_action']}")
+                            if _a.get("reference"):
+                                st.caption(f"参考: {_a['reference']}")
 
-                # アノマリ型（既存の統計検出を集約表示）
+                # 振る舞い型
+                if _behavior_items:
+                    st.markdown("**🦠 振る舞い型検知（ワーム拡散・C2・持ち出し等の挙動）**")
+                    for _wp in res.get("worm_propagation", []):
+                        st.markdown(f"- 🔴 **ワーム横展開**: {_wp['detail']}")
+                    for _bc in res.get("beaconing", []):
+                        st.markdown(f"- 🔴 **C2ビーコニング**: {_bc['detail']}")
+                    for _de in res.get("data_exfil", []):
+                        st.markdown(f"- 🔴 **大容量持ち出し**: {_de['detail']}")
+                    for _sd in res.get("suspicious_destinations", []):
+                        _ic = "🔴" if _sd["severity"] == "high" else "🟡"
+                        st.markdown(f"- {_ic} **怪しい外部アクセス**: {_sd['detail']}")
+
+                # アノマリ型（統計検出）
                 if _anomaly_items:
                     st.markdown("**🟠 アノマリ型検知（統計的異常）**")
                     for _sp in res.get("scan_patterns", []):
@@ -4064,6 +4099,25 @@ with tab_pcap:
                         st.markdown(f"- 🔴 **DNSトンネリング**: {_dt['detail']}")
                     for _ie in res.get("icmp_exfil", []):
                         st.markdown(f"- 🔴 **ICMPエクスフィル**: {_ie['detail']}")
+
+            # ── 📧 メール添付ファイルのウイルスチェック ──────
+            _mail_atts = pcap_analyzer.scan_email_attachments(streams=streams)
+            if _mail_atts:
+                st.markdown("---")
+                st.markdown("### 📧 メール添付ファイルのウイルスチェック")
+                st.caption("pcap内のメール通信(SMTP/POP3/IMAP)から添付ファイルを取り出し、"
+                           "「一旦開いて」中身を検査した結果です（実行ファイル/危険拡張子/マクロ/"
+                           "EICAR/シグネチャ一致）。")
+                _sev_icon2 = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
+                for _mi, _att in enumerate(_mail_atts):
+                    st.markdown(f"{_sev_icon2.get(_att['severity'],'⚪')} **{_att['filename']}** "
+                                f"({_att['size']:,} bytes, 件名: {_att['subject'] or '(なし)'}) "
+                                f"{_att['src']}→{_att['dst']}")
+                    for _v in _att["verdicts"]:
+                        st.markdown(f"　- {_sev_icon2.get(_v['severity'],'⚪')} [{_v['type']}] {_v['detail']}")
+                    st.download_button("📥 この添付を取り出す（隔離環境で確認）", data=_att["data"],
+                                       file_name=_att["filename"], mime="application/octet-stream",
+                                       key=f"dl_mail_att_{_mi}")
 
             # ── pcap 総合 AI 診断（全ページ共通部品） ──────
             _render_pcap_ai_diagnosis(res, key_prefix="main")
