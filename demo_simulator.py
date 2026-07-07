@@ -7,6 +7,7 @@
   - NetFlow フロー  → netflow_flows テーブル
   - pcap バイト列   → メモリ上で返却（ファイル保存不要）
 """
+import base64
 import io
 import os
 import random
@@ -38,6 +39,7 @@ SCENARIOS = {
     "paloalto":      "🛡️ Palo Alto（脅威検知・HAダウン）",
     "sir":           "📡 富士通 Si-R（回線断・エラーコード）",
     "session_id_demo": "🔑 セッションID使い回し（乗っ取り疑い）",
+    "ctf_challenge": "🚩 CTF練習問題（パケットフォレンジック）",
 }
 
 # ─── サンプル IP ───────────────────────────────────────────────────
@@ -754,6 +756,55 @@ def _pcap_session_id_demo() -> bytes:
     return _write_pcap(pkts)
 
 
+def _pcap_ctf_challenge() -> bytes:
+    """
+    パケットフォレンジックのCTF練習問題デモ。
+    「🚩 CTF / フォレンジック機能」で解ける3種類の仕掛けを1つのpcapに用意する。
+      ① flagが2パケットにまたがって分割されている
+         （1パケット単体のスキャンでは見つからず、TCPストリーム再構成で見える）
+      ② Base64で隠されたヒントデータ（ストリーム検索でBase64候補として検出される）
+      ③ PNGファイルが2パケットに分割して送られている（ファイルカービングで抽出可能）
+    """
+    pkts = []
+    t = time.time() - 90
+
+    client, server = "192.168.10.30", "203.0.113.200"
+
+    # ① デコイの正常なHTTP通信
+    pkts.append((t, _ip_tcp(client, server, 50000, 80,
+                             dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=1,
+                             data=b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")))
+    t += 1.0
+
+    # ② flagが2パケットにまたがって分割されている（1パケット単体では検出できない）
+    part1 = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nSUCCESS: fla"
+    part2 = b"g{network_forensics_101} END\r\n"
+    pkts.append((t, _ip_tcp(server, client, 8081, 51000,
+                             dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=1000, data=part1)))
+    t += 0.2
+    pkts.append((t, _ip_tcp(server, client, 8081, 51000,
+                             dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=1000 + len(part1), data=part2)))
+    t += 2.0
+
+    # ③ Base64で隠された補足ヒント
+    hidden = base64.b64encode(b"bonus_hint: check the embedded file too").decode()
+    pkts.append((t, _ip_tcp(client, server, 51200, 8081,
+                             dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=2000,
+                             data=f"X-Debug-Data: {hidden}\r\n".encode())))
+    t += 1.0
+
+    # ④ 埋め込みファイル（PNGシグネチャ）を2パケットに分割
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 40 + b"IEND\xaeB`\x82"
+    pkts.append((t, _ip_tcp(server, client, 8082, 51500,
+                             dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=3000,
+                             data=b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n\r\n" + png_bytes[:25])))
+    t += 0.15
+    pkts.append((t, _ip_tcp(server, client, 8082, 51500,
+                             dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=3000 + 25, data=png_bytes[25:])))
+
+    return _write_pcap(pkts)
+
+
 def _pcap_showcase() -> bytes:
     """
     パケット解析タブの全機能を一度に試せる総合サンプル。
@@ -907,6 +958,7 @@ def run_scenario(scenario: str) -> dict:
         "paloalto":       _pcap_normal,
         "sir":            _pcap_normal,
         "session_id_demo": _pcap_session_id_demo,
+        "ctf_challenge":   _pcap_ctf_challenge,
     }.get(scenario, _pcap_normal)
 
     try:

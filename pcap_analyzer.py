@@ -3,6 +3,7 @@ Wireshark pcap/pcapng ファイルのパーサー。
 ICMP redirect を中心に RIP / ARP / TCP / DNS / HTTP / TLS / DHCP /
 IPフラグメント / フロー解析 / pcap内syslog を抽出する。
 """
+import base64
 import io
 import re
 import struct
@@ -119,6 +120,22 @@ _CTF_FLAG_RE = re.compile(rb"[A-Za-z0-9_]{2,20}\{[^{}\r\n]{2,200}\}")
 _BASE64_CANDIDATE_RE = re.compile(rb"(?:[A-Za-z0-9+/]{4}){5,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?")
 
 
+def try_decode_base64(text: str) -> str | None:
+    """Base64候補文字列のデコードを試みる。印字可能な結果が得られた場合のみ返す。"""
+    try:
+        padded = text + "=" * (-len(text) % 4)
+        raw = base64.b64decode(padded, validate=False)
+        decoded = raw.decode("utf-8", errors="strict")
+        if not decoded:
+            return None
+        printable_ratio = sum(1 for c in decoded if c.isprintable() or c in "\r\n\t") / len(decoded)
+        if printable_ratio >= 0.9 and len(decoded) >= 4:
+            return decoded
+    except Exception:
+        pass
+    return None
+
+
 def scan_ctf_indicators(payload: bytes) -> list:
     """CTF問題でよくある flag{...} パターンやBase64らしき文字列を検出する（ヒューリスティック）。"""
     hits = []
@@ -126,11 +143,13 @@ def scan_ctf_indicators(payload: bytes) -> list:
         return hits
     for m in _CTF_FLAG_RE.finditer(payload):
         text = m.group(0).decode("utf-8", errors="ignore")
-        hits.append({"type": "flag_pattern", "text": text[:200]})
+        hits.append({"type": "flag_pattern", "text": text[:200], "decoded": ""})
     for m in _BASE64_CANDIDATE_RE.finditer(payload):
         raw = m.group(0)
         if len(raw) >= 20:
-            hits.append({"type": "base64_candidate", "text": raw.decode("ascii", errors="ignore")[:200]})
+            text = raw.decode("ascii", errors="ignore")[:200]
+            hits.append({"type": "base64_candidate", "text": text,
+                         "decoded": try_decode_base64(text) or ""})
     return hits
 
 # ── VoIP/RTP ────────────────────────────────────────────────────

@@ -4459,11 +4459,12 @@ with tab_pcap:
 
                 if _ctf_hits:
                     st.markdown("**🚩 検出されたflag候補・Base64候補**")
+                    st.caption("Base64候補は自動デコードを試み、印字可能な結果が得られた場合のみ「デコード結果」に表示します。")
                     df_ctf = pd.DataFrame(_ctf_hits)
                     df_ctf = df_ctf[["type", "protocol", "src", "dst", "src_port", "dst_port",
-                                      "timestamp", "text"]]
+                                      "timestamp", "text", "decoded"]]
                     df_ctf.columns = ["種別", "プロトコル", "送信元IP", "宛先IP",
-                                       "送信元Port", "宛先Port", "時刻", "検出文字列"]
+                                       "送信元Port", "宛先Port", "時刻", "検出文字列", "デコード結果"]
                     df_ctf["種別"] = df_ctf["種別"].map(
                         {"flag_pattern": "🚩 flagパターン", "base64_candidate": "🔤 Base64候補"})
                     _show_table_top_n(df_ctf, "ctf_flag_hits.csv", "dl_ctf_flag_csv")
@@ -4475,9 +4476,29 @@ with tab_pcap:
                         f"({s['c2s_bytes']+s['s2c_bytes']}B, {s['packets']}pkt)": s
                         for i, s in enumerate(streams)
                     }
+                    _label_list = list(_stream_labels.keys())
+
+                    # IP/ポート番号で直接ストリームを検索（片方向のみ分かっていても検索可能）
+                    _sr_c1, _sr_c2, _sr_c3 = st.columns([2, 1, 1])
+                    _search_ip = _sr_c1.text_input("IPアドレスで検索(任意)", key="stream_search_ip")
+                    _search_port = _sr_c2.text_input("ポート番号で検索(任意)", key="stream_search_port")
+                    with _sr_c3:
+                        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                        if st.button("🔎 検索してジャンプ", key="stream_search_btn", use_container_width=True):
+                            _matched = next((
+                                s for s in streams
+                                if (not _search_ip or _search_ip in (s["src"], s["dst"]))
+                                and (not _search_port or _search_port in (str(s["src_port"]), str(s["dst_port"])))
+                            ), None)
+                            if _matched:
+                                st.session_state["_stream_jump_flow"] = (
+                                    _matched["src"], _matched["dst"], _matched["src_port"], _matched["dst_port"])
+                                st.rerun()
+                            else:
+                                st.warning("条件に一致するストリームが見つかりませんでした。")
+
                     _jump = st.session_state.pop("_stream_jump_flow", None)
                     _default_idx = 0
-                    _label_list = list(_stream_labels.keys())
                     if _jump:
                         for _i, (_lbl, _s) in enumerate(_stream_labels.items()):
                             if (_s["src"], _s["dst"], _s["src_port"], _s["dst_port"]) == _jump:
@@ -4508,8 +4529,11 @@ with tab_pcap:
                             for _sh in _stream_hits:
                                 _icon = "🚩" if _sh["type"] == "flag_pattern" else "🔤"
                                 st.success(f"{_icon} {_sh['text']}")
+                                if _sh.get("decoded"):
+                                    st.markdown(f"　　↳ デコード結果: `{_sh['decoded']}`")
                         else:
-                            st.info("このストリームからは検出されませんでした。")
+                            st.info("このストリームからは検出されませんでした"
+                                    "（1パケット単体では見えなくても、ストリーム再構成で見えることがあります）。")
 
                     _embedded = pcap_analyzer.find_embedded_files(_stream_full)
                     if _embedded:
