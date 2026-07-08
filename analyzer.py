@@ -1219,6 +1219,18 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
         lines.append("    ※既知の脅威フィード(abuse.ch等)に一致した通信先です。severityを最高レベルで"
                      "評価し、感染/C2通信として断定的に報告してください。")
 
+    if r.get("geo_alerts"):
+        _gs = r.get("geo_summary", {})
+        _cty = "・".join(f"{k}{v}件" for k, v in _gs.get("countries", {}).items())
+        lines.append("")
+        lines.append(f"【🌏 監視対象国からの通信（中国/北朝鮮/香港/マカオ・確定情報）: {_cty}】")
+        for g in r["geo_alerts"][:10]:
+            lines.append(f"    - {g.get('detail','')}")
+        lines.append("    ※RIR由来の国別IP割当と照合した確定情報です。特に北朝鮮(KP)との通信、"
+                     "および中国/香港/マカオからの受信(inbound)は業務上の想定有無を確認し、"
+                     "不審であればseverityを高く評価してください。送信元ブロック推奨のIPは"
+                     "対策案として明示してください。")
+
     lines += [
         "",
         "【DNS】",

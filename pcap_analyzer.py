@@ -69,6 +69,16 @@ def _tld_region(domain: str) -> str:
 DNS_PORT     = 53
 DHCP_PORTS   = {67, 68}
 TLS_PORTS    = {443, 8443, 465, 993, 995, 636, 5061}
+MODBUS_PORT  = 502      # Modbus TCP（産業/OT制御系）
+DNP3_PORT    = 20000    # DNP3（電力/水道等のSCADA）
+QUIC_PORTS   = {443, 80}  # QUIC/HTTP3 は主にUDP 443
+
+# Modbus 書き込み系ファンクションコード（不正な制御コマンドの可能性）
+_MODBUS_WRITE_FC = {
+    5: "単一コイル書込", 6: "単一レジスタ書込", 15: "複数コイル書込",
+    16: "複数レジスタ書込", 22: "マスク書込", 23: "読み書き複数レジスタ",
+}
+_MODBUS_READ_FC = {1: "コイル読取", 2: "入力読取", 3: "保持レジスタ読取", 4: "入力レジスタ読取"}
 
 # ── ICMP ────────────────────────────────────────────────────────
 ICMP_REDIRECT = 5
@@ -734,6 +744,9 @@ def analyze_pcap(data: bytes) -> dict:
         "suggested_lang": "ja",
         "region_hint": {},
         "threat_intel_hits": [],
+        "industrial_alerts": [], "industrial_summary": {},
+        "quic_sessions": [],
+        "geo_alerts": [], "geo_summary": {},
         "ip_fragments": [],
         "http_errors": [],    "http_summary": {},
         "tls_sessions": [],   "tls_alerts": [],
@@ -772,6 +785,11 @@ def analyze_pcap(data: bytes) -> dict:
     conn_times: dict[tuple, list]    = defaultdict(list)  # (src, dst, dport) -> [ts,...] ビーコニング
     accessed_domains: dict[str, dict] = {}               # domain -> {clients:set, count, via:set} アクセス先ドメイン
     outbound_bytes: dict[tuple, int] = defaultdict(int)  # (src, dst) -> 送信バイト数 大容量エクスフィル用
+    modbus_ops: dict[tuple, dict] = {}                   # (src,dst) -> {read, write, write_fc:set}
+    quic_conns: dict[tuple, dict] = {}                   # (src,dst) -> {count, versions:set, initial:bool}
+    # GeoIP: 監視対象国(CN/KP/HK/MO)の外部IP出現を集約
+    # ip -> {"as_src": bool, "as_dst": bool, "peers": set, "packets": int}
+    geo_seen: dict[str, dict] = {}
 
     def _record_domain(domain, client, via):
         if not domain or "." not in domain:
@@ -866,6 +884,16 @@ def analyze_pcap(data: bytes) -> dict:
                 src = _ip_str(ip.src)
                 dst = _ip_str(ip.dst)
 
+                # GeoIP: 外部（非プライベート）IPを送信元・宛先別に記録
+                if not _is_private_ip(src):
+                    _g = geo_seen.setdefault(src, {"as_src": False, "as_dst": False,
+                                                   "peers": set(), "packets": 0})
+                    _g["as_src"] = True; _g["packets"] += 1; _g["peers"].add(dst)
+                if not _is_private_ip(dst):
+                    _g = geo_seen.setdefault(dst, {"as_src": False, "as_dst": False,
+                                                   "peers": set(), "packets": 0})
+                    _g["as_dst"] = True; _g["packets"] += 1; _g["peers"].add(src)
+
                 # IP フラグメント検出
                 is_mf      = bool(ip.off & dpkt.ip.IP_MF)
                 frag_offset = ip.off & dpkt.ip.IP_OFFMASK  # 8-byte units
@@ -944,6 +972,23 @@ def analyze_pcap(data: bytes) -> dict:
                         outbound_bytes[(src, dst)] += data_len
                     if tcp.win == 0 and not is_syn and not is_rst:
                         zero_win_count[(src, dst, sport, dport)] += 1
+
+                    # ── 産業プロトコル: Modbus TCP（ポート502） ──
+                    if data_len >= 8 and (dport == MODBUS_PORT or sport == MODBUS_PORT):
+                        try:
+                            _mb = bytes(tcp.data)
+                            _proto_id = struct.unpack("!H", _mb[2:4])[0]
+                            _fc = _mb[7]  # MBAP(7バイト) の次がファンクションコード
+                            if _proto_id == 0 and (_fc in _MODBUS_READ_FC or _fc in _MODBUS_WRITE_FC):
+                                _mk = (src, dst)
+                                _e = modbus_ops.setdefault(_mk, {"read": 0, "write": 0, "write_fc": set()})
+                                if _fc in _MODBUS_WRITE_FC:
+                                    _e["write"] += 1
+                                    _e["write_fc"].add(_MODBUS_WRITE_FC[_fc])
+                                else:
+                                    _e["read"] += 1
+                        except Exception:
+                            pass
 
                     # CTF flag{...}/Base64候補の検出（暗号化されたTLSポートは除く）
                     if data_len > 0 and not (sport in TLS_PORTS or dport in TLS_PORTS):
@@ -1038,6 +1083,20 @@ def analyze_pcap(data: bytes) -> dict:
                 # ── UDP ─────────────────────────────────
                 elif isinstance(ip.data, dpkt.udp.UDP):
                     udp = ip.data
+
+                    # ── QUIC / HTTP3 検出（UDP 443 等・Long Headerで判定） ──
+                    if udp.dport in QUIC_PORTS or udp.sport in QUIC_PORTS:
+                        _qd = bytes(udp.data)
+                        if len(_qd) >= 5 and (_qd[0] & 0x80):  # Long Header (bit0x80)
+                            _ver = struct.unpack("!I", _qd[1:5])[0]
+                            _qk = (src, dst)
+                            _qe = quic_conns.setdefault(_qk, {"count": 0, "versions": set(), "initial": False})
+                            _qe["count"] += 1
+                            if _ver != 0:
+                                _qe["versions"].add(f"0x{_ver:08x}")
+                            # Long Header Packet Type: bits 0x30。00=Initial
+                            if (_qd[0] & 0x30) == 0x00:
+                                _qe["initial"] = True
 
                     # CTF flag{...}/Base64候補の検出（プロトコル種別によらず全UDPペイロード対象）
                     if udp.data:
@@ -1728,6 +1787,89 @@ def analyze_pcap(data: bytes) -> dict:
             _h["risk_level"] = "重大" if _s >= 70 else "高" if _s >= 40 else "中" if _s >= 20 else "低"
         result["host_risk"].sort(key=lambda x: x["risk_score"], reverse=True)
 
+    # ── 産業プロトコル(Modbus)の集計・書込コマンド警告 ──
+    _mb_read = _mb_write = 0
+    for (src, dst), op in modbus_ops.items():
+        _mb_read += op["read"]
+        _mb_write += op["write"]
+        if op["write"] > 0:
+            result["industrial_alerts"].append({
+                "protocol": "Modbus", "src": src, "dst": dst,
+                "read": op["read"], "write": op["write"],
+                "write_types": "/".join(sorted(op["write_fc"])),
+                "severity": "high",
+                "detail": f"{src} → {dst}(Modbus) へ書込コマンド {op['write']}回"
+                          f"（{'/'.join(sorted(op['write_fc']))}）"
+                          " — 制御系への書込は権限/正当性を要確認",
+            })
+    if modbus_ops:
+        result["industrial_summary"] = {
+            "modbus_pairs": len(modbus_ops), "modbus_read": _mb_read, "modbus_write": _mb_write}
+    result["industrial_alerts"].sort(key=lambda x: x["write"], reverse=True)
+
+    # ── QUIC/HTTP3 セッション集計 ──
+    for (src, dst), q in quic_conns.items():
+        result["quic_sessions"].append({
+            "src": src, "dst": dst, "packets": q["count"],
+            "versions": ",".join(sorted(q["versions"])) or "(不明)",
+            "has_initial": q["initial"],
+        })
+    result["quic_sessions"].sort(key=lambda x: x["packets"], reverse=True)
+
+    # ── GeoIP: 監視対象国(中国/北朝鮮/香港/マカオ)の外部IP検知 ──
+    try:
+        import geoip as _geo
+        _country_counts: dict = {}
+        for _ip, _info in geo_seen.items():
+            _c = _geo.lookup_country(_ip)
+            if not _c:
+                continue
+            _country_counts[_c] = _country_counts.get(_c, 0) + 1
+            # 方向: 送信元として観測=inbound（相手からのアクセス）, 宛先=outbound
+            _inbound = _info["as_src"]
+            _outbound = _info["as_dst"]
+            if _inbound and _outbound:
+                _direction = "双方向"
+            elif _inbound:
+                _direction = "inbound(アクセス元)"
+            else:
+                _direction = "outbound(通信先)"
+            # ブロック提案: 送信元(inbound)がCN/HK/MOのグローバルアドレスの場合
+            _block = _inbound and _geo.is_block_suggested(_c)
+            # 北朝鮮は業務通信が想定されないため常に重大、その他inboundは高
+            if _c == "kp":
+                _sev = "critical"
+            elif _inbound:
+                _sev = "high"
+            else:
+                _sev = "medium"
+            _label = _geo.country_label(_c, "ja")
+            _peers = sorted(_info["peers"])[:10]
+            _detail = (f"{_label}({_c.upper()})のグローバルアドレス {_ip} を検知"
+                       f"（{_direction} / パケット{_info['packets']}）")
+            if _block:
+                _detail += " — 送信元ブロックを推奨"
+            result["geo_alerts"].append({
+                "ip": _ip, "country": _c, "country_label": _label,
+                "direction": _direction, "inbound": _inbound, "outbound": _outbound,
+                "packets": _info["packets"], "peers": _peers,
+                "severity": _sev, "block_suggested": _block, "detail": _detail,
+            })
+        # 重大度順→パケット数順で並べる
+        _sev_rank = {"critical": 0, "high": 1, "medium": 2}
+        result["geo_alerts"].sort(
+            key=lambda x: (_sev_rank.get(x["severity"], 3), -x["packets"]))
+        if _country_counts:
+            result["geo_summary"] = {
+                "countries": {_geo.country_label(c, "ja"): n
+                              for c, n in _country_counts.items()},
+                "total_ips": sum(_country_counts.values()),
+                "block_suggested": sum(1 for a in result["geo_alerts"]
+                                       if a["block_suggested"]),
+            }
+    except Exception as _geo_err:
+        print(f"[geoip] 照合スキップ: {_geo_err}")
+
     return result
 
 
@@ -1887,6 +2029,83 @@ def _reassemble_segments(segments: list) -> bytes:
     return bytes(buf)
 
 
+def analyze_wireless(data: bytes) -> dict:
+    """
+    無線(802.11)キャプチャを解析する。ビーコン(SSID列挙)・deauth攻撃・
+    WPAハンドシェイク(EAPOL)取得を検出する。Ethernetキャプチャでは
+    is_wireless=False を返す（何もしない）。
+    """
+    result = {"is_wireless": False, "ssids": [], "deauth": [], "eapol": [], "summary": {}}
+    try:
+        reader = dpkt.pcap.Reader(io.BytesIO(data))
+        dlt = reader.datalink()
+    except Exception:
+        return result
+    # 105=IEEE802_11, 127=IEEE802_11_RADIO(radiotap), 163=AVS
+    if dlt not in (105, 127, 163, 119):
+        return result
+    result["is_wireless"] = True
+
+    ssid_seen = {}
+    deauth_count = defaultdict(int)
+    eapol_pairs = defaultdict(int)
+    beacon_n = deauth_n = eapol_n = 0
+
+    for ts, buf in reader:
+        try:
+            if dlt in (127, 163):  # radiotap等はヘッダを剥がす
+                rt = dpkt.radiotap.Radiotap(buf)
+                wlan = rt.data
+            else:
+                wlan = dpkt.ieee80211.IEEE80211(buf)
+            if not isinstance(wlan, dpkt.ieee80211.IEEE80211):
+                continue
+        except Exception:
+            continue
+        try:
+            if wlan.type == dpkt.ieee80211.MGMT_TYPE:
+                if wlan.subtype == dpkt.ieee80211.M_BEACON:
+                    beacon_n += 1
+                    ssid = ""
+                    try:
+                        ssid = wlan.ssid.data.decode("utf-8", errors="replace")
+                    except Exception:
+                        pass
+                    bssid = ":".join("%02x" % b for b in wlan.mgmt.bssid) if hasattr(wlan, "mgmt") else "?"
+                    if ssid and ssid not in ssid_seen:
+                        ssid_seen[ssid] = bssid
+                elif wlan.subtype == dpkt.ieee80211.M_DEAUTH:
+                    deauth_n += 1
+                    try:
+                        dst = ":".join("%02x" % b for b in wlan.mgmt.dst)
+                    except Exception:
+                        dst = "broadcast"
+                    deauth_count[dst] += 1
+            # EAPOL(WPAハンドシェイク) は data フレームの LLC/SNAP 0x888e
+            if b"\x88\x8e" in bytes(buf)[:64]:
+                eapol_n += 1
+        except Exception:
+            continue
+
+    result["ssids"] = [{"ssid": s, "bssid": b} for s, b in ssid_seen.items()]
+    for dst, cnt in deauth_count.items():
+        if cnt >= 5:
+            result["deauth"].append({
+                "target": dst, "count": cnt, "severity": "high",
+                "detail": f"{dst} 宛のdeauthフレーム {cnt}個 — deauth(切断)攻撃/WPAハンドシェイク奪取の可能性",
+            })
+    result["deauth"].sort(key=lambda x: x["count"], reverse=True)
+    if eapol_n:
+        result["eapol"].append({
+            "count": eapol_n,
+            "detail": f"EAPOL(WPAハンドシェイク)フレーム {eapol_n}個を検出 "
+                      "— WPA/WPA2ハンドシェイクの取得（パスワード解析の前段）の可能性",
+        })
+    result["summary"] = {"beacons": beacon_n, "deauth": deauth_n, "eapol": eapol_n,
+                         "ssid_count": len(ssid_seen)}
+    return result
+
+
 def get_tcp_streams(data: bytes) -> list:
     """
     TCPストリームを方向別（client→server / server→client）に再構成する。
@@ -2011,15 +2230,65 @@ def _extract_strings(data: bytes, min_len: int = 5) -> list:
     return result
 
 
+def extract_lsb_stego(data: bytes) -> list:
+    """
+    画像のLSB(最下位ビット)ステガノグラフィを抽出し、flag/印字可能文字列を探す。
+    Pillowで画像を開き、RGB各チャネルのLSBを行優先で連結してバイト列を作る
+    （最も一般的な埋め込み方式）。CTFの画像ステガノ問題向け。
+    戻り値: 検出したflag/文字列のリスト。
+    """
+    hits = []
+    try:
+        from PIL import Image
+    except Exception:
+        return hits
+    try:
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+        w, h = img.size
+        if w * h > 4_000_000:  # 過大な画像は処理量を抑える
+            img = img.crop((0, 0, min(w, 2000), min(h, 2000)))
+        px = list(img.getdata())
+    except Exception:
+        return hits
+    # 複数の一般的な抽出順を試す（R,G,B全て / Rのみ）
+    for label, channels in (("RGB-LSB", (0, 1, 2)), ("R-LSB", (0,))):
+        bits = []
+        for pixel in px:
+            for ch in channels:
+                bits.append(pixel[ch] & 1)
+                if len(bits) >= 8 * 4000:  # 先頭 約4KB 分だけ復元
+                    break
+            if len(bits) >= 8 * 4000:
+                break
+        # ビット列をバイト化
+        out = bytearray()
+        for i in range(0, len(bits) - 7, 8):
+            byte = 0
+            for b in bits[i:i + 8]:
+                byte = (byte << 1) | b
+            out.append(byte)
+        raw = bytes(out)
+        for hh in scan_ctf_indicators(raw):
+            if hh["type"] == "flag_pattern" and hh["text"] not in [x["text"] for x in hits]:
+                hits.append({"method": label, **hh})
+        # 印字可能な先頭文字列も（flag以外のヒント）
+        for s in _extract_strings(raw, 8)[:3]:
+            if "flag" in s.lower() or "ctf" in s.lower():
+                if s not in [x.get("text") for x in hits]:
+                    hits.append({"method": label, "type": "string", "text": s[:100], "decoded": ""})
+    return hits
+
+
 def analyze_image_forensics(ext: str, data: bytes) -> dict:
     """
     抽出した画像に対しCTF頻出の隠し手口を検査する:
       ① 末尾追記データ（画像の終端マーカー以降のデータ）
       ② ポリグロット/埋め込みファイル（画像内のZIP等）
       ③ メタデータ/文字列内の flag / Base64
-    戻り値: {"appended_data", "embedded_files", "string_hits"}
+      ④ LSBステガノグラフィ（ピクセルに隠されたデータ）
+    戻り値: {"appended_data", "embedded_files", "string_hits", "lsb_stego"}
     """
-    result = {"appended_data": None, "embedded_files": [], "string_hits": []}
+    result = {"appended_data": None, "embedded_files": [], "string_hits": [], "lsb_stego": []}
     if not data:
         return result
     ext = (ext or "").lower()
@@ -2060,6 +2329,10 @@ def analyze_image_forensics(ext: str, data: bytes) -> dict:
             if h["text"] not in _seen:
                 _seen.add(h["text"])
                 result["string_hits"].append(h)
+
+    # ④ LSBステガノグラフィ（PNG/GIF等の可逆画像で有効。JPEGは非可逆のため弱い）
+    if ext in ("png", "gif", "bmp"):
+        result["lsb_stego"] = extract_lsb_stego(data)
     return result
 
 

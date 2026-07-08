@@ -846,6 +846,7 @@ with st.sidebar:
             st.session_state["_pcap_convs"]   = _demo_pcap_convs
             st.session_state["_pcap_talkers"] = _demo_pcap_tlk
             st.session_state["_pcap_streams"] = _demo_pcap_streams
+            st.session_state["_pcap_bytes"]   = _demo_result["pcap_bytes"]
         st.success(
             f"生成完了 — syslog: {_demo_result['syslog_count']}件 | "
             f"NetFlow: {_demo_result['flow_count']}件 | "
@@ -3214,6 +3215,7 @@ snmp-server trap enable
                         st.session_state["_pcap_convs"]   = pcap_convs
                         st.session_state["_pcap_talkers"] = pcap_talkers
                         st.session_state["_pcap_streams"] = pcap_streams
+                        st.session_state["_pcap_bytes"]   = pcap_bytes
 
                         # 解析結果を表示
                         st.markdown("#### 📊 pcap 解析結果")
@@ -3929,6 +3931,7 @@ with tab_pcap:
                 st.session_state["_pcap_convs"]   = _dl_convs
                 st.session_state["_pcap_talkers"] = _dl_tlk
                 st.session_state["_pcap_streams"] = _dl_streams
+                st.session_state["_pcap_bytes"]   = _dl_bytes
                 st.download_button(
                     "💾 ローカルに保存", data=_dl_bytes,
                     file_name=_dl_file.split("/")[-1],
@@ -3968,6 +3971,7 @@ with tab_pcap:
             st.session_state["_pcap_convs"]   = convs
             st.session_state["_pcap_talkers"] = talkers
             st.session_state["_pcap_streams"] = streams
+            st.session_state["_pcap_bytes"]   = raw_bytes
         else:
             res     = st.session_state["_pcap_res"]
             convs   = st.session_state["_pcap_convs"]
@@ -4039,7 +4043,9 @@ with tab_pcap:
                               + res.get("icmp_exfil", []))
             _host_risk = res.get("host_risk", [])
             _ti_hits = res.get("threat_intel_hits", [])
-            if _ips_alerts or _anomaly_items or _behavior_items or _host_risk or _ti_hits:
+            _geo_alerts = res.get("geo_alerts", [])
+            if (_ips_alerts or _anomaly_items or _behavior_items or _host_risk
+                    or _ti_hits or _geo_alerts):
                 st.markdown("---")
                 st.markdown("### 🛡️ IPS検査（不正侵入・マルウェアの兆候）")
                 st.caption("Catalyst等でミラー/インライン取得したパケットを、IPS/IDS的に検査します。"
@@ -4053,6 +4059,43 @@ with tab_pcap:
                     st.markdown("**🌐 脅威インテリジェンス一致（既知の悪性IP/ドメイン）**")
                     for _th in _ti_hits:
                         st.error(f"🔴 {_th['detail']}")
+
+                # ── 🌏 地理的検知（中国/北朝鮮/香港/マカオの外部IP） ──
+                if _geo_alerts:
+                    _geo_sum = res.get("geo_summary", {})
+                    _cty = "・".join(f"{k}{v}件" for k, v in _geo_sum.get("countries", {}).items())
+                    st.markdown(f"**🌏 監視対象国からの通信を検知（{_cty}）**")
+                    st.caption("中国(CN)・北朝鮮(KP)・香港(HK)・マカオ(MO)に割り当てられた"
+                               "グローバルIPアドレスとの通信です（RIR由来の国別割当レンジと照合）。"
+                               "業務上の想定有無を確認してください。")
+                    _geo_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡"}
+                    _blocklist = []
+                    for _ga in _geo_alerts:
+                        st.markdown(f"- {_geo_icon.get(_ga['severity'],'⚪')} "
+                                    f"**{_ga['country_label']}({_ga['country'].upper()})** "
+                                    f"`{_ga['ip']}` — {_ga['direction']}"
+                                    f"（パケット{_ga['packets']} / 相手: {', '.join(_ga['peers'][:5])}）"
+                                    + ("　🚫 **送信元ブロック推奨**" if _ga["block_suggested"] else ""))
+                        if _ga["block_suggested"]:
+                            _blocklist.append(_ga["ip"])
+                    if _blocklist:
+                        st.warning("🚫 **ブロック候補の送信元IP（中国/香港/マカオからのアクセス元）**："
+                                   "業務上不要であれば境界FW/ACLでの遮断を推奨します。")
+                        _blocktext = "\n".join(sorted(set(_blocklist)))
+                        st.code(_blocktext, language="text")
+                        # そのままファイアウォールに投入できる形式でも提供
+                        _acl = "\n".join(f"deny ip host {_ip} any" for _ip in sorted(set(_blocklist)))
+                        with st.expander("🧱 ブロック設定例（ACL / iptables）"):
+                            st.caption("Cisco ACL 形式：")
+                            st.code(_acl, language="text")
+                            _ipt = "\n".join(f"iptables -A INPUT -s {_ip} -j DROP"
+                                             for _ip in sorted(set(_blocklist)))
+                            st.caption("iptables 形式：")
+                            st.code(_ipt, language="text")
+                        st.download_button(
+                            "📥 ブロック候補IP一覧をダウンロード", data=_blocktext,
+                            file_name="geo_block_candidates.txt", mime="text/plain",
+                            key="dl_geo_block")
 
                 # ── ⚠️ ホスト別リスクスコア（相関検知の要約・最上部） ──
                 if _host_risk:
@@ -4124,6 +4167,63 @@ with tab_pcap:
                         st.markdown(f"- 🔴 **DNSトンネリング**: {_dt['detail']}")
                     for _ie in res.get("icmp_exfil", []):
                         st.markdown(f"- 🔴 **ICMPエクスフィル**: {_ie['detail']}")
+
+            # ── 🏭 産業用プロトコル（Modbus/DNP3 の制御系通信） ──
+            _ind_alerts = res.get("industrial_alerts", [])
+            _ind_sum = res.get("industrial_summary", {})
+            if _ind_alerts or _ind_sum:
+                st.markdown("---")
+                st.markdown("### 🏭 産業用プロトコル（OT/制御系）")
+                if _ind_sum:
+                    st.caption(f"Modbus 通信ペア {_ind_sum.get('modbus_pairs',0)} / "
+                               f"読取 {_ind_sum.get('modbus_read',0)}回 / "
+                               f"書込 {_ind_sum.get('modbus_write',0)}回。"
+                               "制御系（PLC等）への**書込コマンド**は物理影響を伴うため、"
+                               "正当な操作か・権限があるかを必ず確認してください。")
+                for _ia in _ind_alerts:
+                    st.markdown(f"- 🟠 **{_ia['protocol']} 書込**: {_ia['detail']}")
+
+            # ── 🌐 QUIC / HTTP3（UDPベースの新しいWeb通信） ──
+            _quic = res.get("quic_sessions", [])
+            if _quic:
+                st.markdown("---")
+                st.markdown("### 🌐 QUIC / HTTP3 セッション")
+                st.caption("UDP/443等で動作するQUIC（HTTP/3）通信を検出しました。"
+                           "暗号化されペイロードは追えませんが、接続先・バージョン・"
+                           "Initialパケットの有無から通信の存在を把握できます。")
+                _qdf = pd.DataFrame([{
+                    "送信元": _q["src"], "宛先": _q["dst"], "パケット数": _q["packets"],
+                    "バージョン": _q["versions"],
+                    "Initial": "○" if _q["has_initial"] else "",
+                } for _q in _quic])
+                _show_table_top_n(_qdf, "quic_sessions.csv", "dl_quic_csv")
+
+            # ── 📡 無線 802.11（Wi-Fi）解析 ──
+            _wl = {"is_wireless": False}
+            _wl_bytes = st.session_state.get("_pcap_bytes")
+            try:
+                if _wl_bytes and hasattr(pcap_analyzer, "analyze_wireless"):
+                    _wl = pcap_analyzer.analyze_wireless(_wl_bytes)
+            except Exception as _wl_err:
+                _wl = {"is_wireless": False}
+                print(f"[app] 無線解析をスキップ: {_wl_err}")
+            if _wl.get("is_wireless"):
+                st.markdown("---")
+                st.markdown("### 📡 無線LAN（802.11 / Wi-Fi）解析")
+                st.caption("無線キャプチャ（radiotap/802.11）を検出しました。"
+                           "ビーコン(SSID)・認証解除(deauth)攻撃・WPAハンドシェイク(EAPOL)を検査します。")
+                _wl_sum = _wl.get("summary", {})
+                st.caption(f"ビーコン {_wl_sum.get('beacons',0)} / "
+                           f"SSID {_wl_sum.get('ssid_count',0)} / "
+                           f"deauth {_wl_sum.get('deauth',0)} / "
+                           f"EAPOL {_wl_sum.get('eapol',0)}")
+                if _wl.get("ssids"):
+                    st.markdown("**検出SSID（アクセスポイント）**: "
+                                + ", ".join(f"`{s['ssid']}`" for s in _wl["ssids"][:20]))
+                for _da in _wl.get("deauth", []):
+                    st.error(f"🔴 **Deauth（認証解除）攻撃の疑い**: {_da['detail']}")
+                for _ep in _wl.get("eapol", []):
+                    st.info(f"🔑 {_ep['detail']}")
 
             # ── 📧 メール添付ファイルのウイルスチェック ──────
             # 付加機能のため、万一失敗してもページ全体を落とさないよう防御的に呼ぶ
@@ -4729,9 +4829,12 @@ with tab_pcap:
                             if _ef["ext"] in _img_exts:
                                 _imgf = pcap_analyzer.analyze_image_forensics(_ef["ext"], _ef["data"])
                                 _found = (_imgf["appended_data"] or _imgf["embedded_files"]
-                                          or _imgf["string_hits"])
+                                          or _imgf["string_hits"] or _imgf.get("lsb_stego"))
                                 if _found:
                                     with _fc1.expander("🔬 画像フォレンジック（隠しデータ検出）", expanded=True):
+                                        for _ls in _imgf.get("lsb_stego", []):
+                                            st.success(f"🧿 LSBステガノ({_ls['method']}): {_ls['text']}"
+                                                       + (f" → `{_ls['decoded']}`" if _ls.get("decoded") else ""))
                                         for _sh in _imgf["string_hits"]:
                                             _ic = "🚩" if _sh["type"] == "flag_pattern" else "🔤"
                                             st.success(f"{_ic} メタデータ/文字列: {_sh['text']}"
