@@ -1888,15 +1888,29 @@ with tab_showlog:
     if _is_cloud_mode() and not _is_admin_authenticated():
         st.caption(f"🔒 ゲスト利用時のアップロード上限: {MAX_UPLOAD_MB_GUEST}MB（管理者ログインで解除）")
     _up_file = st.file_uploader(
-        "📎 ファイルをドラッグ＆ドロップ（syslog/show出力のテキスト、または pcap/pcapng）",
-        type=["txt", "log", "cfg", "conf", "syslog", "pcap", "pcapng", "cap"],
+        "📎 ファイルをドラッグ＆ドロップ（syslog/show出力のテキスト、pcap/pcapng、zip/gz圧縮も可）",
+        type=["txt", "log", "cfg", "conf", "syslog", "pcap", "pcapng", "cap", "zip", "gz"],
         key="show_log_file_upload",
-        help="テキストファイルはそのまま下の欄に読み込みます。pcap系は自動でパケット解析します。",
+        help="テキストファイルはそのまま下の欄に読み込みます。pcap系は自動でパケット解析します。"
+             "zip/gzで圧縮したものは自動解凍します（zip内のsyslog/pcapを自動選択）。",
     )
     if _up_file is not None and _check_upload_size_ok(_up_file, _is_cloud_mode()):
-        _up_name = _up_file.name.lower()
         _up_bytes = _up_file.getvalue()
-        if _up_name.endswith((".pcap", ".pcapng", ".cap")):
+        _up_name = _up_file.name.lower()
+
+        # zip/gz 圧縮なら自動解凍。pcap優先で探し、無ければテキスト(ログ)として展開
+        if _up_name.endswith((".zip", ".gz")) or _up_bytes[:4] == b"PK\x03\x04" or _up_bytes[:2] == b"\x1f\x8b":
+            _sdec = pcap_analyzer.decompress_upload(_up_bytes, _up_file.name, prefer="pcap")
+            if not _sdec["extracted"]:
+                _sdec = pcap_analyzer.decompress_upload(_up_bytes, _up_file.name, prefer="log")
+            if _sdec["extracted"]:
+                _up_bytes = _sdec["data"]
+                _up_name = _sdec["name"].lower()
+                st.info(f"🗜️ 圧縮ファイルを自動解凍しました（{_sdec['source']}）→ `{_sdec['name']}`")
+        # 拡張子で判別できない場合はマジックバイトでpcapを判定
+        _is_pcap_upload = _up_name.endswith((".pcap", ".pcapng", ".cap")) or \
+            pcap_analyzer._looks_like_pcap(_up_bytes)
+        if _is_pcap_upload:
             # pcap系はここでそのまま解析（パケット解析タブと同じエンジン）
             st.info(f"📦 pcapファイルを検出しました: {_up_file.name}（{len(_up_bytes):,} bytes）")
             if st.button("📦 このpcapを解析する", key="show_log_pcap_analyze"):
@@ -3950,16 +3964,28 @@ with tab_pcap:
         st.caption(f"🔒 ゲスト利用時のアップロード上限: {MAX_UPLOAD_MB_GUEST}MB（管理者ログインで解除）")
 
     uploaded_pcap = st.file_uploader(
-        "pcap / pcapng ファイルをアップロード",
-        type=["pcap", "pcapng", "cap"],
-        help="Wiresharkの「名前を付けて保存」で .pcapng 形式で保存したファイルをそのままアップロードできます。"
+        "pcap / pcapng ファイルをアップロード（zip / gz 圧縮もそのままでOK）",
+        type=["pcap", "pcapng", "cap", "zip", "gz"],
+        help="Wiresharkの「名前を付けて保存」で保存したファイルのほか、zip/gzで圧縮したものも"
+             "自動解凍して解析します。zip内に複数ある場合は pcap/pcapng を自動選択します。"
     )
 
     if uploaded_pcap is not None and _check_upload_size_ok(uploaded_pcap, _is_cloud_mode()):
         raw_bytes = uploaded_pcap.read()
+        _pcap_upname = uploaded_pcap.name
+
+        # zip/gz で圧縮されていれば自動解凍してpcapを取り出す
+        _pdec = pcap_analyzer.decompress_upload(raw_bytes, uploaded_pcap.name, prefer="pcap")
+        if _pdec["extracted"]:
+            raw_bytes = _pdec["data"]
+            _pcap_upname = _pdec["name"]
+            st.info(f"🗜️ 圧縮ファイルを自動解凍しました（{_pdec['source']}）→ "
+                    f"`{_pdec['name']}`（{len(raw_bytes):,} bytes）"
+                    + (f" ／ 同梱: {', '.join(_pdec['candidates'][:8])}"
+                       if len(_pdec.get('candidates', [])) > 1 else ""))
 
         # キャッシュ: 同じファイルなら再解析しない
-        _pcap_key = f"{uploaded_pcap.name}_{len(raw_bytes)}"
+        _pcap_key = f"{_pcap_upname}_{len(raw_bytes)}"
         if st.session_state.get("_pcap_key") != _pcap_key:
             with st.spinner("パケットを解析中..."):
                 res      = pcap_analyzer.analyze_pcap(raw_bytes)
@@ -4714,7 +4740,9 @@ with tab_pcap:
                 st.markdown("---")
                 st.markdown("### 🚩 CTF / フォレンジック機能")
                 st.caption("ネットワークフォレンジック系CTF問題向け。flag{...}/Base64検出、"
-                           "TCPストリーム再構成（Follow TCP Stream）、埋め込みファイル抽出、"
+                           "TCPストリーム再構成（Follow TCP Stream）、埋め込みファイル抽出"
+                           "（正確なファイル長でカービング／ZIP・Officeは再帰展開）、"
+                           "画像ステガノ（PNG/GIF/BMPは画素LSB、JPEGはコメント/EXIF/APPn・複数EOI）、"
                            "DNS/ICMPトンネリング検出、多段エンコード自動デコードができます。"
                            "いずれもヒューリスティックのため、必ず内容を目視確認してください。")
 
@@ -4841,7 +4869,8 @@ with tab_pcap:
                             if _ef["ext"] in _img_exts:
                                 _imgf = pcap_analyzer.analyze_image_forensics(_ef["ext"], _ef["data"])
                                 _found = (_imgf["appended_data"] or _imgf["embedded_files"]
-                                          or _imgf["string_hits"] or _imgf.get("lsb_stego"))
+                                          or _imgf["string_hits"] or _imgf.get("lsb_stego")
+                                          or _imgf.get("jpeg"))
                                 if _found:
                                     with _fc1.expander("🔬 画像フォレンジック（隠しデータ検出）", expanded=True):
                                         for _ls in _imgf.get("lsb_stego", []):
@@ -4872,6 +4901,53 @@ with tab_pcap:
                                                 file_name=f"polyglot_{_fi}_{_pj_i}.{_pj['ext']}",
                                                 mime="application/octet-stream",
                                                 key=f"dl_poly_{_fi}_{_pj_i}_{_sel_stream['src']}_{_sel_stream['src_port']}")
+                                        # JPEG: マーカーセグメント(COM/APPn/EXIF)・複数EOI
+                                        _jpg = _imgf.get("jpeg")
+                                        if _jpg:
+                                            st.caption("🧩 JPEGマーカー解析（コメント/EXIF/APPn・複数EOI）"
+                                                       "— JPEGは画素LSBが効かないため、これらのメタ領域が主な隠し場所です。")
+                                            for _jh in _jpg["flag_hits"]:
+                                                _ic = "🚩" if _jh["type"] == "flag_pattern" else "🔤"
+                                                st.success(f"{_ic} [{_jh.get('where','')}] {_jh['text']}"
+                                                           + (f" → `{_jh['decoded']}`" if _jh.get("decoded") else ""))
+                                            if _jpg.get("extra_eoi"):
+                                                st.warning(f"📎 EOI(画像終端)以降にデータを検出"
+                                                           f"（隠し画像/追記の可能性 ×{_jpg['extra_eoi']}）")
+                                            if _jpg.get("segments"):
+                                                st.caption("検出セグメント: "
+                                                           + ", ".join(f"{s['marker']}({s['size']}B)"
+                                                                       for s in _jpg["segments"][:12]))
+                                            if _jpg.get("exif"):
+                                                with st.expander("📷 EXIFメタデータ"):
+                                                    for _k, _v in list(_jpg["exif"].items())[:30]:
+                                                        st.text(f"{_k}: {_v}")
+
+                            # ZIP/Office(docx等)は中身を再帰展開してflagを探索
+                            elif _ef["ext"] in {"zip", "docx", "xlsx", "pptx", "jar"}:
+                                _arc = pcap_analyzer.extract_archive_contents(_ef["data"], _ef["ext"])
+                                if _arc:
+                                    with _fc1.expander(f"🗜️ アーカイブ展開（{_ef['ext']}・再帰）", expanded=True):
+                                        _acnt = [0]
+                                        def _render_arc(_entries, _depth=0, _pfx=""):
+                                            for _ai, _e in enumerate(_entries):
+                                                _pad = "　" * _depth
+                                                _tag = "📦" if _e["is_archive"] else "📄"
+                                                st.markdown(f"{_pad}{_tag} `{_e['path']}` "
+                                                            f"（{_e['size']:,} bytes）")
+                                                for _h in _e["ctf_hits"]:
+                                                    _ic = "🚩" if _h["type"] == "flag_pattern" else "🔤"
+                                                    st.success(f"{_pad}{_ic} {_h['text']}"
+                                                               + (f" → `{_h['decoded']}`" if _h.get("decoded") else ""))
+                                                if _e.get("data") is not None and _e["ctf_hits"]:
+                                                    st.download_button(
+                                                        "📥 このファイルを取り出す", data=_e["data"],
+                                                        file_name=_e["path"].replace("/", "_") or f"member_{_acnt[0]}",
+                                                        mime="application/octet-stream",
+                                                        key=f"dl_arc_{_fi}_{_acnt[0]}_{_sel_stream['src']}_{_sel_stream['src_port']}")
+                                                    _acnt[0] += 1
+                                                if _e.get("children"):
+                                                    _render_arc(_e["children"], _depth + 1)
+                                        _render_arc(_arc)
 
                     st.download_button(
                         "📥 このストリームの生データをダウンロード（送信+応答結合）",

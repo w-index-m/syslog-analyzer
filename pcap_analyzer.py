@@ -18,6 +18,99 @@ from datetime import datetime
 import dpkt
 
 
+# ══════════════════════════════════════════════════════════════════
+#  アップロード自動解凍（zip/gzip でまとめられた pcap・syslog を展開）
+# ══════════════════════════════════════════════════════════════════
+_DECOMP_MAX = 200 * 1024 * 1024   # 解凍後サイズ上限（解凍爆弾対策）
+_PCAP_MAGICS = (
+    b"\xd4\xc3\xb2\xa1", b"\xa1\xb2\xc3\xd4",   # pcap little/big endian
+    b"\x4d\x3c\xb2\xa1", b"\xa1\xb2\x3c\x4d",   # pcap ns
+    b"\x0a\x0d\x0d\x0a",                          # pcapng
+)
+
+
+def _looks_like_pcap(data: bytes) -> bool:
+    return bool(data) and any(data[:4] == m for m in _PCAP_MAGICS)
+
+
+def _gunzip_bounded(data: bytes) -> bytes | None:
+    """gzipを上限付きで解凍する（解凍爆弾対策）。失敗時 None。"""
+    try:
+        d = zlib.decompressobj(16 + zlib.MAX_WBITS)   # gzipヘッダ対応
+        out = d.decompress(data, _DECOMP_MAX + 1)
+        if len(out) > _DECOMP_MAX:
+            return None
+        return out
+    except Exception:
+        return None
+
+
+def decompress_upload(data: bytes, filename: str = "", prefer: str = "pcap") -> dict:
+    """
+    アップロードされたファイルが zip/gzip なら中身を取り出す。
+    prefer="pcap" なら pcap/pcapng を、"log" なら syslog/テキストログを優先選択。
+    戻り値: {"data", "name", "extracted"(bool), "source", "candidates":[名前...]}
+    非圧縮ならそのまま返す（extracted=False）。
+    """
+    result = {"data": data, "name": filename, "extracted": False,
+              "source": "", "candidates": []}
+    if not data:
+        return result
+    name_l = (filename or "").lower()
+
+    # ── gzip（単一ファイル。例: capture.pcap.gz / messages.log.gz） ──
+    if data[:2] == b"\x1f\x8b" or name_l.endswith(".gz"):
+        dec = _gunzip_bounded(data)
+        if dec:
+            inner = filename[:-3] if name_l.endswith(".gz") else (filename or "extracted")
+            return {"data": dec, "name": inner or "extracted", "extracted": True,
+                    "source": "gzip", "candidates": [inner]}
+
+    # ── zip（複数ファイルから目的のものを選ぶ） ──
+    if data[:4] == b"PK\x03\x04" or name_l.endswith(".zip"):
+        import zipfile
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(data))
+        except Exception:
+            return result
+        members = [i for i in zf.infolist() if not i.is_dir()]
+        result["candidates"] = [i.filename for i in members]
+        if prefer == "pcap":
+            want_ext = (".pcap", ".pcapng", ".cap")
+        else:
+            want_ext = (".log", ".txt", ".syslog", ".cfg", ".conf", ".out")
+
+        def _read(info):
+            if info.file_size > _DECOMP_MAX:
+                return None
+            try:
+                with zf.open(info) as fp:
+                    return fp.read(min(info.file_size + 1, _DECOMP_MAX))
+            except Exception:
+                return None
+
+        # 1) 拡張子一致のうち最大サイズ、2) pcapはマジック一致、3) 単一メンバー
+        cand = sorted([i for i in members if i.filename.lower().endswith(want_ext)],
+                      key=lambda i: i.file_size, reverse=True)
+        for info in cand:
+            b = _read(info)
+            if b is not None:
+                return {"data": b, "name": info.filename, "extracted": True,
+                        "source": "zip", "candidates": result["candidates"]}
+        if prefer == "pcap":
+            for info in sorted(members, key=lambda i: i.file_size, reverse=True):
+                b = _read(info)
+                if b is not None and _looks_like_pcap(b):
+                    return {"data": b, "name": info.filename, "extracted": True,
+                            "source": "zip", "candidates": result["candidates"]}
+        if len(members) == 1:
+            b = _read(members[0])
+            if b is not None:
+                return {"data": b, "name": members[0].filename, "extracted": True,
+                        "source": "zip", "candidates": result["candidates"]}
+    return result
+
+
 # ── ポート定数 ──────────────────────────────────────────────────
 SYSLOG_PORTS = {514, 5140, 5141, 516, 601}
 RIP_PORT     = 520
@@ -2177,18 +2270,80 @@ _FILE_SIGNATURES = [
     (b"\xff\xd8\xff", "jpg"),
     (b"GIF87a", "gif"),
     (b"GIF89a", "gif"),
-    (b"PK\x03\x04", "zip"),
+    (b"PK\x03\x04", "zip"),          # ZIP / Office(docx/xlsx/pptx) / jar / apk 等
     (b"%PDF-", "pdf"),
     (b"\x7fELF", "elf"),
+    (b"MZ", "exe"),                  # Windows PE(EXE/DLL)
     (b"Rar!\x1a\x07\x00", "rar"),
+    (b"Rar!\x1a\x07\x01\x00", "rar"),
+    (b"7z\xbc\xaf\x27\x1c", "7z"),
+    (b"\x1f\x8b\x08", "gz"),         # gzip
+    (b"BZh", "bz2"),                 # bzip2
+    (b"\xfd7zXZ\x00", "xz"),         # xz
+    (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "ole"),  # 旧Office(doc/xls/ppt), MSI 等
+    (b"SQLite format 3\x00", "sqlite"),
+    (b"ustar", "tar"),              # tar（実際はオフセット257だが簡易検出）
 ]
+
+# ZIPベースのため中身を再帰展開する拡張子（Officeもzip）
+_ZIP_LIKE_EXTS = {"zip", "docx", "xlsx", "pptx", "jar", "apk"}
+# カービング/再帰展開の安全上限（解凍爆弾対策）
+_CARVE_MAX_TOTAL = 64 * 1024 * 1024   # 展開合計の上限 64MB
+_CARVE_MAX_MEMBER = 16 * 1024 * 1024  # 1エントリの上限 16MB
+_CARVE_MAX_DEPTH = 3                   # 再帰の最大深さ
+
+
+def _carve_length(data: bytes, offset: int, ext: str) -> int | None:
+    """シグネチャ位置から正確なファイル終端を求める（求まらなければNone）。"""
+    try:
+        if ext == "png":
+            idx = data.find(b"IEND\xae\x42\x60\x82", offset)
+            return (idx + 8 - offset) if idx != -1 else None
+        if ext == "jpg":
+            idx = data.find(b"\xff\xd9", offset + 2)
+            return (idx + 2 - offset) if idx != -1 else None
+        if ext == "gif":
+            idx = data.find(b"\x00\x3b", offset)      # GIFトレーラ
+            return (idx + 2 - offset) if idx != -1 else None
+        if ext == "pdf":
+            idx = data.rfind(b"%%EOF")                # 最後の%%EOFまで
+            if idx != -1 and idx >= offset:
+                end = idx + 5
+                # 末尾の改行も含める
+                while end < len(data) and data[end:end + 1] in (b"\r", b"\n"):
+                    end += 1
+                return end - offset
+            return None
+        if ext in ("zip",) or ext in _ZIP_LIKE_EXTS:
+            # EOCD(End Of Central Directory)候補を全て集め、末尾側から
+            # 実際にzipとして開けるものを採用（ネストzipの内側EOCDで誤って
+            # 途中截断しないよう、最外周を選ぶ）。
+            import zipfile
+            eocds, p = [], data.find(b"PK\x05\x06", offset)
+            while p != -1:
+                eocds.append(p)
+                p = data.find(b"PK\x05\x06", p + 4)
+            for eocd in reversed(eocds):
+                if eocd + 22 > len(data):
+                    continue
+                clen = int.from_bytes(data[eocd + 20:eocd + 22], "little")
+                end = eocd + 22 + clen
+                try:
+                    zipfile.ZipFile(io.BytesIO(data[offset:end])).infolist()
+                    return end - offset
+                except Exception:
+                    continue
+            return None
+    except Exception:
+        return None
+    return None
 
 
 def find_embedded_files(stream_bytes: bytes) -> list:
     """
     再構成したTCPストリームから既知のファイルシグネチャを検出し、
-    そこから次のシグネチャ出現位置（または末尾）までを候補として切り出す。
-    正確なファイル長は保証しないベストエフォート実装（ファイルカービング）。
+    可能なら正確な終端まで（不可なら次のシグネチャ位置または末尾まで）を
+    候補として切り出す（ファイルカービング）。
     """
     if not stream_bytes:
         return []
@@ -2203,13 +2358,84 @@ def find_embedded_files(stream_bytes: bytes) -> list:
             start = idx + len(sig)
     hits.sort(key=lambda h: h["offset"])
     files = []
+    covered_until = -1   # 既にカービング済みファイルの終端（内部シグネチャの誤検出を抑止）
     for i, h in enumerate(hits):
-        end = hits[i + 1]["offset"] if i + 1 < len(hits) else len(stream_bytes)
+        if h["offset"] < covered_until:
+            continue  # 直前に切り出したファイルの内部 → スキップ
+        next_off = len(stream_bytes)
+        for j in range(i + 1, len(hits)):
+            if hits[j]["offset"] > h["offset"]:
+                next_off = hits[j]["offset"]
+                break
+        # まず正確な長さを試み、無ければ次シグネチャ（or末尾）までで代替
+        exact = _carve_length(stream_bytes, h["offset"], h["ext"])
+        if exact and exact > 0:
+            end = h["offset"] + exact
+        else:
+            end = next_off
         chunk = stream_bytes[h["offset"]:end]
         if len(chunk) < 8:
             continue
-        files.append({"ext": h["ext"], "offset": h["offset"], "size": len(chunk), "data": chunk})
+        # 正確な長さが取れたものだけ「内部シグネチャ抑止」の範囲とする
+        if exact:
+            covered_until = end
+        files.append({"ext": h["ext"], "offset": h["offset"], "size": len(chunk),
+                      "data": chunk, "exact": bool(exact)})
     return files
+
+
+def extract_archive_contents(data: bytes, ext: str = "zip", _depth: int = 0,
+                             _budget: list | None = None) -> list:
+    """
+    ZIP/Office(docx等)アーカイブを展開し、各エントリを走査してflag/Base64や
+    さらに内部のアーカイブ・埋め込みファイルを再帰的に取り出す。
+    解凍爆弾対策として合計/単体サイズ・深さに上限を設ける。
+    戻り値: [{"path", "size", "ctf_hits", "is_archive", "children":[...], "data"?}]
+    """
+    import zipfile
+    if _budget is None:
+        _budget = [_CARVE_MAX_TOTAL]
+    if _depth > _CARVE_MAX_DEPTH or _budget[0] <= 0:
+        return []
+    entries = []
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except Exception:
+        return []
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        if _budget[0] <= 0:
+            break
+        # 解凍爆弾対策: 宣言サイズ・実読込量を制限
+        if info.file_size > _CARVE_MAX_MEMBER:
+            entries.append({"path": info.filename, "size": info.file_size,
+                            "ctf_hits": [], "is_archive": False, "children": [],
+                            "note": "サイズ上限超のためスキップ"})
+            continue
+        try:
+            with zf.open(info) as fp:
+                member = fp.read(min(info.file_size + 1, _CARVE_MAX_MEMBER))
+        except Exception:
+            continue
+        _budget[0] -= len(member)
+        ctf = scan_ctf_indicators(member)
+        is_arc = member[:4] == b"PK\x03\x04"
+        children = []
+        if is_arc:
+            children = extract_archive_contents(member, "zip", _depth + 1, _budget)
+        else:
+            # ZIP以外の埋め込みファイル（画像/PDF等）も内部に隠れていることがある
+            for _ef in find_embedded_files(member):
+                if _ef["offset"] == 0 and _ef["size"] == len(member):
+                    continue  # メンバー自身は除外
+                children.append({"path": f"(埋め込み).{_ef['ext']}", "size": _ef["size"],
+                                 "ctf_hits": scan_ctf_indicators(_ef["data"]),
+                                 "is_archive": False, "children": [], "data": _ef["data"]})
+        entries.append({"path": info.filename, "size": info.file_size,
+                        "ctf_hits": ctf, "is_archive": is_arc, "children": children,
+                        "data": member})
+    return entries
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -2282,6 +2508,99 @@ def extract_lsb_stego(data: bytes) -> list:
     return hits
 
 
+_JPEG_MARKER_NAMES = {
+    0xE0: "APP0(JFIF)", 0xE1: "APP1(EXIF/XMP)", 0xE2: "APP2", 0xEC: "APP12",
+    0xED: "APP13(Photoshop)", 0xEE: "APP14(Adobe)", 0xFE: "COM(コメント)",
+    0xDB: "DQT(量子化表)", 0xC0: "SOF0", 0xC2: "SOF2", 0xC4: "DHT(ハフマン表)",
+    0xDA: "SOS(スキャン開始)", 0xD8: "SOI", 0xD9: "EOI",
+}
+
+
+def analyze_jpeg_segments(data: bytes) -> dict:
+    """
+    JPEGのマーカーセグメントを走査し、CTFで隠し場所に使われやすい
+    COM(コメント)・APPn(EXIF/XMP/ICC等)・サムネイル・複数EOI(隠し画像)を
+    取り出して flag/Base64 を検査する。JPEGはDCT非可逆のため画素LSBは効かず、
+    こうしたメタ領域・付加データが主要な隠し場所になる。
+    戻り値: {"segments":[...], "flag_hits":[...], "exif":{}, "thumbnail":bytes|None,
+             "extra_eoi": int}
+    """
+    out = {"segments": [], "flag_hits": [], "exif": {}, "thumbnail": None, "extra_eoi": 0}
+    if not data or data[:2] != b"\xff\xd8":
+        return out
+    n = len(data)
+    i = 2
+    seen_flags = set()
+    def _scan(blob, where):
+        for h in scan_ctf_indicators(blob):
+            key = (h["type"], h["text"])
+            if key not in seen_flags:
+                seen_flags.add(key)
+                out["flag_hits"].append({**h, "where": where})
+        # 印字可能な短い文字列でflag/ctfを含むもの
+        for s in _extract_strings(blob, 6):
+            if ("flag" in s.lower() or "ctf" in s.lower()) and ("flag", s) not in seen_flags:
+                seen_flags.add(("flag", s))
+                out["flag_hits"].append({"type": "string", "text": s[:100],
+                                          "decoded": "", "where": where})
+    while i < n - 1:
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        marker = data[i + 1]
+        # スタンドアロンマーカー（長さ無し）
+        if marker in (0xD8, 0xD9, 0x01) or 0xD0 <= marker <= 0xD7 or marker == 0xFF:
+            if marker == 0xD9:  # EOI
+                # EOI以降に追記/2枚目画像が続くか
+                rest = data[i + 2:]
+                if rest.strip(b"\x00"):
+                    out["extra_eoi"] += 1
+                    _scan(rest[:65536], "EOI以降(追記/隠し画像)")
+                break
+            i += 2
+            continue
+        if i + 4 > n:
+            break
+        seg_len = int.from_bytes(data[i + 2:i + 4], "big")
+        if seg_len < 2:
+            break
+        payload = data[i + 4:i + 2 + seg_len]
+        name = _JPEG_MARKER_NAMES.get(marker, f"FF{marker:02X}")
+        # COM/APPn は隠し場所として重要 → 中身を記録・走査
+        if marker == 0xFE or 0xE0 <= marker <= 0xEF:
+            out["segments"].append({"marker": name, "offset": i, "size": len(payload)})
+            _scan(payload, name)
+        if marker == 0xDA:   # SOS 以降はエントロピー符号化データ → セグメント走査終了
+            # SOS後のスキャンデータ内の次EOIまでを飛ばし、末尾はEOI処理に任せる
+            i = data.find(b"\xff\xd9", i)
+            if i == -1:
+                break
+            continue
+        i += 2 + seg_len
+    # EXIF/サムネイルは Pillow で構造的に取得（あれば）
+    try:
+        from PIL import Image
+        im = Image.open(io.BytesIO(data))
+        exif = im.getexif()
+        if exif:
+            for tag_id, val in exif.items():
+                try:
+                    from PIL.ExifTags import TAGS
+                    tag = TAGS.get(tag_id, str(tag_id))
+                except Exception:
+                    tag = str(tag_id)
+                sval = str(val)[:200]
+                out["exif"][str(tag)] = sval
+                _scan(sval.encode("utf-8", errors="ignore"), f"EXIF:{tag}")
+        # サムネイル（EXIF内の縮小画像に別データが仕込まれることがある）
+        thumb = exif.get_ifd(0x8769).get(0x0201) if hasattr(exif, "get_ifd") else None
+        if thumb:
+            out["thumbnail"] = None  # オフセット情報のみ、実体抽出は割愛
+    except Exception:
+        pass
+    return out
+
+
 def analyze_image_forensics(ext: str, data: bytes) -> dict:
     """
     抽出した画像に対しCTF頻出の隠し手口を検査する:
@@ -2289,9 +2608,11 @@ def analyze_image_forensics(ext: str, data: bytes) -> dict:
       ② ポリグロット/埋め込みファイル（画像内のZIP等）
       ③ メタデータ/文字列内の flag / Base64
       ④ LSBステガノグラフィ（ピクセルに隠されたデータ）
-    戻り値: {"appended_data", "embedded_files", "string_hits", "lsb_stego"}
+      ⑤ JPEGマーカーセグメント（COM/APPn/EXIF・複数EOI）※JPEG時のみ
+    戻り値: {"appended_data", "embedded_files", "string_hits", "lsb_stego", "jpeg"}
     """
-    result = {"appended_data": None, "embedded_files": [], "string_hits": [], "lsb_stego": []}
+    result = {"appended_data": None, "embedded_files": [], "string_hits": [],
+              "lsb_stego": [], "jpeg": None}
     if not data:
         return result
     ext = (ext or "").lower()
@@ -2336,6 +2657,13 @@ def analyze_image_forensics(ext: str, data: bytes) -> dict:
     # ④ LSBステガノグラフィ（PNG/GIF等の可逆画像で有効。JPEGは非可逆のため弱い）
     if ext in ("png", "gif", "bmp"):
         result["lsb_stego"] = extract_lsb_stego(data)
+
+    # ⑤ JPEG: マーカーセグメント(COM/APPn/EXIF)・複数EOIを検査
+    #    JPEGは画素LSBが効かないため、メタ領域・付加データが主要な隠し場所。
+    if ext in ("jpg", "jpeg"):
+        _jseg = analyze_jpeg_segments(data)
+        if _jseg["flag_hits"] or _jseg["segments"] or _jseg["exif"] or _jseg["extra_eoi"]:
+            result["jpeg"] = _jseg
     return result
 
 
