@@ -1834,12 +1834,14 @@ def analyze_pcap(data: bytes) -> dict:
                 _direction = "inbound(アクセス元)"
             else:
                 _direction = "outbound(通信先)"
-            # ブロック提案: 送信元(inbound)がCN/HK/MOのグローバルアドレスの場合
-            _block = _inbound and _geo.is_block_suggested(_c)
-            # 北朝鮮は業務通信が想定されないため常に重大、その他inboundは高
+            # ブロック提案: CN/HK/MOのグローバルアドレスは方向を問わず遮断を推奨
+            # （inbound=送信元遮断、outbound=宛先遮断のいずれも対象）
+            _block = _geo.is_block_suggested(_c)
+            # 北朝鮮は業務通信が想定されないため常に重大、
+            # その他のブロック対象国・inboundは高、outboundのみは中
             if _c == "kp":
                 _sev = "critical"
-            elif _inbound:
+            elif _block or _inbound:
                 _sev = "high"
             else:
                 _sev = "medium"
@@ -1848,7 +1850,8 @@ def analyze_pcap(data: bytes) -> dict:
             _detail = (f"{_label}({_c.upper()})のグローバルアドレス {_ip} を検知"
                        f"（{_direction} / パケット{_info['packets']}）")
             if _block:
-                _detail += " — 送信元ブロックを推奨"
+                _block_dir = "送信元" if _inbound else "宛先"
+                _detail += f" — {_block_dir}ブロックを推奨"
             result["geo_alerts"].append({
                 "ip": _ip, "country": _c, "country_label": _label,
                 "direction": _direction, "inbound": _inbound, "outbound": _outbound,

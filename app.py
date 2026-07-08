@@ -4069,29 +4069,41 @@ with tab_pcap:
                                "グローバルIPアドレスとの通信です（RIR由来の国別割当レンジと照合）。"
                                "業務上の想定有無を確認してください。")
                     _geo_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡"}
-                    _blocklist = []
+                    _block_in, _block_out = set(), set()   # 送信元遮断 / 宛先遮断
                     for _ga in _geo_alerts:
+                        _btag = ""
+                        if _ga["block_suggested"]:
+                            _bdir = "送信元" if _ga["inbound"] else "宛先"
+                            _btag = f"　🚫 **{_bdir}ブロック推奨**"
+                            if _ga["inbound"]:
+                                _block_in.add(_ga["ip"])
+                            else:
+                                _block_out.add(_ga["ip"])
                         st.markdown(f"- {_geo_icon.get(_ga['severity'],'⚪')} "
                                     f"**{_ga['country_label']}({_ga['country'].upper()})** "
                                     f"`{_ga['ip']}` — {_ga['direction']}"
                                     f"（パケット{_ga['packets']} / 相手: {', '.join(_ga['peers'][:5])}）"
-                                    + ("　🚫 **送信元ブロック推奨**" if _ga["block_suggested"] else ""))
-                        if _ga["block_suggested"]:
-                            _blocklist.append(_ga["ip"])
-                    if _blocklist:
-                        st.warning("🚫 **ブロック候補の送信元IP（中国/香港/マカオからのアクセス元）**："
-                                   "業務上不要であれば境界FW/ACLでの遮断を推奨します。")
-                        _blocktext = "\n".join(sorted(set(_blocklist)))
+                                    + _btag)
+                    if _block_in or _block_out:
+                        st.warning("🚫 **ブロック候補（中国/香港/マカオとの通信）**："
+                                   "業務上不要であれば境界FW/ACLでの遮断を推奨します。"
+                                   "アクセス元(inbound)は送信元遮断、通信先(outbound)は宛先遮断します。")
+                        _acl_lines, _ipt_lines, _all_ips = [], [], []
+                        for _ip in sorted(_block_in):
+                            _acl_lines.append(f"deny ip host {_ip} any")
+                            _ipt_lines.append(f"iptables -A INPUT -s {_ip} -j DROP")
+                            _all_ips.append(_ip)
+                        for _ip in sorted(_block_out):
+                            _acl_lines.append(f"deny ip any host {_ip}")
+                            _ipt_lines.append(f"iptables -A OUTPUT -d {_ip} -j DROP")
+                            _all_ips.append(_ip)
+                        _blocktext = "\n".join(sorted(set(_all_ips)))
                         st.code(_blocktext, language="text")
-                        # そのままファイアウォールに投入できる形式でも提供
-                        _acl = "\n".join(f"deny ip host {_ip} any" for _ip in sorted(set(_blocklist)))
                         with st.expander("🧱 ブロック設定例（ACL / iptables）"):
-                            st.caption("Cisco ACL 形式：")
-                            st.code(_acl, language="text")
-                            _ipt = "\n".join(f"iptables -A INPUT -s {_ip} -j DROP"
-                                             for _ip in sorted(set(_blocklist)))
+                            st.caption("Cisco ACL 形式（inbound=送信元遮断 / outbound=宛先遮断）：")
+                            st.code("\n".join(_acl_lines), language="text")
                             st.caption("iptables 形式：")
-                            st.code(_ipt, language="text")
+                            st.code("\n".join(_ipt_lines), language="text")
                         st.download_button(
                             "📥 ブロック候補IP一覧をダウンロード", data=_blocktext,
                             file_name="geo_block_candidates.txt", mime="text/plain",
