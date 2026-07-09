@@ -1275,14 +1275,23 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
     if _hs_sum:
         lines.append("")
         lines.append(f"【TLSハンドシェイク(鍵交換)】成功{_hs_sum.get('success',0)} / "
-                     f"失敗{_hs_sum.get('failed',0)} / 未完了{_hs_sum.get('incomplete',0)}")
+                     f"失敗{_hs_sum.get('failed',0)} / 未完了{_hs_sum.get('incomplete',0)} / "
+                     f"弱い暗号スイート{_hs_sum.get('weak_cipher',0)}件 / "
+                     f"証明書の問題{_hs_sum.get('cert_issues',0)}件")
         for h in r.get("tls_handshakes", [])[:5]:
-            if h.get("status") != "成功":
+            if h.get("status") != "成功" or h.get("weak_cipher") or h.get("cert_issues"):
+                _extra = []
+                if h.get("weak_cipher"): _extra.append(f"弱い暗号:{h['weak_cipher']}")
+                if h.get("cert_issues"): _extra.append(f"証明書:{'/'.join(h['cert_issues'])}")
                 lines.append(f"    - [{h.get('status','')}] {h.get('client','')}→"
                              f"{h.get('server','')}:{h.get('server_port','')}"
-                             f"({h.get('sni','')}) : {h.get('reason','')}")
+                             f"({h.get('sni','')}) : {h.get('reason','')}"
+                             + (" | " + " ".join(_extra) if _extra else ""))
         lines.append("    ※鍵交換の失敗/未完了は、暗号スイート不一致・証明書エラー・"
-                     "MTU/経路障害・遮断などが原因のことが多い。失敗があれば原因を推定して報告。")
+                     "MTU/経路障害・遮断などが原因のことが多い。弱い暗号スイート"
+                     "（前方秘匿性なし・RC4・DES・NULL等）や証明書の問題（期限切れ・"
+                     "自己署名・ホスト名不一致）は、鍵交換自体が成功していても"
+                     "セキュリティリスクとして報告してください。")
 
     # IPsec(IKE鍵交換/ESP)の成否
     _ipsec = r.get("ipsec", {})
@@ -1292,14 +1301,35 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
         lines.append("")
         lines.append(f"【IPsec(VPN)】IKE SA {_ip_sum.get('ike_total',0)}件 "
                      f"(成功{_ip_sum.get('ike_success',0)}/失敗{_ip_sum.get('ike_failed',0)}) / "
+                     f"弱い暗号/DHグループ{_ip_sum.get('ike_weak_crypto',0)}件 / "
                      f"ESP・AHフロー {_ip_sum.get('esp_flows',0)}件")
         for s in _ike[:5]:
+            _wk = f" | 弱点:{'/'.join(s['weak_crypto'])}" if s.get("weak_crypto") else ""
             lines.append(f"    - [{s.get('status','')}] {s.get('version','')} "
                          f"{s.get('initiator','')}→{s.get('responder','')} "
-                         f"[{s.get('exchanges','')}] : {s.get('reason','')}")
+                         f"[{s.get('exchanges','')}] 暗号:{s.get('encr','')} DH:{s.get('dh_group','')} "
+                         f": {s.get('reason','')}{_wk}")
         lines.append("    ※IKE鍵交換の失敗/未完了は、事前共有鍵(PSK)不一致・"
                      "Phase1/Phase2の提案(暗号/DHグループ)不一致・NAT-T・"
-                     "ピア未応答などが典型。失敗があれば切り分けの観点を報告。")
+                     "ピア未応答などが典型。DHグループ1536bit以下やDES/3DES/NULL暗号は"
+                     "現代基準で脆弱なため、成功していてもリスクとして報告してください。"
+                     "「ピアから明示的なエラー通知」がある場合は、それは推測ではなく機器自身が"
+                     "返した確定的な失敗理由（例: NO_PROPOSAL_CHOSEN=暗号/DHグループの不一致、"
+                     "AUTHENTICATION_FAILED=PSK/証明書不一致）なので、最優先の根本原因として報告してください。")
+
+    # SSH鍵交換の成否
+    _ssh = r.get("ssh_handshakes", [])
+    if _ssh:
+        _ssh_ok = sum(1 for s in _ssh if s.get("status") == "成功")
+        _ssh_fail = sum(1 for s in _ssh if s.get("status") == "失敗")
+        lines.append("")
+        lines.append(f"【SSH鍵交換】成功{_ssh_ok} / 失敗{_ssh_fail} / "
+                     f"未完了{len(_ssh)-_ssh_ok-_ssh_fail}")
+        for s in _ssh[:5]:
+            if s.get("status") != "成功":
+                lines.append(f"    - [{s.get('status','')}] {s.get('client','')}→"
+                             f"{s.get('server','')}:{s.get('server_port','')} : {s.get('reason','')}")
+        lines.append("    ※SSH鍵交換の失敗は、鍵アルゴリズム不一致・切断・タイムアウト等が典型。")
 
     lines += [
         "",

@@ -5052,20 +5052,59 @@ with tab_pcap:
                 if _tls_hs:
                     st.markdown("**🤝 TLSハンドシェイク（鍵交換）の成否**")
                     st.caption("ClientHello→ServerHello→CipherSpec変更→暗号通信、の流れが"
-                               "成立したかで鍵交換の成否を判定します（Fatal Alertは失敗）。")
-                    _hc1, _hc2, _hc3 = st.columns(3)
+                               "成立したかで鍵交換の成否を判定します（Fatal Alertは失敗）。"
+                               "あわせて弱い暗号スイート（前方秘匿性なし・RC4・DES・NULL等）と"
+                               "証明書の問題（有効期限切れ・自己署名・ホスト名不一致）も検査します。")
+                    _hc1, _hc2, _hc3, _hc4, _hc5 = st.columns(5)
                     _hc1.metric("成功", _tls_hs_sum.get("success", 0))
                     _hc2.metric("失敗", _tls_hs_sum.get("failed", 0),
                                 delta="⚠️" if _tls_hs_sum.get("failed") else None)
                     _hc3.metric("未完了", _tls_hs_sum.get("incomplete", 0))
+                    _hc4.metric("弱い暗号スイート", _tls_hs_sum.get("weak_cipher", 0),
+                                delta="⚠️" if _tls_hs_sum.get("weak_cipher") else None)
+                    _hc5.metric("証明書の問題", _tls_hs_sum.get("cert_issues", 0),
+                                delta="⚠️" if _tls_hs_sum.get("cert_issues") else None)
                     _hs_icon = {"成功": "✅", "失敗": "🔴", "未完了": "🟡"}
                     df_hs = pd.DataFrame([{
                         "判定": f"{_hs_icon.get(h['status'],'')} {h['status']}",
                         "クライアント": h["client"], "サーバー": f"{h['server']}:{h['server_port']}",
                         "SNI": h.get("sni", ""), "TLS": h.get("version", ""),
+                        "弱い暗号スイート": h.get("weak_cipher") or "",
+                        "証明書の問題": " / ".join(h.get("cert_issues") or []),
                         "理由": h["reason"],
                     } for h in _tls_hs])
                     st.dataframe(df_hs, use_container_width=True, hide_index=True)
+                    if _tls_hs_sum.get("weak_cipher"):
+                        st.warning("⚠️ 前方秘匿性のない鍵交換・RC4・DES・NULL暗号など、"
+                                   "脆弱な暗号スイートでの接続を検出しました。"
+                                   "ECDHE系の暗号スイートへの見直しを検討してください。")
+                    if _tls_hs_sum.get("cert_issues"):
+                        st.warning("⚠️ 証明書に問題（有効期限切れ・自己署名・ホスト名不一致等）を"
+                                   "検出しました。中間者攻撃(MITM)の可能性、または証明書の"
+                                   "更新漏れ・設定ミスを確認してください。")
+
+            # ── 🔑 SSH鍵交換の成否 ──
+            _ssh_sessions = res.get("ssh_handshakes", [])
+            if _ssh_sessions:
+                st.markdown("---")
+                st.markdown("### 🔑 SSH 鍵交換の成否")
+                st.caption("SSHのバナー交換後、KEXINIT(往復)・NEWKEYS(往復)を追跡し、"
+                           "鍵交換が成立したかを判定します。NEWKEYS以降は暗号化されるため、"
+                           "以降の通信内容は解析対象外です。")
+                _ssc1, _ssc2, _ssc3 = st.columns(3)
+                _ssc1.metric("成功", sum(1 for s in _ssh_sessions if s["status"] == "成功"))
+                _ss_fail = sum(1 for s in _ssh_sessions if s["status"] == "失敗")
+                _ssc2.metric("失敗", _ss_fail, delta="⚠️" if _ss_fail else None)
+                _ssc3.metric("未完了", sum(1 for s in _ssh_sessions if s["status"] == "未完了"))
+                _ssh_icon = {"成功": "✅", "失敗": "🔴", "未完了": "🟡"}
+                df_ssh = pd.DataFrame([{
+                    "判定": f"{_ssh_icon.get(s['status'],'')} {s['status']}",
+                    "クライアント": s["client"], "サーバー": f"{s['server']}:{s['server_port']}",
+                    "クライアントSSHバージョン": s.get("client_banner", ""),
+                    "サーバーSSHバージョン": s.get("server_banner", ""),
+                    "理由": s["reason"],
+                } for s in _ssh_sessions])
+                st.dataframe(df_ssh, use_container_width=True, hide_index=True)
 
             # ── 🔐 IPsec（IKE鍵交換／ESPトンネル）解析 ──
             _ipsec = res.get("ipsec", {})
@@ -5079,20 +5118,32 @@ with tab_pcap:
                            "IKE_SA_INIT/IKE_AUTH)が成立したかを判定します。ESP/AH(暗号化通信)の"
                            "有無も確認します。ペイロードは暗号化されているため交換の"
                            "流れからの推定です。")
-                _sc1, _sc2, _sc3 = st.columns(3)
+                _sc1, _sc2, _sc3, _sc4 = st.columns(4)
                 _sc1.metric("IKE SA 総数", _ip_sum.get("ike_total", 0))
                 _sc2.metric("鍵交換 成功", _ip_sum.get("ike_success", 0))
                 _sc3.metric("鍵交換 失敗", _ip_sum.get("ike_failed", 0),
                             delta="⚠️" if _ip_sum.get("ike_failed") else None)
+                _sc4.metric("弱い暗号/DHグループ", _ip_sum.get("ike_weak_crypto", 0),
+                            delta="⚠️" if _ip_sum.get("ike_weak_crypto") else None)
                 if _ike_sas:
                     _ike_icon = {"成功": "✅", "失敗": "🔴", "未完了": "🟡"}
                     df_ike = pd.DataFrame([{
                         "判定": f"{_ike_icon.get(s['status'],'')} {s['status']}",
                         "版": s["version"], "起点(Initiator)": s["initiator"],
                         "相手(Responder)": s["responder"], "交換": s["exchanges"],
+                        "暗号": s.get("encr") or "", "DHグループ": s.get("dh_group") or "",
+                        "弱点": " / ".join(s.get("weak_crypto") or []),
                         "理由": s["reason"],
                     } for s in _ike_sas])
                     st.dataframe(df_ike, use_container_width=True, hide_index=True)
+                    for s in _ike_sas:
+                        if s.get("notify_error"):
+                            st.error(f"🔴 **{s['initiator']} ⇔ {s['responder']}**: "
+                                     f"ピアが明示的にエラーを通知しています — {s['reason']}")
+                    if any(s.get("weak_crypto") for s in _ike_sas):
+                        st.warning("⚠️ 脆弱な暗号アルゴリズム/DHグループでのIKE提案を検出しました。"
+                                   "現行の推奨構成（AES-GCM＋2048bit以上のMODPまたはECP群）への"
+                                   "見直しを検討してください。")
                 if _esp_flows:
                     st.markdown(f"**🔒 ESP/AH 暗号化通信フロー（トンネル確立後）"
                                 f"— {_ip_sum.get('esp_packets',0)}パケット**")
@@ -5357,8 +5408,9 @@ icmp.type == 5 or udp.port == 520
 | 🧩 IPフラグメント | MTU問題・Path MTU Discovery障害によるフラグメント化の検出 |
 | 🌍 HTTP解析 | 平文HTTPの応答コード集計・4xx/5xxエラー一覧 |
 | 🔒 TLS/HTTPS解析 | SNI（接続先ホスト名）・TLSバージョン・Fatal Alert の検出 |
-| 🤝 TLSハンドシェイク成否 | ClientHello～鍵交換完了までを追跡し、成功/失敗/未完了を判定 |
-| 🔐 IPsec(VPN)解析 | IKE(鍵交換)の成否判定・ESP/AH暗号化通信フローの検出 |
+| 🤝 TLSハンドシェイク成否 | 成功/失敗/未完了の判定＋弱い暗号スイート・証明書の問題(期限切れ/自己署名/ホスト名不一致)を検出 |
+| 🔐 IPsec(VPN)解析 | IKE鍵交換の成否・弱いDHグループ/暗号アルゴリズム・ピアからの明示的エラー通知(NO_PROPOSAL_CHOSEN等)を検出 |
+| 🔑 SSH鍵交換成否 | KEXINIT/NEWKEYS往復の追跡による鍵交換成功/失敗/未完了の判定 |
 | 📋 DHCP解析 | NAK・DECLINE・DISCOVER未応答などのIPアドレス割り当て問題 |
 | 💬 会話フロー一覧 | RTT・スループット付きで全フローをバイト数順に表示 |
 | 📡 トップトーカー | 帯域を最も消費しているIPアドレスのランキング |

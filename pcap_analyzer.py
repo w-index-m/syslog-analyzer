@@ -221,6 +221,45 @@ TLS_ALERT_DESCS = {
     112: "unrecognized_name",
 }
 
+# TLS CipherSuite ID -> (簡易名, 弱点)。既知の脆弱/非推奨な組み合わせのみ収録。
+# （NULL暗号化・輸出グレード・RC4・DES・匿名鍵交換・静的RSA鍵交換(前方秘匿性なし)等）
+_WEAK_CIPHER_SUITES = {
+    0x0000: ("NULL_WITH_NULL_NULL", "暗号化なし"),
+    0x0001: ("RSA_WITH_NULL_MD5", "暗号化なし＋MD5"),
+    0x0002: ("RSA_WITH_NULL_SHA", "暗号化なし"),
+    0x0003: ("RSA_EXPORT_WITH_RC4_40_MD5", "輸出グレード(40bit)＋RC4＋MD5"),
+    0x0004: ("RSA_WITH_RC4_128_MD5", "RC4(既知の脆弱性)＋MD5"),
+    0x0005: ("RSA_WITH_RC4_128_SHA", "RC4(既知の脆弱性)"),
+    0x0006: ("RSA_EXPORT_WITH_RC2_CBC_40_MD5", "輸出グレード(40bit)"),
+    0x0008: ("RSA_EXPORT_WITH_DES40_CBC_SHA", "輸出グレード(40bit)"),
+    0x0009: ("RSA_WITH_DES_CBC_SHA", "DES(56bit・総当たり可能)"),
+    0x000A: ("RSA_WITH_3DES_EDE_CBC_SHA", "静的RSA鍵交換(前方秘匿性なし)＋3DES(SWEET32)"),
+    0x000C: ("DH_DSS_WITH_DES_CBC_SHA", "DES(56bit)"),
+    0x000F: ("DH_RSA_WITH_DES_CBC_SHA", "DES(56bit)"),
+    0x0012: ("DHE_DSS_WITH_DES_CBC_SHA", "DES(56bit)"),
+    0x0015: ("DHE_RSA_WITH_DES_CBC_SHA", "DES(56bit)"),
+    0x0017: ("DH_anon_EXPORT_WITH_RC4_40_MD5", "匿名鍵交換(中間者攻撃に脆弱)＋輸出グレード"),
+    0x0018: ("DH_anon_WITH_RC4_128_MD5", "匿名鍵交換(中間者攻撃に脆弱)＋RC4"),
+    0x0019: ("DH_anon_EXPORT_WITH_DES40_CBC_SHA", "匿名鍵交換(中間者攻撃に脆弱)＋輸出グレード"),
+    0x001A: ("DH_anon_WITH_DES_CBC_SHA", "匿名鍵交換(中間者攻撃に脆弱)＋DES"),
+    0x001B: ("DH_anon_WITH_3DES_EDE_CBC_SHA", "匿名鍵交換(中間者攻撃に脆弱)"),
+    0x002F: ("RSA_WITH_AES_128_CBC_SHA", "静的RSA鍵交換(前方秘匿性なし)"),
+    0x0035: ("RSA_WITH_AES_256_CBC_SHA", "静的RSA鍵交換(前方秘匿性なし)"),
+    0x003C: ("RSA_WITH_AES_128_CBC_SHA256", "静的RSA鍵交換(前方秘匿性なし)"),
+    0x003D: ("RSA_WITH_AES_256_CBC_SHA256", "静的RSA鍵交換(前方秘匿性なし)"),
+    0x009C: ("RSA_WITH_AES_128_GCM_SHA256", "静的RSA鍵交換(前方秘匿性なし)"),
+    0x009D: ("RSA_WITH_AES_256_GCM_SHA384", "静的RSA鍵交換(前方秘匿性なし)"),
+    0xC001: ("ECDH_ECDSA_WITH_NULL_SHA", "暗号化なし"),
+    0xC002: ("ECDH_ECDSA_WITH_RC4_128_SHA", "RC4(既知の脆弱性)"),
+    0xC006: ("ECDHE_ECDSA_WITH_NULL_SHA", "暗号化なし"),
+    0xC007: ("ECDHE_ECDSA_WITH_RC4_128_SHA", "RC4(既知の脆弱性)"),
+    0xC00B: ("ECDH_RSA_WITH_NULL_SHA", "暗号化なし"),
+    0xC00C: ("ECDH_RSA_WITH_RC4_128_SHA", "RC4(既知の脆弱性)"),
+    0xC010: ("ECDHE_RSA_WITH_NULL_SHA", "暗号化なし"),
+    0xC011: ("ECDHE_RSA_WITH_RC4_128_SHA", "RC4(既知の脆弱性)"),
+    0xC012: ("ECDHE_RSA_WITH_3DES_EDE_CBC_SHA", "3DES(SWEET32攻撃に脆弱)"),
+}
+
 PROTO_NAMES = {1: "ICMP", 2: "IGMP", 6: "TCP", 17: "UDP", 89: "OSPF"}
 
 # ── プロトコル不明時のキーワード検索（ID/session） ──────────────
@@ -768,6 +807,128 @@ def _parse_tls_client_hello(payload: bytes) -> dict | None:
         return None
 
 
+def _parse_tls_server_hello(payload: bytes) -> dict | None:
+    """TLS ServerHello から合意された CipherSuite・バージョンを抽出する。"""
+    try:
+        if len(payload) < 6 or payload[0] != 22: return None  # Handshake record
+        rec_ver = int.from_bytes(payload[1:3], "big")
+        hs_data = payload[5:]
+        if not hs_data or hs_data[0] != 2: return None  # ServerHello
+        offset = 4 + 2 + 32  # handshake header + server_version + random
+        if offset >= len(hs_data): return None
+        sid_len = hs_data[offset]; offset += 1 + sid_len
+        if offset + 2 > len(hs_data): return None
+        cipher_suite = int.from_bytes(hs_data[offset:offset + 2], "big"); offset += 2
+        offset += 1   # compression_method
+        negotiated_ver = None
+        if offset + 2 <= len(hs_data):
+            ext_total = int.from_bytes(hs_data[offset:offset + 2], "big"); offset += 2
+            ext_end = offset + ext_total
+            while offset + 4 <= ext_end and offset + 4 <= len(hs_data):
+                ext_type = int.from_bytes(hs_data[offset:offset + 2], "big")
+                ext_len = int.from_bytes(hs_data[offset + 2:offset + 4], "big")
+                offset += 4
+                if ext_type == 43 and ext_len == 2 and offset + 2 <= len(hs_data):
+                    v = int.from_bytes(hs_data[offset:offset + 2], "big")
+                    if v in TLS_VERSIONS:
+                        negotiated_ver = TLS_VERSIONS[v]
+                offset += ext_len
+        return {
+            "cipher_suite": cipher_suite,
+            "tls_version": negotiated_ver or TLS_VERSIONS.get(rec_ver, f"0x{rec_ver:04x}"),
+        }
+    except Exception:
+        return None
+
+
+def _parse_tls_certificate(payload: bytes) -> bytes | None:
+    """TLS Certificateメッセージから最初(leaf)証明書のDERバイト列を取り出す。"""
+    try:
+        if len(payload) < 6 or payload[0] != 22: return None  # Handshake record
+        hs_data = payload[5:]
+        if not hs_data or hs_data[0] != 11: return None  # Certificate
+        hs_len = int.from_bytes(hs_data[1:4], "big")
+        body = hs_data[4:4 + hs_len]
+
+        def _try(off):
+            if off + 3 > len(body): return None
+            p = off + 3
+            if p + 3 > len(body): return None
+            clen = int.from_bytes(body[p:p + 3], "big")
+            p += 3
+            cert = body[p:p + clen]
+            return cert if cert[:1] == b"\x30" else None  # DER SEQUENCE tag
+
+        cert = _try(0)                          # TLS 1.2形式
+        if not cert and body:                    # TLS 1.3形式(context長を先頭に持つ)
+            cert = _try(1 + body[0])
+        return cert
+    except Exception:
+        return None
+
+
+def analyze_tls_certificate(cert_der: bytes, sni: str = "") -> dict:
+    """
+    TLS証明書(DER)を検証する: 有効期限切れ・未来開始・自己署名・SNIとのCN/SAN不一致。
+    戻り値: {"subject","issuer","not_before","not_after","expired","not_yet_valid",
+             "self_signed","hostname_mismatch","sans","issues"}
+    """
+    out = {"subject": "", "issuer": "", "not_before": "", "not_after": "",
+           "expired": False, "not_yet_valid": False, "self_signed": False,
+           "hostname_mismatch": False, "sans": [], "issues": []}
+    try:
+        from cryptography import x509
+        from datetime import datetime, timezone
+    except Exception:
+        out["issues"].append("cryptographyライブラリが利用できません")
+        return out
+    try:
+        cert = x509.load_der_x509_certificate(cert_der)
+    except Exception as e:
+        out["issues"].append(f"証明書の解析に失敗: {e}")
+        return out
+    try:
+        out["subject"] = cert.subject.rfc4514_string()
+        out["issuer"] = cert.issuer.rfc4514_string()
+        try:
+            nb, na = cert.not_valid_before_utc, cert.not_valid_after_utc
+        except AttributeError:
+            nb = cert.not_valid_before.replace(tzinfo=timezone.utc)
+            na = cert.not_valid_after.replace(tzinfo=timezone.utc)
+        out["not_before"], out["not_after"] = nb.isoformat(), na.isoformat()
+        now = datetime.now(timezone.utc)
+        if now > na:
+            out["expired"] = True
+            out["issues"].append(f"有効期限切れ（{na.date()}まで）")
+        if now < nb:
+            out["not_yet_valid"] = True
+            out["issues"].append(f"有効期間前（{nb.date()}から）")
+        if cert.issuer == cert.subject:
+            out["self_signed"] = True
+            out["issues"].append("自己署名証明書（信頼された認証局の署名なし）")
+        try:
+            san_ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+            out["sans"] = san_ext.value.get_values_for_type(x509.DNSName)
+        except Exception:
+            pass
+        if sni:
+            import fnmatch
+            names = set(out["sans"])
+            try:
+                cn_attrs = cert.subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)
+                if cn_attrs:
+                    names.add(cn_attrs[0].value)
+            except Exception:
+                pass
+            if names and not any(fnmatch.fnmatch(sni.lower(), n.lower()) for n in names):
+                out["hostname_mismatch"] = True
+                out["issues"].append(f"接続先ホスト名({sni})が証明書のCN/SAN"
+                                     f"({', '.join(list(names)[:5])})と一致しません")
+    except Exception as e:
+        out["issues"].append(f"証明書検証中にエラー: {e}")
+    return out
+
+
 def _parse_tls_alert(payload: bytes) -> dict | None:
     """TLS Alert レコードをパースする（fatal のみ問題として扱う）。"""
     try:
@@ -785,7 +946,7 @@ def _parse_tls_alert(payload: bytes) -> dict | None:
 
 def _iter_tls_records(payload: bytes):
     """
-    TCPペイロード内のTLSレコードを走査し (content_type, handshake_type, version) を返す。
+    TCPペイロード内のTLSレコードを走査し (content_type, handshake_type, version, record_bytes) を返す。
     1パケットに複数レコードが載ることがあるためレコード境界で分割する。
     content_type: 20=ChangeCipherSpec,21=Alert,22=Handshake,23=ApplicationData
     handshake_type: 22のときのみ 1=ClientHello,2=ServerHello,11=Cert,12=SKE,
@@ -801,7 +962,7 @@ def _iter_tls_records(payload: bytes):
         hs_type = None
         if ctype == 22 and off + 5 < n:
             hs_type = payload[off + 5]
-        yield (ctype, hs_type, ver)
+        yield (ctype, hs_type, ver, payload[off:off + 5 + rlen])
         off += 5 + rlen
 
 
@@ -810,7 +971,8 @@ def _parse_ike_header(payload: bytes, on_4500: bool) -> dict | None:
     ISAKMP/IKE ヘッダ(28バイト)をパースする。NAT-T(4500)は先頭4バイトの
     non-ESPマーカー(0x00000000)を剥がす。ESP(4500上の暗号化データ)は None。
     戻り値: {"ispi","rspi","version"(1/2),"exchange","flags","msgid",
-             "is_response","is_initiator"}
+             "is_response","is_initiator","next_payload","body"}
+    body は最初のペイロード(通常SA)から始まるヘッダ以降のバイト列。
     """
     try:
         p = payload
@@ -822,6 +984,7 @@ def _parse_ike_header(payload: bytes, on_4500: bool) -> dict | None:
         if len(p) < 28:
             return None
         ispi = p[0:8]; rspi = p[8:16]
+        next_payload = p[16]
         version = p[17]
         major = (version >> 4) & 0xF   # 1=IKEv1, 2=IKEv2
         if major not in (1, 2):
@@ -841,7 +1004,8 @@ def _parse_ike_header(payload: bytes, on_4500: bool) -> dict | None:
             is_initiator = (rspi == b"\x00\x00\x00\x00\x00\x00\x00\x00")
         return {"ispi": ispi.hex(), "rspi": rspi.hex(), "version": major,
                 "exchange": exch, "flags": flags, "msgid": msgid,
-                "is_response": is_response, "is_initiator": is_initiator}
+                "is_response": is_response, "is_initiator": is_initiator,
+                "next_payload": next_payload, "body": p[28:]}
     except Exception:
         return None
 
@@ -851,6 +1015,157 @@ _IKEV1_EXCH = {2: "Main Mode(ID保護)", 4: "Aggressive Mode", 5: "Informational
                6: "Transaction", 32: "Quick Mode(Phase2)"}
 _IKEV2_EXCH = {34: "IKE_SA_INIT", 35: "IKE_AUTH", 36: "CREATE_CHILD_SA",
                37: "INFORMATIONAL"}
+
+# ── IKE SA(鍵交換)ペイロードの暗号アルゴリズム/DHグループ判定 ──
+_IKEV1_ATTR_ENC  = {1: "DES", 2: "IDEA", 3: "Blowfish", 4: "RC5", 5: "3DES", 6: "CAST", 7: "AES-CBC"}
+_IKEV1_ATTR_HASH = {1: "MD5", 2: "SHA1", 3: "Tiger", 4: "SHA2-256", 5: "SHA2-384", 6: "SHA2-512"}
+_IKEV1_ATTR_AUTH = {1: "事前共有鍵(PSK)", 2: "DSS署名", 3: "RSA署名", 4: "RSA暗号化",
+                    5: "改訂RSA暗号化", 64221: "Hybrid", 65001: "XAUTH"}
+_DH_GROUPS = {1: "768bit MODP", 2: "1024bit MODP", 5: "1536bit MODP", 14: "2048bit MODP",
+              15: "3072bit MODP", 16: "4096bit MODP", 19: "256bit ECP", 20: "384bit ECP",
+              21: "521bit ECP", 24: "2048bit MODP(POS256)", 28: "256bit Brainpool",
+              29: "384bit Brainpool", 30: "512bit Brainpool"}
+_WEAK_DH_GROUPS = {1, 2, 5}   # 1536bit以下は現代基準で脆弱（総当たり/実績のある攻撃あり）
+_IKEV2_ENCR = {1: "DES-IV64", 2: "DES", 3: "3DES", 5: "CAST", 6: "Blowfish", 7: "AES-CBC",
+               11: "NULL", 12: "AES-CTR", 13: "AES-CCM8", 18: "AES-GCM16", 19: "AES-GCM12",
+               20: "AES-GCM8", 23: "ChaCha20-Poly1305"}
+_WEAK_IKEV2_ENCR = {1, 2, 3, 11}   # DES系(56bit)・3DES(SWEET32)・NULL(暗号化なし)
+
+
+def _parse_ike_sa_payload(sa_body: bytes, version: int) -> dict:
+    """
+    IKE SA(Security Association)ペイロード本体の最初のProposal/Transformから
+    暗号アルゴリズム・DHグループ・(IKEv1のみ)認証方式を抽出する(ベストエフォート)。
+    戻り値: {"encr","dh_group","auth_method","weak":[...]}
+    """
+    out = {"encr": None, "dh_group": None, "auth_method": None, "weak": []}
+    try:
+        body = sa_body[8:] if version == 1 else sa_body   # v1: DOI(4)+Situation(4)をスキップ
+        if len(body) < 8:
+            return out
+        proto_id, spi_size, num_tf = body[5], body[6], body[7]
+        off = 8 + spi_size
+        for _ in range(num_tf):
+            if off + 8 > len(body):
+                break
+            t_len = int.from_bytes(body[off + 2:off + 4], "big")
+            if t_len < 8 or off + t_len > len(body):
+                break
+            if version == 2:
+                t_type, t_id = body[off + 4], int.from_bytes(body[off + 6:off + 8], "big")
+                if t_type == 1:
+                    out["encr"] = _IKEV2_ENCR.get(t_id, f"ID{t_id}")
+                    if t_id in _WEAK_IKEV2_ENCR:
+                        out["weak"].append(f"暗号化アルゴリズムが脆弱({out['encr']})")
+                elif t_type == 4:
+                    out["dh_group"] = _DH_GROUPS.get(t_id, f"Group{t_id}")
+                    if t_id in _WEAK_DH_GROUPS:
+                        out["weak"].append(f"DHグループが脆弱({out['dh_group']})")
+            else:
+                attr_off, attr_end = off + 8, off + t_len
+                while attr_off + 4 <= attr_end and attr_off + 4 <= len(body):
+                    a_type_raw = int.from_bytes(body[attr_off:attr_off + 2], "big")
+                    is_tv = bool(a_type_raw & 0x8000)
+                    a_type = a_type_raw & 0x7FFF
+                    if is_tv:
+                        a_val = int.from_bytes(body[attr_off + 2:attr_off + 4], "big")
+                        attr_off += 4
+                    else:
+                        a_len = int.from_bytes(body[attr_off + 2:attr_off + 4], "big")
+                        a_val_bytes = body[attr_off + 4:attr_off + 4 + a_len]
+                        a_val = int.from_bytes(a_val_bytes, "big") if a_val_bytes else 0
+                        attr_off += 4 + a_len
+                    if a_type == 1:
+                        out["encr"] = _IKEV1_ATTR_ENC.get(a_val, f"ID{a_val}")
+                        if a_val in (1, 2, 3):
+                            out["weak"].append(f"暗号化アルゴリズムが脆弱({out['encr']})")
+                    elif a_type == 2 and a_val == 1:
+                        out["weak"].append("ハッシュがMD5(脆弱)")
+                    elif a_type == 3:
+                        out["auth_method"] = _IKEV1_ATTR_AUTH.get(a_val, f"ID{a_val}")
+                    elif a_type == 4:
+                        out["dh_group"] = _DH_GROUPS.get(a_val, f"Group{a_val}")
+                        if a_val in _WEAK_DH_GROUPS:
+                            out["weak"].append(f"DHグループが脆弱({out['dh_group']})")
+            off += t_len
+    except Exception:
+        pass
+    return out
+
+
+def _find_ike_sa_body(body: bytes, first_type: int, version: int) -> bytes | None:
+    """ISAKMPヘッダ直後のペイロード連鎖からSA(v1:1 / v2:33)ペイロード本体を探す。"""
+    sa_type = 1 if version == 1 else 33
+    off, cur = 0, first_type
+    try:
+        while cur != 0 and off + 4 <= len(body):
+            nxt = body[off]
+            p_len = int.from_bytes(body[off + 2:off + 4], "big")
+            if p_len < 4 or off + p_len > len(body):
+                return None
+            if cur == sa_type:
+                return body[off + 4:off + p_len]
+            off += p_len
+            cur = nxt
+    except Exception:
+        return None
+    return None
+
+
+# IKE Notify/Notification のエラーコード（v1: RFC2408, v2: RFC7296）。
+# 番号の意味はv1/v2でほぼ共通（提案不一致・認証失敗など、トラブルシュートで
+# 最も知りたい「なぜ鍵交換が失敗したか」を機器が明示的に伝えてくる値）。
+_IKE_NOTIFY_ERRORS = {
+    1: "UNSUPPORTED_CRITICAL_PAYLOAD（未対応の必須ペイロード）",
+    4: "INVALID_IKE_SPI（SPI不正）",
+    5: "INVALID_MAJOR_VERSION（IKEバージョン不一致）",
+    7: "INVALID_SYNTAX（メッセージ構文不正）",
+    9: "INVALID_MESSAGE_ID",
+    11: "INVALID_SPI",
+    13: "ATTRIBUTES_NOT_SUPPORTED（提案した属性が未対応）",
+    14: "NO_PROPOSAL_CHOSEN（提案する暗号スイート/DHグループ/認証方式が双方で一致しない）",
+    15: "BAD_PROPOSAL_SYNTAX",
+    17: "INVALID_KE_PAYLOAD（DHグループ不一致）",
+    18: "INVALID_ID_INFORMATION（ID不一致）",
+    24: "AUTHENTICATION_FAILED（認証失敗：事前共有鍵(PSK)または証明書が不一致）",
+    34: "SINGLE_PAIR_REQUIRED",
+    35: "NO_ADDITIONAL_SAS",
+    36: "INTERNAL_ADDRESS_FAILURE",
+    38: "TS_UNACCEPTABLE（トラフィックセレクタ不一致）",
+    43: "TEMPORARY_FAILURE（一時的な失敗：リソース枯渇等）",
+    44: "CHILD_SA_NOT_FOUND",
+}
+
+
+def _find_ike_notify_error(body: bytes, first_type: int, version: int) -> str | None:
+    """
+    ISAKMPヘッダ直後のペイロード連鎖からNotify/Notification(v1:11 / v2:41)を探し、
+    エラーコードがあれば説明文を返す（成功時の情報Notifyや未知コードはNoneのまま無視）。
+    """
+    notify_type = 11 if version == 1 else 41
+    off, cur = 0, first_type
+    try:
+        while cur != 0 and off + 4 <= len(body):
+            nxt = body[off]
+            p_len = int.from_bytes(body[off + 2:off + 4], "big")
+            if p_len < 4 or off + p_len > len(body):
+                return None
+            if cur == notify_type:
+                nbody = body[off + 4:off + p_len]
+                if version == 2 and len(nbody) >= 4:
+                    code = int.from_bytes(nbody[2:4], "big")
+                elif version == 1 and len(nbody) >= 8:
+                    code = int.from_bytes(nbody[6:8], "big")
+                else:
+                    code = None
+                if code in _IKE_NOTIFY_ERRORS:
+                    return _IKE_NOTIFY_ERRORS[code]
+                return None
+            off += p_len
+            cur = nxt
+    except Exception:
+        return None
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -910,6 +1225,7 @@ def analyze_pcap(data: bytes) -> dict:
         "industrial_alerts": [], "industrial_summary": {},
         "quic_sessions": [],
         "geo_alerts": [], "geo_summary": {},
+        "ssh_handshakes": [],
         "ip_fragments": [],
         "http_errors": [],    "http_summary": {},
         "tls_sessions": [],   "tls_alerts": [],
@@ -1255,17 +1571,25 @@ def analyze_pcap(data: bytes) -> dict:
                                 "port":   dport if dport in TLS_PORTS else sport,
                                 "client_hello": False, "server_hello": False, "cert": False,
                                 "server_ccs": False, "client_ccs": False, "app_data": False,
-                                "fatal_alert": False, "alert_desc": "", "version": "", "ts": _ts_str(ts)})
+                                "fatal_alert": False, "alert_desc": "", "version": "", "ts": _ts_str(ts),
+                                "cipher_suite": None, "cert_der": None})
                             _to_server = dport in TLS_PORTS   # クライアント→サーバ方向か
-                            for _ct, _ht, _rv in _iter_tls_records(payload_b):
+                            for _ct, _ht, _rv, _rec in _iter_tls_records(payload_b):
                                 if _ct == 22 and _ht == 1:
                                     _hs["client_hello"] = True
                                 elif _ct == 22 and _ht == 2:
                                     _hs["server_hello"] = True
                                     if _rv in TLS_VERSIONS:
                                         _hs["version"] = TLS_VERSIONS[_rv]
+                                    _sh = _parse_tls_server_hello(_rec)
+                                    if _sh:
+                                        _hs["cipher_suite"] = _sh["cipher_suite"]
                                 elif _ct == 22 and _ht == 11:
                                     _hs["cert"] = True
+                                    if _hs["cert_der"] is None:
+                                        _cder = _parse_tls_certificate(_rec)
+                                        if _cder:
+                                            _hs["cert_der"] = _cder
                                 elif _ct == 20:   # ChangeCipherSpec
                                     if _to_server:
                                         _hs["client_ccs"] = True
@@ -1303,7 +1627,8 @@ def analyze_pcap(data: bytes) -> dict:
                                 "exchanges": set(), "v2_init_req": False, "v2_init_resp": False,
                                 "v2_auth_req": False, "v2_auth_resp": False,
                                 "v1_quick": 0, "v1_phase1": 0, "informational_del": False,
-                                "ts": _ts_str(ts)})
+                                "ts": _ts_str(ts), "crypto": None, "weak_crypto": [],
+                                "notify_error": None})
                             _ex = _ikp["exchange"]
                             _sa["exchanges"].add(_ex)
                             if _ikp["version"] == 2:
@@ -1318,6 +1643,22 @@ def analyze_pcap(data: bytes) -> dict:
                                     _sa["v1_phase1"] += 1
                                 elif _ex == 32:
                                     _sa["v1_quick"] += 1
+                            # SA(Security Association)ペイロードから暗号アルゴリズム/DHグループを抽出
+                            # （提案は交換の最初のメッセージに載るため、未取得の場合のみ試みる）
+                            if _sa["crypto"] is None:
+                                _sa_body = _find_ike_sa_body(
+                                    _ikp["body"], _ikp["next_payload"], _ikp["version"])
+                                if _sa_body:
+                                    _crypto = _parse_ike_sa_payload(_sa_body, _ikp["version"])
+                                    if _crypto["encr"] or _crypto["dh_group"]:
+                                        _sa["crypto"] = _crypto
+                                        _sa["weak_crypto"] = _crypto["weak"]
+                            # Notify/Notificationのエラーコード（提案不一致・認証失敗等の断定情報）
+                            if _sa["notify_error"] is None:
+                                _nerr = _find_ike_notify_error(
+                                    _ikp["body"], _ikp["next_payload"], _ikp["version"])
+                                if _nerr:
+                                    _sa["notify_error"] = _nerr
 
                     # ── QUIC / HTTP3 検出（UDP 443 等・Long Headerで判定） ──
                     if udp.dport in QUIC_PORTS or udp.sport in QUIC_PORTS:
@@ -2110,6 +2451,7 @@ def analyze_pcap(data: bytes) -> dict:
 
     # ── TLSハンドシェイク(鍵交換)の成否判定 ──
     _hs_ok = _hs_fail = _hs_incomplete = 0
+    _hs_weak_cipher = _hs_cert_issue = 0
     for _ck, _h in tls_hs.items():
         # 成功: サーバHello + (CCS or ApplicationData) が観測でき、Fatal Alertなし
         if _h["fatal_alert"]:
@@ -2126,6 +2468,23 @@ def analyze_pcap(data: bytes) -> dict:
             _hs_incomplete += 1
         else:
             continue   # ハンドシェイクの断片が無いフローは対象外
+
+        # 弱い暗号スイート(前方秘匿性なし/RC4/DES/NULL等)の判定
+        _weak_cs = None
+        if _h.get("cipher_suite") is not None:
+            _wc = _WEAK_CIPHER_SUITES.get(_h["cipher_suite"])
+            if _wc:
+                _weak_cs = f"{_wc[0]}（{_wc[1]}）"
+                _hs_weak_cipher += 1
+
+        # 証明書検証(有効期限・自己署名・ホスト名不一致)
+        _cert_check = None
+        if _h.get("cert_der"):
+            _cc = analyze_tls_certificate(_h["cert_der"], _h.get("sni", ""))
+            if _cc["issues"]:
+                _cert_check = _cc
+                _hs_cert_issue += 1
+
         result["tls_handshakes"].append({
             "client": _h["client"], "server": _h["server"], "server_port": _h["port"],
             "sni": _h.get("sni", ""), "version": _h.get("version", ""),
@@ -2133,13 +2492,15 @@ def analyze_pcap(data: bytes) -> dict:
             "client_hello": _h["client_hello"], "server_hello": _h["server_hello"],
             "cert": _h["cert"], "change_cipher_spec": _h["server_ccs"] or _h["client_ccs"],
             "app_data": _h["app_data"],
+            "weak_cipher": _weak_cs, "cert_issues": _cert_check["issues"] if _cert_check else [],
         })
     _order = {"失敗": 0, "未完了": 1, "成功": 2}
     result["tls_handshakes"].sort(key=lambda x: _order.get(x["status"], 3))
     if result["tls_handshakes"]:
         result["tls_handshake_summary"] = {
             "total": len(result["tls_handshakes"]),
-            "success": _hs_ok, "failed": _hs_fail, "incomplete": _hs_incomplete}
+            "success": _hs_ok, "failed": _hs_fail, "incomplete": _hs_incomplete,
+            "weak_cipher": _hs_weak_cipher, "cert_issues": _hs_cert_issue}
 
     # ── IPsec IKE(鍵交換)の成否判定 ──
     _ike_ok = _ike_fail = 0
@@ -2166,15 +2527,26 @@ def analyze_pcap(data: bytes) -> dict:
             else:
                 _status, _reason = "失敗", "Phase1が完了せず（提案不一致/未応答の可能性）"
             _exlist = "/".join(_IKEV1_EXCH.get(e, str(e)) for e in sorted(_sa["exchanges"]))
+        # Notify/Notificationのエラーコードがあれば、推定でなく機器からの明示的な
+        # 失敗理由として上書きする（例: NO_PROPOSAL_CHOSEN＝暗号/DHグループ不一致）
+        if _sa.get("notify_error"):
+            _status = "失敗"
+            _reason = f"ピアから明示的なエラー通知: {_sa['notify_error']}"
         if _status == "成功":
             _ike_ok += 1
         elif _status == "失敗":
             _ike_fail += 1
+        _crypto = _sa.get("crypto") or {}
+        _weak_list = _sa.get("weak_crypto") or []
         result["ipsec"]["ike_sas"].append({
             "version": f"IKEv{_sa['version']}", "initiator": _sa["initiator"],
             "responder": _sa["responder"], "spi": _spi[:16],
-            "exchanges": _exlist, "status": _status, "reason": _reason})
-    result["ipsec"]["ike_sas"].sort(key=lambda x: _order.get(x["status"], 3))
+            "exchanges": _exlist, "status": _status, "reason": _reason,
+            "encr": _crypto.get("encr"), "dh_group": _crypto.get("dh_group"),
+            "auth_method": _crypto.get("auth_method"), "weak_crypto": _weak_list,
+            "notify_error": _sa.get("notify_error")})
+    result["ipsec"]["ike_sas"].sort(
+        key=lambda x: (0 if x["weak_crypto"] else 1, _order.get(x["status"], 3)))
     # ESP/AH(確立後の暗号通信)フロー
     for (_s, _d), _f in esp_flows.items():
         result["ipsec"]["esp_flows"].append(
@@ -2183,8 +2555,15 @@ def analyze_pcap(data: bytes) -> dict:
     if ike_sas or esp_flows:
         result["ipsec"]["summary"] = {
             "ike_total": len(ike_sas), "ike_success": _ike_ok, "ike_failed": _ike_fail,
+            "ike_weak_crypto": sum(1 for s in result["ipsec"]["ike_sas"] if s["weak_crypto"]),
             "esp_flows": len(esp_flows),
             "esp_packets": sum(f["count"] for f in esp_flows.values())}
+
+    # ── SSH鍵交換の成否（TCPストリーム再構成を再利用） ──
+    try:
+        result["ssh_handshakes"] = analyze_ssh_handshake(data).get("sessions", [])
+    except Exception as _ssh_err:
+        print(f"[ssh] 解析スキップ: {_ssh_err}")
 
     return result
 
@@ -2480,6 +2859,88 @@ def get_tcp_streams(data: bytes) -> list:
             "c2s_bytes": len(c2s_bytes), "s2c_bytes": len(s2c_bytes),
         })
     result.sort(key=lambda x: x["c2s_bytes"] + x["s2c_bytes"], reverse=True)
+    return result
+
+
+# SSH Binary Packet Protocol のメッセージコード
+_SSH_MSG_DISCONNECT = 1
+_SSH_MSG_KEXINIT = 20
+_SSH_MSG_NEWKEYS = 21
+_SSH_DISCONNECT_REASONS = {
+    1: "プロトコルエラー", 2: "プロトコルバージョン不一致", 3: "鍵交換失敗",
+    5: "MAC不正", 6: "圧縮エラー", 7: "サービス利用不可",
+    11: "接続を正常終了", 14: "接続がタイムアウト", 15: "不正な認証情報",
+}
+
+
+def _iter_ssh_packets(blob: bytes):
+    """
+    SSH Binary Packet Protocol のメッセージコードを順に返す。
+    NEWKEYS以降は暗号化されるため、そこで自然にパース不能となり打ち切られる
+    （復号は行わない・鍵交換フェーズの平文区間のみが対象）。
+    """
+    off, n = 0, len(blob)
+    while off + 5 <= n:
+        pkt_len = int.from_bytes(blob[off:off + 4], "big")
+        if pkt_len < 1 or pkt_len > 262144 or off + 4 + pkt_len > n:
+            return
+        pad_len = blob[off + 4]
+        if pad_len >= pkt_len:
+            return
+        if pkt_len - pad_len - 1 < 1:
+            return
+        yield blob[off + 5]
+        off += 4 + pkt_len
+
+
+def analyze_ssh_handshake(data: bytes) -> dict:
+    """
+    SSHの鍵交換(KEX)の成否を判定する。バナー交換後のBinary Packet Protocolを
+    走査し、KEXINIT(往復)・NEWKEYS(往復)・DISCONNECTを検出する。
+    NEWKEYS到達＝鍵交換完了（以降は暗号化されパース対象外になる）。
+    戻り値: {"sessions": [{"client","server","server_port","client_banner",
+             "server_banner","status","reason"}]}
+    """
+    result = {"sessions": []}
+    try:
+        streams = get_tcp_streams(data)
+    except Exception:
+        return result
+    for s in streams:
+        if s["src_port"] != 22 and s["dst_port"] != 22:
+            continue
+        c2s, s2c = s["client_to_server"], s["server_to_client"]
+        banner_c = c2s[:255].split(b"\r\n")[0] if c2s[:4] == b"SSH-" else b""
+        banner_s = s2c[:255].split(b"\r\n")[0] if s2c[:4] == b"SSH-" else b""
+        if not banner_c and not banner_s:
+            continue
+        c_off = len(banner_c) + 2 if banner_c else 0
+        s_off = len(banner_s) + 2 if banner_s else 0
+        c_msgs = list(_iter_ssh_packets(c2s[c_off:]))
+        s_msgs = list(_iter_ssh_packets(s2c[s_off:]))
+        c_kexinit, s_kexinit = _SSH_MSG_KEXINIT in c_msgs, _SSH_MSG_KEXINIT in s_msgs
+        c_newkeys, s_newkeys = _SSH_MSG_NEWKEYS in c_msgs, _SSH_MSG_NEWKEYS in s_msgs
+        disconnected = _SSH_MSG_DISCONNECT in c_msgs or _SSH_MSG_DISCONNECT in s_msgs
+        if c_newkeys and s_newkeys:
+            status, reason = "成功", "双方でNEWKEYSを確認（鍵交換完了、以降は暗号化通信）"
+        elif disconnected:
+            status, reason = "失敗", "SSH_MSG_DISCONNECTを検出（鍵交換中に切断）"
+        elif c_kexinit and s_kexinit:
+            status, reason = "未完了", "KEXINITは往復したがNEWKEYSを確認できず"
+        elif c_kexinit or s_kexinit:
+            status, reason = "未完了", "KEXINITが片方向のみ（応答なし）"
+        else:
+            status, reason = "未完了", "バナー交換のみ（KEXINIT未確認）"
+        result["sessions"].append({
+            "client": s["src"] if banner_c else s["dst"],
+            "server": s["dst"] if banner_c else s["src"],
+            "server_port": s["dst_port"] if banner_c else s["src_port"],
+            "client_banner": banner_c.decode("ascii", errors="replace"),
+            "server_banner": banner_s.decode("ascii", errors="replace"),
+            "status": status, "reason": reason,
+        })
+    _order = {"失敗": 0, "未完了": 1, "成功": 2}
+    result["sessions"].sort(key=lambda x: _order.get(x["status"], 3))
     return result
 
 
