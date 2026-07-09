@@ -31,6 +31,9 @@ _BARE_PROMPT_RE = re.compile(r"^.*[#>$]\s*$")
 def _classify_command(cmd: str) -> str:
     """show コマンド文字列をセクション種別に分類。"""
     c = cmd.lower()
+    # ── IKE/IPsecデバッグ(Cisco: debug crypto isakmp/ikev2, Juniper: show log kmd) ──
+    if re.search(r"crypto\s+(isakmp|ikev2|ipsec)", c) or re.search(r"\blog\s+kmd\b", c):
+        return "ike_debug"
     if re.search(r"\blogg", c):
         return "logging"
     # ── F5 BIG-IP 固有 ──
@@ -324,6 +327,86 @@ def _check_panos_threat(body: str, anoms: list):
             pass
 
 
+# ── IKE/IPsecデバッグログ(Cisco: debug crypto isakmp/ikev2, Juniper: show log kmd) ──
+# pcap解析(pcap_analyzer.py)ではIKE_AUTH以降が暗号化され中身が追えないため、
+# デバッグログはそこを補う情報源になる。「成功/失敗の断定」ではなく機器が実際に
+# 出力した文言をそのまま提示するヒューリスティック（表現ゆれを想定し文言ベースで判定）。
+_IKE_PEER_IP_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
+_IKE_FAIL_PATTERNS = [
+    (re.compile(r"no\s+(?:offered\s+)?proposal|proposal\s+not\s+acceptable|"
+                r"no\s+proposal\s+chosen|atts\s+are\s+not\s+acceptable|"
+                r"proposal.*do(?:es)?\s+not\s+match|local\s+and\s+remote\s+proposal", re.I),
+     "提案(暗号/DHグループ)不一致",
+     "双方の暗号アルゴリズム・DHグループ・認証方式の提案(proposal/policy)を対向と揃えてください。"),
+    (re.compile(r"authentication\s+failed|invalid\s+id\b|id\s+mismatch|"
+                r"failed\s+to\s+authenticate|pre-?shared\s*key.*(mismatch|invalid|incorrect)", re.I),
+     "認証失敗(PSK/証明書/ID不一致)",
+     "事前共有鍵(PSK)・証明書・IDの設定を対向と照合してください。"),
+    (re.compile(r"fsm\s+error|negotiation\s+timeout|not\s+responding|no\s+response|"
+                r"retransmi(?:t|ssion)", re.I),
+     "応答なし/タイムアウト",
+     "対向からの応答がありません。UDP500/4500の疎通・NAT越え設定・"
+     "対向機器の起動状態を確認してください。"),
+    (re.compile(r"invalid\s+cookie|invalid\s+spi|bad\s+(?:isakmp\s+)?message|malformed", re.I),
+     "メッセージ不正",
+     "ISAKMP/IKEメッセージの構文/SPIが不正です。IKEバージョン(v1/v2)や実装の相性を確認してください。"),
+    (re.compile(r"\b(?:vpn|tunnel)\b.*\bdown\b|sa\s+deleted|delete.*informational", re.I),
+     "トンネル切断",
+     "VPNトンネルがダウンしています。直前行に切断理由(reason)が無いか確認してください。"),
+]
+_IKE_SUCCESS_PATTERNS = [
+    re.compile(r"\b(?:vpn|tunnel)\b.*\bup\b|sa\s+has\s+been\s+authenticated|"
+              r"ike\s+sa\s+negotiation\s+successful|session\s+status.*up|"
+              r"qm_idle|ike_p1_complete", re.I),
+]
+
+
+def _check_ike_debug(body: str, anoms: list) -> list:
+    """
+    IKE/IPsecデバッグログを走査し、行ごとに成功/失敗を検出する。
+    戻り値: [{"status","category","peer","line","remedy"}, ...]（表示用の明細）
+    """
+    findings: list = []
+    if not body:
+        return findings
+    fail_cats: dict = {}
+    ok_count = 0
+    for line in body.splitlines():
+        if not line.strip():
+            continue
+        ip_m = _IKE_PEER_IP_RE.search(line)
+        peer = ip_m.group(1) if ip_m else ""
+        matched = False
+        for rx, cat, remedy in _IKE_FAIL_PATTERNS:
+            if rx.search(line):
+                findings.append({"status": "失敗", "category": cat, "peer": peer,
+                                 "line": line.strip()[:200], "remedy": remedy})
+                fail_cats[cat] = fail_cats.get(cat, 0) + 1
+                matched = True
+                break
+        if not matched:
+            for rx in _IKE_SUCCESS_PATTERNS:
+                if rx.search(line):
+                    findings.append({"status": "成功", "category": "鍵交換成功", "peer": peer,
+                                     "line": line.strip()[:200], "remedy": ""})
+                    ok_count += 1
+                    break
+        if len(findings) >= 200:
+            break
+    for cat, cnt in fail_cats.items():
+        _sample = next((f["line"] for f in findings
+                        if f["status"] == "失敗" and f["category"] == cat), "")
+        _remedy = next((f["remedy"] for f in findings
+                        if f["status"] == "失敗" and f["category"] == cat), "")
+        _add(anoms, "ERROR", "IKE/IPsec鍵交換",
+             f"デバッグログに「{cat}」を示す行を{cnt}件検出", _sample, remedy=_remedy)
+    if ok_count and not fail_cats:
+        _add(anoms, "NOTICE", "IKE/IPsec鍵交換",
+             f"デバッグログに鍵交換成功を示す行を{ok_count}件検出", "",
+             remedy="")
+    return findings
+
+
 def check_anomalies(sections: list) -> dict:
     """
     セクション群から異常性をチェック。
@@ -335,6 +418,7 @@ def check_anomalies(sections: list) -> dict:
     logging_body = config_body = intf_body = version_body = ""
     extra_parts = []   # routing/cpu/counters/cdp/other → LLM相関解析の追加材料
     all_text = []
+    ike_findings: list = []   # IKE/IPsecデバッグログの明細（表示用）
 
     _kind_ja = {"interfaces": "show interfaces", "intf_brief": "show ip int brief",
                 "version": "show version", "cdp": "show cdp neighbors",
@@ -369,6 +453,9 @@ def check_anomalies(sections: list) -> dict:
         elif s["kind"] == "panos_session":
             _check_panos_threat(s["body"], anoms)
             extra_parts.append(f"[Palo Alto セッション状況: {s.get('cmd','')}]\n{s['body']}")
+        elif s["kind"] == "ike_debug":
+            ike_findings.extend(_check_ike_debug(s["body"], anoms))
+            extra_parts.append(f"[IKE/IPsecデバッグログ: {s.get('cmd','')}]\n{s['body'][:4000]}")
         else:
             # interfaces / cpu / cdp / f5_virtual / cert / panos_threat / system_info / other
             # 等は専用チェックが無いため LLM 相関解析へ回す
@@ -383,7 +470,7 @@ def check_anomalies(sections: list) -> dict:
     anoms.sort(key=lambda a: rank.get(a["severity"], 6))
     return {"anomalies": anoms, "kinds": kinds, "logging_body": logging_body,
             "config_body": config_body, "intf_body": intf_body,
-            "version_body": version_body,
+            "version_body": version_body, "ike_findings": ike_findings,
             "extra_body": "\n\n".join(extra_parts).strip()}
 
 

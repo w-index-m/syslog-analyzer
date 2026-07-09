@@ -1998,13 +1998,15 @@ with tab_showlog:
             st.session_state["showlog_intf"] = _chk["intf_body"]
             st.session_state["showlog_extra"] = _chk.get("extra_body", "")
             st.session_state["_show_anomalies"] = _chk["anomalies"]
+            st.session_state["_show_ike_findings"] = _chk.get("ike_findings", [])
             # 今回貼り付けた分だけを解析対象にする（過去ログの混入防止）
             st.session_state["_showlog_ids"] = set(_r.get("ids", []))
             # セクション内訳
             _kind_label = {"logging": "show logging", "config": "running-config",
                            "intf_status": "interface status", "intf_brief": "ip int brief",
                            "interfaces": "interfaces", "version": "version",
-                           "cdp": "cdp", "cpu": "cpu", "other": "その他"}
+                           "cdp": "cdp", "cpu": "cpu", "ike_debug": "IKEデバッグログ",
+                           "other": "その他"}
             _sec_summary = " / ".join(
                 f"{_kind_label.get(s['kind'], s['kind'])}"
                 for s in _secs) or "（区切りなし＝logging扱い）"
@@ -2082,6 +2084,31 @@ with tab_showlog:
                 )
         else:
             st.success("設定・ポート状態に目立った異常はありませんでした。")
+
+    # ── 🔑 IKE/IPsecデバッグログ解析（Cisco debug crypto / Juniper show log kmd） ──
+    _ike_findings = st.session_state.get("_show_ike_findings")
+    if _ike_findings:
+        st.markdown("---")
+        st.markdown("### 🔑 IKE/IPsec鍵交換（デバッグログ解析）")
+        st.caption("pcapでは暗号化されて追えないIKE_AUTH以降の情報を、"
+                   "`debug crypto isakmp`/`debug crypto ikev2`（Cisco）や"
+                   "`show log kmd`（Juniper）のデバッグログから補います。"
+                   "機器が実際に出力した文言をそのまま提示するヒューリスティックです。")
+        _ike_fail = [f for f in _ike_findings if f["status"] == "失敗"]
+        _ike_ok = [f for f in _ike_findings if f["status"] == "成功"]
+        _fc1, _fc2 = st.columns(2)
+        _fc1.metric("成功を示す行", len(_ike_ok))
+        _fc2.metric("失敗を示す行", len(_ike_fail), delta="⚠️" if _ike_fail else None)
+        _ike_icon = {"成功": "✅", "失敗": "🔴"}
+        df_iked = pd.DataFrame([{
+            "判定": f"{_ike_icon.get(f['status'],'')} {f['status']}",
+            "カテゴリ": f["category"], "対向IP": f.get("peer", ""),
+            "該当行": f["line"], "対処": f.get("remedy", ""),
+        } for f in _ike_findings])
+        st.dataframe(df_iked, use_container_width=True, hide_index=True)
+        if _ike_fail:
+            st.warning("⚠️ 鍵交換の失敗を示す行が見つかりました。カテゴリごとの対処案を参考に、"
+                       "対向機器の暗号/DHグループ/PSK設定を照合してください。")
 
     # ── 🐛 バグ判定解析（各ログに判定バッジを付けて表示） ──────
     st.markdown("### 🐛 バグ判定（各ログを色分け）")
