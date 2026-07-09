@@ -1270,6 +1270,37 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
     for a in r.get("tls_alerts", [])[:3]:
         lines.append(f"    - [{a.get('alert_type','')}] {a.get('src','')}→{a.get('dst','')} : {a.get('description','')[:60]}")
 
+    # TLSハンドシェイク(鍵交換)の成否
+    _hs_sum = r.get("tls_handshake_summary", {})
+    if _hs_sum:
+        lines.append("")
+        lines.append(f"【TLSハンドシェイク(鍵交換)】成功{_hs_sum.get('success',0)} / "
+                     f"失敗{_hs_sum.get('failed',0)} / 未完了{_hs_sum.get('incomplete',0)}")
+        for h in r.get("tls_handshakes", [])[:5]:
+            if h.get("status") != "成功":
+                lines.append(f"    - [{h.get('status','')}] {h.get('client','')}→"
+                             f"{h.get('server','')}:{h.get('server_port','')}"
+                             f"({h.get('sni','')}) : {h.get('reason','')}")
+        lines.append("    ※鍵交換の失敗/未完了は、暗号スイート不一致・証明書エラー・"
+                     "MTU/経路障害・遮断などが原因のことが多い。失敗があれば原因を推定して報告。")
+
+    # IPsec(IKE鍵交換/ESP)の成否
+    _ipsec = r.get("ipsec", {})
+    _ike = _ipsec.get("ike_sas", [])
+    _ip_sum = _ipsec.get("summary", {})
+    if _ike or _ipsec.get("esp_flows"):
+        lines.append("")
+        lines.append(f"【IPsec(VPN)】IKE SA {_ip_sum.get('ike_total',0)}件 "
+                     f"(成功{_ip_sum.get('ike_success',0)}/失敗{_ip_sum.get('ike_failed',0)}) / "
+                     f"ESP・AHフロー {_ip_sum.get('esp_flows',0)}件")
+        for s in _ike[:5]:
+            lines.append(f"    - [{s.get('status','')}] {s.get('version','')} "
+                         f"{s.get('initiator','')}→{s.get('responder','')} "
+                         f"[{s.get('exchanges','')}] : {s.get('reason','')}")
+        lines.append("    ※IKE鍵交換の失敗/未完了は、事前共有鍵(PSK)不一致・"
+                     "Phase1/Phase2の提案(暗号/DHグループ)不一致・NAT-T・"
+                     "ピア未応答などが典型。失敗があれば切り分けの観点を報告。")
+
     lines += [
         "",
         "【IPフラグメント】",

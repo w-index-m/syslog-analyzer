@@ -5008,7 +5008,7 @@ with tab_pcap:
             _tls_sum      = res.get("tls_summary", {})
             _tls_sessions = res.get("tls_sessions", [])
             _tls_alerts   = res.get("tls_alerts", [])
-            if _tls_sum.get("sessions", 0) > 0 or _tls_alerts:
+            if _tls_sum.get("sessions", 0) > 0 or _tls_alerts or res.get("tls_handshakes"):
                 st.markdown("---")
                 st.markdown("### 🔒 TLS / HTTPS 解析")
                 st.caption(
@@ -5045,6 +5045,66 @@ with tab_pcap:
                         "alert": "アラート内容", "issue": "問題",
                     })
                     st.dataframe(df_ta, use_container_width=True, hide_index=True)
+
+                # ── TLSハンドシェイク(鍵交換)の成否 ──
+                _tls_hs = res.get("tls_handshakes", [])
+                _tls_hs_sum = res.get("tls_handshake_summary", {})
+                if _tls_hs:
+                    st.markdown("**🤝 TLSハンドシェイク（鍵交換）の成否**")
+                    st.caption("ClientHello→ServerHello→CipherSpec変更→暗号通信、の流れが"
+                               "成立したかで鍵交換の成否を判定します（Fatal Alertは失敗）。")
+                    _hc1, _hc2, _hc3 = st.columns(3)
+                    _hc1.metric("成功", _tls_hs_sum.get("success", 0))
+                    _hc2.metric("失敗", _tls_hs_sum.get("failed", 0),
+                                delta="⚠️" if _tls_hs_sum.get("failed") else None)
+                    _hc3.metric("未完了", _tls_hs_sum.get("incomplete", 0))
+                    _hs_icon = {"成功": "✅", "失敗": "🔴", "未完了": "🟡"}
+                    df_hs = pd.DataFrame([{
+                        "判定": f"{_hs_icon.get(h['status'],'')} {h['status']}",
+                        "クライアント": h["client"], "サーバー": f"{h['server']}:{h['server_port']}",
+                        "SNI": h.get("sni", ""), "TLS": h.get("version", ""),
+                        "理由": h["reason"],
+                    } for h in _tls_hs])
+                    st.dataframe(df_hs, use_container_width=True, hide_index=True)
+
+            # ── 🔐 IPsec（IKE鍵交換／ESPトンネル）解析 ──
+            _ipsec = res.get("ipsec", {})
+            _ike_sas = _ipsec.get("ike_sas", [])
+            _esp_flows = _ipsec.get("esp_flows", [])
+            if _ike_sas or _esp_flows:
+                st.markdown("---")
+                st.markdown("### 🔐 IPsec（VPN）解析 — IKE鍵交換の成否")
+                _ip_sum = _ipsec.get("summary", {})
+                st.caption("IKE(UDP500/4500)のネゴシエーションを追跡し、鍵交換(Phase1/Phase2, "
+                           "IKE_SA_INIT/IKE_AUTH)が成立したかを判定します。ESP/AH(暗号化通信)の"
+                           "有無も確認します。ペイロードは暗号化されているため交換の"
+                           "流れからの推定です。")
+                _sc1, _sc2, _sc3 = st.columns(3)
+                _sc1.metric("IKE SA 総数", _ip_sum.get("ike_total", 0))
+                _sc2.metric("鍵交換 成功", _ip_sum.get("ike_success", 0))
+                _sc3.metric("鍵交換 失敗", _ip_sum.get("ike_failed", 0),
+                            delta="⚠️" if _ip_sum.get("ike_failed") else None)
+                if _ike_sas:
+                    _ike_icon = {"成功": "✅", "失敗": "🔴", "未完了": "🟡"}
+                    df_ike = pd.DataFrame([{
+                        "判定": f"{_ike_icon.get(s['status'],'')} {s['status']}",
+                        "版": s["version"], "起点(Initiator)": s["initiator"],
+                        "相手(Responder)": s["responder"], "交換": s["exchanges"],
+                        "理由": s["reason"],
+                    } for s in _ike_sas])
+                    st.dataframe(df_ike, use_container_width=True, hide_index=True)
+                if _esp_flows:
+                    st.markdown(f"**🔒 ESP/AH 暗号化通信フロー（トンネル確立後）"
+                                f"— {_ip_sum.get('esp_packets',0)}パケット**")
+                    df_esp = pd.DataFrame([{
+                        "プロトコル": f["proto"], "送信元": f["src"], "宛先": f["dst"],
+                        "パケット数": f["packets"],
+                    } for f in _esp_flows])
+                    st.dataframe(df_esp, use_container_width=True, hide_index=True)
+                    if not _ike_sas:
+                        st.info("ℹ️ ESP/AH通信は見えますが、IKE(鍵交換)はこのキャプチャ範囲外です"
+                                "（既に確立済みのトンネル）。鍵交換の成否を見るには、接続開始時の"
+                                "UDP500/4500を含めてキャプチャしてください。")
 
             # ── DHCP 解析 ────────────────────────────────
             _dhcp_issues = res.get("dhcp_issues", [])
@@ -5198,6 +5258,58 @@ with tab_pcap:
                 else:
                     st.warning("条件に一致するパケットが見つかりませんでした")
 
+            # ── パケット grep（中身検索・正規表現/16進/ストリーム対応） ──
+            st.markdown("---")
+            st.markdown("### 🔎 パケット grep（中身を検索）")
+            st.caption("パケットのペイロードを grep します。正規表現・16進バイト列・"
+                       "大文字小文字の区別・TCPストリーム再構成後の横断検索に対応。"
+                       "一致箇所は《》で囲って表示します。")
+            with st.form("pcap_grep_form"):
+                _gc1, _gc2 = st.columns([3, 2])
+                with _gc1:
+                    _g_pat = st.text_input("検索パターン",
+                                           placeholder="例: password=\\w+ ／ deadbeef ／ User-Agent")
+                with _gc2:
+                    _g_mode = st.selectbox("モード",
+                                           ["テキスト（部分一致）", "正規表現", "16進バイト列"])
+                _gc3, _gc4, _gc5 = st.columns(3)
+                with _gc3:
+                    _g_scope = st.selectbox("検索範囲",
+                                            ["パケット単位", "TCPストリーム再構成後"])
+                with _gc4:
+                    _g_case = st.checkbox("大文字・小文字を区別", value=False)
+                with _gc5:
+                    st.write(""); st.write("")
+                _grep_btn = st.form_submit_button("🔎 grep 実行")
+            if _grep_btn:
+                _mode_map = {"テキスト（部分一致）": "text", "正規表現": "regex",
+                             "16進バイト列": "hex"}
+                _scope_map = {"パケット単位": "packet", "TCPストリーム再構成後": "stream"}
+                with st.spinner("grep 実行中..."):
+                    _gres = pcap_analyzer.grep_pcap(
+                        raw_bytes, _g_pat.strip(),
+                        mode=_mode_map[_g_mode],
+                        case_sensitive=_g_case,
+                        scope=_scope_map[_g_scope])
+                if _gres["error"]:
+                    st.error(f"⚠️ {_gres['error']}")
+                elif _gres["matches"]:
+                    _msg = f"✅ {_gres['count']} 件ヒット"
+                    if _gres["truncated"]:
+                        _msg += "（上限500件で打ち切り）"
+                    st.success(_msg)
+                    _gdf = pd.DataFrame([{
+                        "時刻": m.get("timestamp", ""), "プロトコル": m.get("protocol", ""),
+                        "送信元": f"{m['src']}:{m['sport']}", "宛先": f"{m['dst']}:{m['dport']}",
+                        "位置": m["offset"], "一致": m["match_text"],
+                        "前後（《》が一致箇所）": m["preview"],
+                    } for m in _gres["matches"]])
+                    st.dataframe(_gdf, use_container_width=True, hide_index=True)
+                else:
+                    st.warning("一致するパケットが見つかりませんでした"
+                               "（『TCPストリーム再構成後』にすると、セグメントを跨ぐ文字列も"
+                               "見つかることがあります）。")
+
             # ── ICMP 分布 ──────────────────────────────
             if res["icmp_summary"]:
                 st.markdown("---")
@@ -5245,10 +5357,13 @@ icmp.type == 5 or udp.port == 520
 | 🧩 IPフラグメント | MTU問題・Path MTU Discovery障害によるフラグメント化の検出 |
 | 🌍 HTTP解析 | 平文HTTPの応答コード集計・4xx/5xxエラー一覧 |
 | 🔒 TLS/HTTPS解析 | SNI（接続先ホスト名）・TLSバージョン・Fatal Alert の検出 |
+| 🤝 TLSハンドシェイク成否 | ClientHello～鍵交換完了までを追跡し、成功/失敗/未完了を判定 |
+| 🔐 IPsec(VPN)解析 | IKE(鍵交換)の成否判定・ESP/AH暗号化通信フローの検出 |
 | 📋 DHCP解析 | NAK・DECLINE・DISCOVER未応答などのIPアドレス割り当て問題 |
 | 💬 会話フロー一覧 | RTT・スループット付きで全フローをバイト数順に表示 |
 | 📡 トップトーカー | 帯域を最も消費しているIPアドレスのランキング |
 | 🔍 フィルター解析 | IP・ポート・プロトコル・キーワードでパケット絞り込み |
+| 🔎 パケットgrep | 正規表現・16進バイト列・TCPストリーム横断での中身検索 |
 | 🤖 AI統合診断 | pcap + syslog + SNMP を統合してAIが根本原因推定 |
 | 📞 VoIP/RTP品質 | MOSスコア・ジッター・パケットロス（RTPストリーム自動検出） |
         """)

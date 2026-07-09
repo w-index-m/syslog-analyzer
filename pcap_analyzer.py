@@ -783,6 +783,76 @@ def _parse_tls_alert(payload: bytes) -> dict | None:
         return None
 
 
+def _iter_tls_records(payload: bytes):
+    """
+    TCPペイロード内のTLSレコードを走査し (content_type, handshake_type, version) を返す。
+    1パケットに複数レコードが載ることがあるためレコード境界で分割する。
+    content_type: 20=ChangeCipherSpec,21=Alert,22=Handshake,23=ApplicationData
+    handshake_type: 22のときのみ 1=ClientHello,2=ServerHello,11=Cert,12=SKE,
+                    14=ServerHelloDone,16=ClientKeyExchange,20=Finished（暗号化後は不明）
+    """
+    off, n = 0, len(payload)
+    while off + 5 <= n:
+        ctype = payload[off]
+        ver   = int.from_bytes(payload[off + 1:off + 3], "big")
+        rlen  = int.from_bytes(payload[off + 3:off + 5], "big")
+        if ctype not in (20, 21, 22, 23) or rlen == 0 or rlen > 0x4000:
+            return  # TLSレコードとして不正 → 打ち切り
+        hs_type = None
+        if ctype == 22 and off + 5 < n:
+            hs_type = payload[off + 5]
+        yield (ctype, hs_type, ver)
+        off += 5 + rlen
+
+
+def _parse_ike_header(payload: bytes, on_4500: bool) -> dict | None:
+    """
+    ISAKMP/IKE ヘッダ(28バイト)をパースする。NAT-T(4500)は先頭4バイトの
+    non-ESPマーカー(0x00000000)を剥がす。ESP(4500上の暗号化データ)は None。
+    戻り値: {"ispi","rspi","version"(1/2),"exchange","flags","msgid",
+             "is_response","is_initiator"}
+    """
+    try:
+        p = payload
+        if on_4500:
+            if len(p) >= 4 and p[:4] == b"\x00\x00\x00\x00":
+                p = p[4:]              # non-ESP marker → 後続がISAKMP
+            else:
+                return None            # 先頭がSPI(非ゼロ) = ESPデータ
+        if len(p) < 28:
+            return None
+        ispi = p[0:8]; rspi = p[8:16]
+        version = p[17]
+        major = (version >> 4) & 0xF   # 1=IKEv1, 2=IKEv2
+        if major not in (1, 2):
+            return None
+        exch = p[18]
+        flags = p[19]
+        msgid = int.from_bytes(p[20:24], "big")
+        length = int.from_bytes(p[24:28], "big")
+        if length < 28 or length > 0x100000:
+            return None
+        if major == 2:
+            is_response  = bool(flags & 0x20)   # IKEv2 Response bit
+            is_initiator = bool(flags & 0x08)   # IKEv2 Initiator bit
+        else:
+            # IKEv1 はフラグに応答ビットが無い（方向はメッセージ流で判断）
+            is_response = False
+            is_initiator = (rspi == b"\x00\x00\x00\x00\x00\x00\x00\x00")
+        return {"ispi": ispi.hex(), "rspi": rspi.hex(), "version": major,
+                "exchange": exch, "flags": flags, "msgid": msgid,
+                "is_response": is_response, "is_initiator": is_initiator}
+    except Exception:
+        return None
+
+
+# IKE 交換タイプ名（v1/v2）
+_IKEV1_EXCH = {2: "Main Mode(ID保護)", 4: "Aggressive Mode", 5: "Informational",
+               6: "Transaction", 32: "Quick Mode(Phase2)"}
+_IKEV2_EXCH = {34: "IKE_SA_INIT", 35: "IKE_AUTH", 36: "CREATE_CHILD_SA",
+               37: "INFORMATIONAL"}
+
+
 # ══════════════════════════════════════════════════════════════════
 #  メイン解析関数
 # ══════════════════════════════════════════════════════════════════
@@ -845,6 +915,8 @@ def analyze_pcap(data: bytes) -> dict:
         "tls_sessions": [],   "tls_alerts": [],
         "tls_summary": {"sessions": 0, "unique_sites": 0, "fatal_alerts": 0,
                         "deprecated_tls": 0},
+        "tls_handshakes": [], "tls_handshake_summary": {},
+        "ipsec": {"ike_sas": [], "esp_flows": [], "summary": {}},
         "dhcp_issues": [],
         "dhcp_summary": {},
         "dns_issues": [],
@@ -895,6 +967,12 @@ def analyze_pcap(data: bytes) -> dict:
     # TLS: canonical flow key -> {sni, tls_version}
     tls_flow_info: dict[tuple, dict] = {}
     tls_unique_sites: set = set()
+    # TLSハンドシェイク状態: ck -> {client_hello,server_hello,cert,server_ccs,
+    #   client_ccs,app_data,fatal_alert,alert_desc,sni,version,client,server,port,ts}
+    tls_hs: dict[tuple, dict] = {}
+    # IPsec: IKE SA(初期化SPI) -> 状態 / ESP・AHフロー
+    ike_sas: dict[str, dict] = {}
+    esp_flows: dict[tuple, dict] = {}   # (src,dst) -> {"proto","count"}
 
     # DNS pending queries
     dns_pending: dict[int, dict] = {}
@@ -992,6 +1070,13 @@ def analyze_pcap(data: bytes) -> dict:
                 frag_offset = ip.off & dpkt.ip.IP_OFFMASK  # 8-byte units
                 if is_mf or frag_offset > 0:
                     ip_frag_count[(src, dst, ip.p)] += 1
+
+                # ── IPsec ESP(50)/AH(51): トンネル確立後の暗号化通信 ──
+                if ip.p in (50, 51):
+                    _ek = (src, dst)
+                    _ef = esp_flows.setdefault(_ek, {"proto": "ESP" if ip.p == 50 else "AH",
+                                                     "count": 0})
+                    _ef["count"] += 1
 
                 # ── ICMP ────────────────────────────────
                 if isinstance(ip.data, dpkt.icmp.ICMP):
@@ -1163,6 +1248,37 @@ def analyze_pcap(data: bytes) -> dict:
                                 })
                                 result["tls_summary"]["fatal_alerts"] += 1
 
+                            # ── TLSハンドシェイク(鍵交換)の成否追跡 ──
+                            _hs = tls_hs.setdefault(ck, {
+                                "client": src if dport in TLS_PORTS else dst,
+                                "server": dst if dport in TLS_PORTS else src,
+                                "port":   dport if dport in TLS_PORTS else sport,
+                                "client_hello": False, "server_hello": False, "cert": False,
+                                "server_ccs": False, "client_ccs": False, "app_data": False,
+                                "fatal_alert": False, "alert_desc": "", "version": "", "ts": _ts_str(ts)})
+                            _to_server = dport in TLS_PORTS   # クライアント→サーバ方向か
+                            for _ct, _ht, _rv in _iter_tls_records(payload_b):
+                                if _ct == 22 and _ht == 1:
+                                    _hs["client_hello"] = True
+                                elif _ct == 22 and _ht == 2:
+                                    _hs["server_hello"] = True
+                                    if _rv in TLS_VERSIONS:
+                                        _hs["version"] = TLS_VERSIONS[_rv]
+                                elif _ct == 22 and _ht == 11:
+                                    _hs["cert"] = True
+                                elif _ct == 20:   # ChangeCipherSpec
+                                    if _to_server:
+                                        _hs["client_ccs"] = True
+                                    else:
+                                        _hs["server_ccs"] = True
+                                elif _ct == 23:   # ApplicationData（暗号化完了後）
+                                    _hs["app_data"] = True
+                                elif _ct == 21 and alert and alert["level"] == "fatal":
+                                    _hs["fatal_alert"] = True
+                                    _hs["alert_desc"] = alert["desc"]
+                            if ch and ch.get("sni"):
+                                _hs["sni"] = ch["sni"]
+
                     # ── プロトコル不明時: ID/session キーワード検索 ──
                     # HTTPレスポンス/TLS(暗号化)以外の平文ペイロードが対象。
                     if data_len > 0 and not (sport in TLS_PORTS or dport in TLS_PORTS):
@@ -1176,6 +1292,32 @@ def analyze_pcap(data: bytes) -> dict:
                 # ── UDP ─────────────────────────────────
                 elif isinstance(ip.data, dpkt.udp.UDP):
                     udp = ip.data
+
+                    # ── IPsec IKE(鍵交換): UDP 500 / 4500(NAT-T) ──
+                    if udp.dport in (500, 4500) or udp.sport in (500, 4500):
+                        _ikp = _parse_ike_header(bytes(udp.data),
+                                                 on_4500=(udp.dport == 4500 or udp.sport == 4500))
+                        if _ikp:
+                            _sa = ike_sas.setdefault(_ikp["ispi"], {
+                                "version": _ikp["version"], "initiator": src, "responder": dst,
+                                "exchanges": set(), "v2_init_req": False, "v2_init_resp": False,
+                                "v2_auth_req": False, "v2_auth_resp": False,
+                                "v1_quick": 0, "v1_phase1": 0, "informational_del": False,
+                                "ts": _ts_str(ts)})
+                            _ex = _ikp["exchange"]
+                            _sa["exchanges"].add(_ex)
+                            if _ikp["version"] == 2:
+                                if _ex == 34:
+                                    _sa["v2_init_resp" if _ikp["is_response"] else "v2_init_req"] = True
+                                elif _ex == 35:
+                                    _sa["v2_auth_resp" if _ikp["is_response"] else "v2_auth_req"] = True
+                                elif _ex == 37 and _ikp["is_response"] is False:
+                                    pass
+                            else:  # IKEv1
+                                if _ex in (2, 4):
+                                    _sa["v1_phase1"] += 1
+                                elif _ex == 32:
+                                    _sa["v1_quick"] += 1
 
                     # ── QUIC / HTTP3 検出（UDP 443 等・Long Headerで判定） ──
                     if udp.dport in QUIC_PORTS or udp.sport in QUIC_PORTS:
@@ -1965,6 +2107,84 @@ def analyze_pcap(data: bytes) -> dict:
             }
     except Exception as _geo_err:
         print(f"[geoip] 照合スキップ: {_geo_err}")
+
+    # ── TLSハンドシェイク(鍵交換)の成否判定 ──
+    _hs_ok = _hs_fail = _hs_incomplete = 0
+    for _ck, _h in tls_hs.items():
+        # 成功: サーバHello + (CCS or ApplicationData) が観測でき、Fatal Alertなし
+        if _h["fatal_alert"]:
+            _status, _reason = "失敗", f"Fatal Alert: {_h['alert_desc']}"
+            _hs_fail += 1
+        elif _h["server_hello"] and (_h["server_ccs"] or _h["client_ccs"] or _h["app_data"]):
+            _status, _reason = "成功", "鍵交換完了（暗号通信に移行）"
+            _hs_ok += 1
+        elif _h["client_hello"] and not _h["server_hello"]:
+            _status, _reason = "未完了", "ClientHelloに対しServerHelloなし（応答なし/遮断）"
+            _hs_incomplete += 1
+        elif _h["server_hello"]:
+            _status, _reason = "未完了", "ServerHelloまで（CipherSpec変更/完了を確認できず）"
+            _hs_incomplete += 1
+        else:
+            continue   # ハンドシェイクの断片が無いフローは対象外
+        result["tls_handshakes"].append({
+            "client": _h["client"], "server": _h["server"], "server_port": _h["port"],
+            "sni": _h.get("sni", ""), "version": _h.get("version", ""),
+            "status": _status, "reason": _reason,
+            "client_hello": _h["client_hello"], "server_hello": _h["server_hello"],
+            "cert": _h["cert"], "change_cipher_spec": _h["server_ccs"] or _h["client_ccs"],
+            "app_data": _h["app_data"],
+        })
+    _order = {"失敗": 0, "未完了": 1, "成功": 2}
+    result["tls_handshakes"].sort(key=lambda x: _order.get(x["status"], 3))
+    if result["tls_handshakes"]:
+        result["tls_handshake_summary"] = {
+            "total": len(result["tls_handshakes"]),
+            "success": _hs_ok, "failed": _hs_fail, "incomplete": _hs_incomplete}
+
+    # ── IPsec IKE(鍵交換)の成否判定 ──
+    _ike_ok = _ike_fail = 0
+    for _spi, _sa in ike_sas.items():
+        if _sa["version"] == 2:
+            if _sa["v2_auth_resp"]:
+                _status, _reason = "成功", "IKE_SA_INIT→IKE_AUTH応答まで完了（CHILD_SA確立）"
+            elif _sa["v2_auth_req"] and not _sa["v2_auth_resp"]:
+                _status, _reason = "失敗", "IKE_AUTH要求に応答なし（認証失敗/到達不可の可能性）"
+            elif _sa["v2_init_resp"] and not _sa["v2_auth_req"]:
+                _status, _reason = "未完了", "IKE_SA_INITのみ（Phase1途中・IKE_AUTH未達）"
+            elif _sa["v2_init_req"] and not _sa["v2_init_resp"]:
+                _status, _reason = "失敗", "IKE_SA_INIT要求に応答なし（相手先未応答）"
+            else:
+                _status, _reason = "未完了", "IKEv2交換が途中で終了"
+            _exlist = "/".join(_IKEV2_EXCH.get(e, str(e)) for e in sorted(_sa["exchanges"]))
+        else:
+            if _sa["v1_quick"] >= 2:
+                _status, _reason = "成功", "Quick Mode(Phase2)応答まで完了（IPsec SA確立）"
+            elif _sa["v1_quick"] == 1:
+                _status, _reason = "未完了", "Quick Mode開始のみ（Phase2応答未確認）"
+            elif _sa["v1_phase1"] >= 3:
+                _status, _reason = "未完了", "Phase1のみ（Quick Mode/Phase2未達）"
+            else:
+                _status, _reason = "失敗", "Phase1が完了せず（提案不一致/未応答の可能性）"
+            _exlist = "/".join(_IKEV1_EXCH.get(e, str(e)) for e in sorted(_sa["exchanges"]))
+        if _status == "成功":
+            _ike_ok += 1
+        elif _status == "失敗":
+            _ike_fail += 1
+        result["ipsec"]["ike_sas"].append({
+            "version": f"IKEv{_sa['version']}", "initiator": _sa["initiator"],
+            "responder": _sa["responder"], "spi": _spi[:16],
+            "exchanges": _exlist, "status": _status, "reason": _reason})
+    result["ipsec"]["ike_sas"].sort(key=lambda x: _order.get(x["status"], 3))
+    # ESP/AH(確立後の暗号通信)フロー
+    for (_s, _d), _f in esp_flows.items():
+        result["ipsec"]["esp_flows"].append(
+            {"src": _s, "dst": _d, "proto": _f["proto"], "packets": _f["count"]})
+    result["ipsec"]["esp_flows"].sort(key=lambda x: x["packets"], reverse=True)
+    if ike_sas or esp_flows:
+        result["ipsec"]["summary"] = {
+            "ike_total": len(ike_sas), "ike_success": _ike_ok, "ike_failed": _ike_fail,
+            "esp_flows": len(esp_flows),
+            "esp_packets": sum(f["count"] for f in esp_flows.values())}
 
     return result
 
@@ -2854,3 +3074,122 @@ def filter_pcap(
         })
 
     return matched
+
+
+def _printable_preview(s: str, max_len: int = 120) -> str:
+    """latin-1文字列を表示用に整形（非表示文字は「.」に）。"""
+    out = []
+    for ch in s[:max_len]:
+        o = ord(ch)
+        out.append(ch if 32 <= o < 127 else ".")
+    return "".join(out)
+
+
+def grep_pcap(data: bytes, pattern: str, mode: str = "text",
+              case_sensitive: bool = False, scope: str = "packet",
+              max_matches: int = 500) -> dict:
+    """
+    パケットの中身を grep する（本格版）。
+      mode  : "text"(部分一致) / "regex"(正規表現) / "hex"(16進バイト列 例 'deadbeef')
+      scope : "packet"(パケット単位) / "stream"(TCPストリーム再構成後・跨ぎ検索)
+    戻り値: {"matches":[...], "count", "truncated", "error"}
+      match: {timestamp,protocol,src,dst,sport,dport,offset,match_text,preview}
+    バイナリ安全のため全ペイロードを latin-1(1バイト=1文字) として扱う。
+    """
+    result = {"matches": [], "count": 0, "truncated": False, "error": None}
+    if not pattern:
+        result["error"] = "検索パターンが空です。"
+        return result
+
+    # パターン→正規表現(latin-1文字列上で検索)を構築
+    try:
+        if mode == "hex":
+            cleaned = re.sub(r"[\s0x,\\x]", "", pattern, flags=re.I)
+            if len(cleaned) % 2 != 0 or not re.fullmatch(r"[0-9a-fA-F]+", cleaned or "x"):
+                result["error"] = "16進パターンが不正です（例: deadbeef / 90 90 90）。"
+                return result
+            needle = re.escape(bytes.fromhex(cleaned).decode("latin-1"))
+        elif mode == "regex":
+            needle = pattern.encode("utf-8").decode("latin-1")
+        else:  # text
+            needle = re.escape(pattern.encode("utf-8").decode("latin-1"))
+        flags = 0 if case_sensitive else re.IGNORECASE
+        rx = re.compile(needle, flags | re.DOTALL)
+    except re.error as e:
+        result["error"] = f"正規表現エラー: {e}"
+        return result
+    except Exception as e:
+        result["error"] = f"パターン構築エラー: {e}"
+        return result
+
+    def _search(hay_bytes, meta):
+        hay = hay_bytes.decode("latin-1")
+        for m in rx.finditer(hay):
+            if result["count"] >= max_matches:
+                result["truncated"] = True
+                return False
+            s, e = m.start(), m.end()
+            ctx = hay[max(0, s - 30):s] + "《" + hay[s:e] + "》" + hay[e:e + 30]
+            result["matches"].append({
+                **meta, "offset": s,
+                "match_text": _printable_preview(m.group(), 60),
+                "preview": _printable_preview(ctx, 160),
+            })
+            result["count"] += 1
+        return True
+
+    # ── ストリーム再構成後を検索（セグメント跨ぎもヒット） ──
+    if scope == "stream":
+        try:
+            streams = get_tcp_streams(data)
+        except Exception as e:
+            result["error"] = f"ストリーム再構成エラー: {e}"
+            return result
+        for s in streams:
+            for direction, blob in (("→", s["client_to_server"]), ("←", s["server_to_client"])):
+                if not blob:
+                    continue
+                meta = {"timestamp": s.get("start_ts", ""), "protocol": "TCP",
+                        "src": s["src"] if direction == "→" else s["dst"],
+                        "dst": s["dst"] if direction == "→" else s["src"],
+                        "sport": s["src_port"] if direction == "→" else s["dst_port"],
+                        "dport": s["dst_port"] if direction == "→" else s["src_port"]}
+                if not _search(blob, meta):
+                    return result
+        return result
+
+    # ── パケット単位で検索 ──
+    try:
+        reader, _ = _open_capture(data)
+    except Exception as e:
+        result["error"] = f"読み込みエラー: {e}"
+        return result
+    for ts, raw_pkt in reader:
+        if result["count"] >= max_matches:
+            result["truncated"] = True
+            break
+        try:
+            eth = dpkt.ethernet.Ethernet(raw_pkt)
+        except Exception:
+            continue
+        src = dst = "?"; sport = dport = 0; proto = ""; payload = b""
+        if isinstance(eth.data, dpkt.ip.IP):
+            pip = eth.data; src = _ip_str(pip.src); dst = _ip_str(pip.dst)
+            if isinstance(pip.data, dpkt.tcp.TCP):
+                proto = "TCP"; sport = pip.data.sport; dport = pip.data.dport
+                payload = bytes(pip.data.data)
+            elif isinstance(pip.data, dpkt.udp.UDP):
+                proto = "UDP"; sport = pip.data.sport; dport = pip.data.dport
+                payload = bytes(pip.data.data)
+            else:
+                proto = PROTO_NAMES.get(pip.p, f"IP/{pip.p}")
+                payload = bytes(pip.data) if pip.data else b""
+        else:
+            payload = bytes(raw_pkt)
+        if not payload:
+            continue
+        meta = {"timestamp": _ts_str(ts), "protocol": proto,
+                "src": src, "dst": dst, "sport": sport, "dport": dport}
+        if not _search(payload, meta):
+            break
+    return result
