@@ -966,6 +966,37 @@ def _iter_tls_records(payload: bytes):
         off += 5 + rlen
 
 
+# OSPF Hello パケットの認証タイプ（RFC2328）
+_OSPF_AUTH_TYPES = {0: "認証なし", 1: "簡易パスワード", 2: "MD5等(暗号学的認証)"}
+
+
+def _parse_ospf_hello(data: bytes) -> dict | None:
+    """
+    OSPF Helloパケットをパースする。ヘッダ(24B, dpktでは基本情報のみ)以降の
+    Hello専用フィールド(network mask/hello interval/dead interval/area等)を
+    自前で解釈する。認証の有無に関わらずタイマー値自体は平文。
+    戻り値: {"router_id","area","hello_interval","dead_interval","auth_type","priority"}
+    """
+    try:
+        if len(data) < 24 or data[1] != 1:   # type=1 = Hello
+            return None
+        router_id = socket.inet_ntoa(data[4:8])
+        area = socket.inet_ntoa(data[8:12])
+        auth_type = int.from_bytes(data[14:16], "big")
+        body = data[24:]
+        if len(body) < 20:
+            return None
+        hello_interval = int.from_bytes(body[4:6], "big")
+        priority = body[6]
+        dead_interval = int.from_bytes(body[8:12], "big")
+        return {"router_id": router_id, "area": area,
+                "hello_interval": hello_interval, "dead_interval": dead_interval,
+                "auth_type": _OSPF_AUTH_TYPES.get(auth_type, f"type={auth_type}"),
+                "priority": priority}
+    except Exception:
+        return None
+
+
 def _parse_ike_header(payload: bytes, on_4500: bool) -> dict | None:
     """
     ISAKMP/IKE ヘッダ(28バイト)をパースする。NAT-T(4500)は先頭4バイトの
@@ -1115,32 +1146,75 @@ def _find_ike_sa_body(body: bytes, first_type: int, version: int) -> bytes | Non
 # IKE Notify/Notification のエラーコード（v1: RFC2408, v2: RFC7296）。
 # 番号の意味はv1/v2でほぼ共通（提案不一致・認証失敗など、トラブルシュートで
 # 最も知りたい「なぜ鍵交換が失敗したか」を機器が明示的に伝えてくる値）。
+# label=表示名、remedy=対処、verify=確認コマンド（Cisco/Junosの代表例）。
 _IKE_NOTIFY_ERRORS = {
-    1: "UNSUPPORTED_CRITICAL_PAYLOAD（未対応の必須ペイロード）",
-    4: "INVALID_IKE_SPI（SPI不正）",
-    5: "INVALID_MAJOR_VERSION（IKEバージョン不一致）",
-    7: "INVALID_SYNTAX（メッセージ構文不正）",
-    9: "INVALID_MESSAGE_ID",
-    11: "INVALID_SPI",
-    13: "ATTRIBUTES_NOT_SUPPORTED（提案した属性が未対応）",
-    14: "NO_PROPOSAL_CHOSEN（提案する暗号スイート/DHグループ/認証方式が双方で一致しない）",
-    15: "BAD_PROPOSAL_SYNTAX",
-    17: "INVALID_KE_PAYLOAD（DHグループ不一致）",
-    18: "INVALID_ID_INFORMATION（ID不一致）",
-    24: "AUTHENTICATION_FAILED（認証失敗：事前共有鍵(PSK)または証明書が不一致）",
-    34: "SINGLE_PAIR_REQUIRED",
-    35: "NO_ADDITIONAL_SAS",
-    36: "INTERNAL_ADDRESS_FAILURE",
-    38: "TS_UNACCEPTABLE（トラフィックセレクタ不一致）",
-    43: "TEMPORARY_FAILURE（一時的な失敗：リソース枯渇等）",
-    44: "CHILD_SA_NOT_FOUND",
+    1: {"label": "UNSUPPORTED_CRITICAL_PAYLOAD（未対応の必須ペイロード）",
+        "remedy": "対向機器のIKE実装/バージョンの互換性を確認してください。",
+        "verify": "show crypto ikev2 sa detail（Cisco）／show security ike security-associations detail（Junos）"},
+    4: {"label": "INVALID_IKE_SPI（SPI不正）",
+        "remedy": "SA状態の食い違いです。片側のSAをクリアして再ネゴシエーションさせてください。",
+        "verify": "clear crypto isakmp / clear crypto ikev2 sa（Cisco）"},
+    5: {"label": "INVALID_MAJOR_VERSION（IKEバージョン不一致）",
+        "remedy": "片方がIKEv1(ISAKMP)、他方がIKEv2で待ち受けています。双方のIKEバージョン設定"
+                  "（crypto map系=v1 / crypto ikev2 profile系=v2）を揃えてください。",
+        "verify": "show crypto isakmp sa と show crypto ikev2 sa の両方を確認し、"
+                  "どちらで応答が来ているか切り分けてください（Cisco）／"
+                  "show security ike security-associations（Junos, version列を確認）"},
+    7: {"label": "INVALID_SYNTAX（メッセージ構文不正）",
+        "remedy": "IKEメッセージの構文/SPIが不正です。双方の実装バージョンの相性・"
+                  "既知バグ（ソフトウェアの既知不具合）を確認してください。",
+        "verify": "debug crypto ikev2 packet（Cisco）／show log kmd（Junos）で実際のメッセージ内容を確認"},
+    9: {"label": "INVALID_MESSAGE_ID", "remedy": "メッセージ順序の不整合です。SAをクリアして再試行してください。",
+        "verify": "clear crypto ikev2 sa（Cisco）"},
+    11: {"label": "INVALID_SPI", "remedy": "SPI不整合です。片側のSAが残存している可能性があるためクリアしてください。",
+         "verify": "show crypto ikev2 sa（Cisco）／show security ike security-associations（Junos）"},
+    13: {"label": "ATTRIBUTES_NOT_SUPPORTED（提案した属性が未対応）",
+         "remedy": "提案した暗号/DHグループ等の属性を対向がサポートしていません。"
+                   "policy/proposalの組み合わせを対向の対応範囲に合わせてください。",
+         "verify": "show crypto ikev2 proposal（Cisco）／show security ike proposal <name>（Junos）"},
+    14: {"label": "NO_PROPOSAL_CHOSEN（提案する暗号スイート/DHグループ/認証方式が双方で一致しない）",
+         "remedy": "双方のIKEポリシー（暗号アルゴリズム・ハッシュ・DHグループ・認証方式）を"
+                   "完全一致させてください（1項目でも不一致だと拒否されます）。",
+         "verify": "show crypto isakmp policy／show crypto ikev2 proposal（Cisco）／"
+                   "show security ike proposal <name>（Junos）"},
+    15: {"label": "BAD_PROPOSAL_SYNTAX", "remedy": "提案(Proposal)の構文が不正です。設定の再投入を検討してください。",
+         "verify": "show crypto ikev2 proposal（Cisco）"},
+    17: {"label": "INVALID_KE_PAYLOAD（DHグループ不一致）",
+         "remedy": "Diffie-HellmanグループNo.を双方で一致させてください（例: 双方group14に統一）。",
+         "verify": "show crypto ikev2 proposal（Cisco）／show security ike proposal <name>（Junos, dh-groupを確認）"},
+    18: {"label": "INVALID_ID_INFORMATION（ID不一致）",
+         "remedy": "IKE ID（IPアドレス/FQDN/DN等）の設定を対向と一致させてください。",
+         "verify": "show crypto isakmp sa detail（Cisco）／show security ike security-associations detail（Junos）"},
+    24: {"label": "AUTHENTICATION_FAILED（認証失敗：事前共有鍵(PSK)または証明書が不一致）",
+         "remedy": "事前共有鍵(PSK)を双方で再設定・再確認してください（1文字でも不一致で失敗します）。"
+                   "証明書利用時は有効期限・CA信頼チェーン・サブジェクト名を確認してください。",
+         "verify": "PSKは表示されないため再設定して突き合わせるのが確実です。"
+                   "証明書は show crypto pki certificates（Cisco）／"
+                   "show security pki local-certificate detail（Junos）で有効期限を確認"},
+    34: {"label": "SINGLE_PAIR_REQUIRED", "remedy": "トラフィックセレクタを1対1(単一サブネットペア)に絞ってください。",
+         "verify": "show crypto ipsec sa（Cisco）"},
+    35: {"label": "NO_ADDITIONAL_SAS", "remedy": "追加SA数の上限に達しています。不要なSAを削除してください。",
+         "verify": "show crypto ikev2 sa（Cisco）"},
+    36: {"label": "INTERNAL_ADDRESS_FAILURE", "remedy": "内部アドレス割当(Config Payload)に失敗しています。アドレスプールを確認してください。",
+         "verify": "show crypto ikev2 client（Cisco）"},
+    38: {"label": "TS_UNACCEPTABLE（トラフィックセレクタ/Proxy IDのサブネット不一致）",
+         "remedy": "Phase2で許可する送信元/宛先サブネット（ACL/トラフィックセレクタ）の範囲を"
+                   "対向と完全に一致させてください。",
+         "verify": "show crypto ipsec sa（Cisco, local/remote ident網掛け部を確認）／"
+                   "show security ipsec security-associations detail（Junos, local/remote selector確認）"},
+    43: {"label": "TEMPORARY_FAILURE（一時的な失敗：リソース枯渇等）",
+         "remedy": "機器のリソース逼迫が疑われます。CPU/メモリ使用率と同時接続SA数を確認してください。",
+         "verify": "show processes cpu／show crypto ikev2 sa summary（Cisco）"},
+    44: {"label": "CHILD_SA_NOT_FOUND", "remedy": "参照先のChild SAが既に削除されています。再ネゴシエーションで解消することが多いです。",
+         "verify": "show crypto ikev2 sa（Cisco）"},
 }
 
 
-def _find_ike_notify_error(body: bytes, first_type: int, version: int) -> str | None:
+def _find_ike_notify_error(body: bytes, first_type: int, version: int) -> dict | None:
     """
     ISAKMPヘッダ直後のペイロード連鎖からNotify/Notification(v1:11 / v2:41)を探し、
-    エラーコードがあれば説明文を返す（成功時の情報Notifyや未知コードはNoneのまま無視）。
+    エラーコードがあれば{"label","remedy","verify"}を返す
+    （成功時の情報Notifyや未知コードはNoneのまま無視）。
     """
     notify_type = 11 if version == 1 else 41
     off, cur = 0, first_type
@@ -1158,9 +1232,7 @@ def _find_ike_notify_error(body: bytes, first_type: int, version: int) -> str | 
                     code = int.from_bytes(nbody[6:8], "big")
                 else:
                     code = None
-                if code in _IKE_NOTIFY_ERRORS:
-                    return _IKE_NOTIFY_ERRORS[code]
-                return None
+                return _IKE_NOTIFY_ERRORS.get(code)
             off += p_len
             cur = nxt
     except Exception:
@@ -1226,13 +1298,14 @@ def analyze_pcap(data: bytes) -> dict:
         "quic_sessions": [],
         "geo_alerts": [], "geo_summary": {},
         "ssh_handshakes": [],
+        "ospf_issues": [],
         "ip_fragments": [],
         "http_errors": [],    "http_summary": {},
         "tls_sessions": [],   "tls_alerts": [],
         "tls_summary": {"sessions": 0, "unique_sites": 0, "fatal_alerts": 0,
                         "deprecated_tls": 0},
         "tls_handshakes": [], "tls_handshake_summary": {},
-        "ipsec": {"ike_sas": [], "esp_flows": [], "summary": {}},
+        "ipsec": {"ike_sas": [], "esp_flows": [], "summary": {}, "known_issues": []},
         "dhcp_issues": [],
         "dhcp_summary": {},
         "dns_issues": [],
@@ -1289,6 +1362,8 @@ def analyze_pcap(data: bytes) -> dict:
     # IPsec: IKE SA(初期化SPI) -> 状態 / ESP・AHフロー
     ike_sas: dict[str, dict] = {}
     esp_flows: dict[tuple, dict] = {}   # (src,dst) -> {"proto","count"}
+    # OSPF: router_id -> {area, hello_interval, dead_interval, auth_type, priority, ts}
+    ospf_routers: dict[str, dict] = {}
 
     # DNS pending queries
     dns_pending: dict[int, dict] = {}
@@ -1391,8 +1466,19 @@ def analyze_pcap(data: bytes) -> dict:
                 if ip.p in (50, 51):
                     _ek = (src, dst)
                     _ef = esp_flows.setdefault(_ek, {"proto": "ESP" if ip.p == 50 else "AH",
-                                                     "count": 0})
+                                                     "count": 0, "first_ts": ts, "last_ts": ts})
                     _ef["count"] += 1
+                    _ef["last_ts"] = ts
+
+                # ── OSPF(89): Hello間隔/エリア/認証方式の不一致検知 ──
+                # （Helloのタイマー値・エリアIDは認証有無に関わらず平文で読める）
+                if ip.p == 89:
+                    try:
+                        _oh = _parse_ospf_hello(bytes(ip.data))
+                    except Exception:
+                        _oh = None
+                    if _oh:
+                        ospf_routers[_oh["router_id"]] = {**_oh, "ts": _ts_str(ts)}
 
                 # ── ICMP ────────────────────────────────
                 if isinstance(ip.data, dpkt.icmp.ICMP):
@@ -1628,7 +1714,7 @@ def analyze_pcap(data: bytes) -> dict:
                                 "v2_auth_req": False, "v2_auth_resp": False,
                                 "v1_quick": 0, "v1_phase1": 0, "informational_del": False,
                                 "ts": _ts_str(ts), "crypto": None, "weak_crypto": [],
-                                "notify_error": None})
+                                "notify_error": None, "informational_ts": None})
                             _ex = _ikp["exchange"]
                             _sa["exchanges"].add(_ex)
                             if _ikp["version"] == 2:
@@ -1636,8 +1722,8 @@ def analyze_pcap(data: bytes) -> dict:
                                     _sa["v2_init_resp" if _ikp["is_response"] else "v2_init_req"] = True
                                 elif _ex == 35:
                                     _sa["v2_auth_resp" if _ikp["is_response"] else "v2_auth_req"] = True
-                                elif _ex == 37 and _ikp["is_response"] is False:
-                                    pass
+                                elif _ex == 37 and _sa["informational_ts"] is None:
+                                    _sa["informational_ts"] = ts
                             else:  # IKEv1
                                 if _ex in (2, 4):
                                     _sa["v1_phase1"] += 1
@@ -2505,46 +2591,67 @@ def analyze_pcap(data: bytes) -> dict:
     # ── IPsec IKE(鍵交換)の成否判定 ──
     _ike_ok = _ike_fail = 0
     for _spi, _sa in ike_sas.items():
+        _remedy = _verify = ""
         if _sa["version"] == 2:
             if _sa["v2_auth_resp"]:
                 _status, _reason = "成功", "IKE_SA_INIT→IKE_AUTH応答まで完了（CHILD_SA確立）"
             elif _sa["v2_auth_req"] and not _sa["v2_auth_resp"]:
                 _status, _reason = "失敗", "IKE_AUTH要求に応答なし（認証失敗/到達不可の可能性）"
+                _remedy = "認証設定(PSK/証明書)を対向と再確認し、UDP4500(NAT-T)の到達性を確認してください。"
+                _verify = "show crypto ikev2 sa detail（Cisco）／show security ike security-associations detail（Junos）"
             elif _sa["v2_init_resp"] and not _sa["v2_auth_req"]:
                 _status, _reason = "未完了", "IKE_SA_INITのみ（Phase1途中・IKE_AUTH未達）"
+                _remedy = "IKE_AUTH以降が到達していません。ACL/FWでUDP4500(NAT-T)が許可されているか確認してください。"
+                _verify = "show crypto ikev2 sa（Cisco）"
             elif _sa["v2_init_req"] and not _sa["v2_init_resp"]:
                 _status, _reason = "失敗", "IKE_SA_INIT要求に応答なし（相手先未応答）"
+                _remedy = "対向未応答です。UDP500/4500の疎通・対向機器の起動状態・中間FWでのブロックを確認してください。"
+                _verify = "ping <対向IP>／show crypto ikev2 sa（Cisco）／show security ike security-associations（Junos）"
             else:
                 _status, _reason = "未完了", "IKEv2交換が途中で終了"
+                _verify = "show crypto ikev2 sa（Cisco）／show security ike security-associations（Junos）"
             _exlist = "/".join(_IKEV2_EXCH.get(e, str(e)) for e in sorted(_sa["exchanges"]))
         else:
             if _sa["v1_quick"] >= 2:
                 _status, _reason = "成功", "Quick Mode(Phase2)応答まで完了（IPsec SA確立）"
             elif _sa["v1_quick"] == 1:
                 _status, _reason = "未完了", "Quick Mode開始のみ（Phase2応答未確認）"
+                _remedy = "Phase2のProxy ID(アクセスリスト/トラフィックセレクタ)・PFS設定を対向と照合してください。"
+                _verify = "show crypto ipsec sa（Cisco）"
             elif _sa["v1_phase1"] >= 3:
                 _status, _reason = "未完了", "Phase1のみ（Quick Mode/Phase2未達）"
+                _remedy = "Phase1(ISAKMP SA)は成立しています。IPsecトランスフォームセット/アクセスリストの設定を確認してください。"
+                _verify = "show crypto ipsec transform-set（Cisco）"
             else:
                 _status, _reason = "失敗", "Phase1が完了せず（提案不一致/未応答の可能性）"
+                _remedy = "ISAKMPポリシー(暗号/ハッシュ/DHグループ/認証方式)の不一致、またはPSK不一致の可能性があります。"
+                _verify = "show crypto isakmp policy／show crypto isakmp sa detail（Cisco）"
             _exlist = "/".join(_IKEV1_EXCH.get(e, str(e)) for e in sorted(_sa["exchanges"]))
         # Notify/Notificationのエラーコードがあれば、推定でなく機器からの明示的な
         # 失敗理由として上書きする（例: NO_PROPOSAL_CHOSEN＝暗号/DHグループ不一致）
-        if _sa.get("notify_error"):
+        _nerr = _sa.get("notify_error")
+        if _nerr:
             _status = "失敗"
-            _reason = f"ピアから明示的なエラー通知: {_sa['notify_error']}"
+            _reason = f"ピアから明示的なエラー通知: {_nerr['label']}"
+            _remedy = _nerr.get("remedy", "")
+            _verify = _nerr.get("verify", "")
         if _status == "成功":
             _ike_ok += 1
         elif _status == "失敗":
             _ike_fail += 1
         _crypto = _sa.get("crypto") or {}
         _weak_list = _sa.get("weak_crypto") or []
+        if _weak_list and not _remedy:
+            _remedy = "弱い暗号/DHグループが提案されています。AES-GCM＋2048bit以上のMODPまたはECP群への見直しを検討してください。"
+            _verify = "show crypto ikev2 proposal（Cisco）／show security ike proposal <name>（Junos）"
         result["ipsec"]["ike_sas"].append({
             "version": f"IKEv{_sa['version']}", "initiator": _sa["initiator"],
             "responder": _sa["responder"], "spi": _spi[:16],
             "exchanges": _exlist, "status": _status, "reason": _reason,
             "encr": _crypto.get("encr"), "dh_group": _crypto.get("dh_group"),
             "auth_method": _crypto.get("auth_method"), "weak_crypto": _weak_list,
-            "notify_error": _sa.get("notify_error")})
+            "notify_error": _nerr["label"] if _nerr else None,
+            "remedy": _remedy, "verify": _verify})
     result["ipsec"]["ike_sas"].sort(
         key=lambda x: (0 if x["weak_crypto"] else 1, _order.get(x["status"], 3)))
     # ESP/AH(確立後の暗号通信)フロー
@@ -2559,11 +2666,105 @@ def analyze_pcap(data: bytes) -> dict:
             "esp_flows": len(esp_flows),
             "esp_packets": sum(f["count"] for f in esp_flows.values())}
 
+    # ── 既知の類似不具合パターン（Junos 21.2R1リリースノート「未解決の問題」より） ──
+    # ネットワークポリシーの都合上ここではJuniper公式サイトへ直接アクセスできないが、
+    # ユーザー提示の実際のリリースノート記載内容(PR番号)に基づく既知動作。
+    # 断定はできないため「類似パターンの可能性」として提示し、実機のJunosバージョン/
+    # 該当PRの適用有無は別途 show version 等で確認するよう案内する。
+    for _spi, _sa in ike_sas.items():
+        _info_ts = _sa.get("informational_ts")
+        if _sa["version"] != 2 or _info_ts is None:
+            continue   # INFORMATIONAL交換(37)が無ければ対象外
+        _fwd = esp_flows.get((_sa["initiator"], _sa["responder"]))
+        _rev = esp_flows.get((_sa["responder"], _sa["initiator"]))
+        # INFORMATIONAL交換の後も送信を続けた方向 / それ以前に止まった方向を判定
+        _fwd_after = bool(_fwd and _fwd["last_ts"] > _info_ts)
+        _rev_after = bool(_rev and _rev["last_ts"] > _info_ts)
+        _fwd_before = bool(_fwd and _fwd["first_ts"] < _info_ts)
+        _rev_before = bool(_rev and _rev["first_ts"] < _info_ts)
+        # 両方向とも切断前にESPが流れており(=トンネルは確立していた)、
+        # 切断後は片方向だけが送信を継続している(=もう片方は止まった)場合のみ対象
+        if _fwd_before and _rev_before and (_fwd_after != _rev_after):
+            _stale_dir = f"{_sa['initiator']}→{_sa['responder']}" if _fwd_after \
+                else f"{_sa['responder']}→{_sa['initiator']}"
+            result["ipsec"]["known_issues"].append({
+                "pattern": "IKE INFORMATIONAL交換後にESPが片方向のみ継続",
+                "similar_to": "Junos 21.2R1リリースノート記載の既知動作(PR1432925)に類似",
+                "detail": f"INFORMATIONAL交換後、{_stale_dir} 方向のみESP送信が継続し、"
+                         "反対方向は停止しています。",
+                "note": "ピアがトンネルを切断済みでも、ローカル側に古いIPsec SA/NHTBエントリーが"
+                        "残留し送信を続けているケースに類似します。断定はできないため、"
+                        "実機で以下を確認してください。",
+                "verify": "show security ipsec security-associations（stale/古いSPIが残っていないか）／"
+                         "show security ipsec next-hop-tunnels（NHTBエントリーの確認）",
+                "remedy": "残留が確認できた場合: clear security ipsec security-associations "
+                         "で該当SAをクリアして再ネゴシエーションさせる。頻発する場合はJTACへ"
+                         "PR1432925系の既知不具合として問い合わせを検討。",
+            })
+    # 同一ピア間で短時間に複数回IKEネゴシエーションが発生 = トンネルフラップの可能性
+    # (Junos PR1416334類似: 統合型ISSU中にIPsecトンネルがフラップし自動復旧する既知動作)
+    _peer_negotiations: dict = {}
+    for _spi, _sa in ike_sas.items():
+        _pk = tuple(sorted((_sa["initiator"], _sa["responder"])))
+        _peer_negotiations.setdefault(_pk, []).append(_sa["ts"])
+    for _pk, _tslist in _peer_negotiations.items():
+        if len(_tslist) >= 2:
+            result["ipsec"]["known_issues"].append({
+                "pattern": "同一ピアと短時間に複数回のIKEネゴシエーション",
+                "similar_to": "Junos 21.2R1リリースノート記載の既知動作(PR1416334)に類似",
+                "detail": f"{_pk[0]}⇔{_pk[1]} で{len(_tslist)}回の独立したIKEネゴシエーションを検出",
+                "note": "統合型ISSU(ソフトウェア無停止アップグレード)中はIPsecトンネルが"
+                        "一時的にフラップし、ISSU完了後に自動復旧する既知動作があります。"
+                        "メンテナンス時間帯と一致するなら一時的な現象として無視して問題ありません。",
+                "verify": "show system software（ISSU実施履歴）／show log messages（アップグレード時刻の確認）",
+                "remedy": "メンテナンス以外の時間帯で頻発する場合は、別の要因"
+                         "（DPDタイムアウト不一致・Phase2ライフタイム非対称等）を疑ってください。",
+            })
+
     # ── SSH鍵交換の成否（TCPストリーム再構成を再利用） ──
     try:
         result["ssh_handshakes"] = analyze_ssh_handshake(data).get("sessions", [])
     except Exception as _ssh_err:
         print(f"[ssh] 解析スキップ: {_ssh_err}")
+
+    # ── OSPF: Hello/Dead タイマー・エリアID・認証方式の不一致検知 ──
+    # 隣接(Adjacency)が張れない典型原因。Hello区間のタイマー値・エリアIDは
+    # 認証の有無に関わらず平文で読めるため、ここは推測ではなく実測値の突き合わせ。
+    _ospf_routers_list = list(ospf_routers.items())
+    _ospf_seen_pairs = set()
+    for _i in range(len(_ospf_routers_list)):
+        _rid1, _r1 = _ospf_routers_list[_i]
+        for _j in range(_i + 1, len(_ospf_routers_list)):
+            _rid2, _r2 = _ospf_routers_list[_j]
+            _pair_key = tuple(sorted((_rid1, _rid2)))
+            if _pair_key in _ospf_seen_pairs:
+                continue
+            _ospf_seen_pairs.add(_pair_key)
+            _issues = []
+            if _r1["area"] != _r2["area"]:
+                _issues.append({
+                    "category": "エリアID不一致",
+                    "detail": f"エリア{_r1['area']} vs エリア{_r2['area']}",
+                    "remedy": "同一リンク上のインターフェースのOSPFエリア番号を一致させてください。",
+                    "verify": "show ip ospf interface brief（Cisco）／show ospf interface（Junos）"})
+            if _r1["hello_interval"] != _r2["hello_interval"] or _r1["dead_interval"] != _r2["dead_interval"]:
+                _issues.append({
+                    "category": "Hello/Deadタイマー不一致",
+                    "detail": (f"Hello:{_r1['hello_interval']}s/Dead:{_r1['dead_interval']}s vs "
+                              f"Hello:{_r2['hello_interval']}s/Dead:{_r2['dead_interval']}s"),
+                    "remedy": "両ルータのhello-interval/dead-intervalを一致させてください"
+                             "（デフォルトはHello10秒/Dead40秒、既定値と異なる変更が片側だけ入っていないか要確認）。",
+                    "verify": "show ip ospf interface <IF>（Cisco）／show ospf interface detail（Junos）"})
+            if _r1["auth_type"] != _r2["auth_type"]:
+                _issues.append({
+                    "category": "認証方式不一致",
+                    "detail": f"{_r1['auth_type']} vs {_r2['auth_type']}",
+                    "remedy": "認証タイプ(なし/簡易パスワード/MD5等)とキーを双方で一致させてください。",
+                    "verify": "show ip ospf interface <IF>（Cisco, 認証行を確認）"})
+            for _iss in _issues:
+                result["ospf_issues"].append({
+                    "router1": _rid1, "router2": _rid2, **_iss})
+    result["ospf_issues"].sort(key=lambda x: x["category"])
 
     return result
 

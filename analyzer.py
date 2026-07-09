@@ -1305,17 +1305,59 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
                      f"ESP・AHフロー {_ip_sum.get('esp_flows',0)}件")
         for s in _ike[:5]:
             _wk = f" | 弱点:{'/'.join(s['weak_crypto'])}" if s.get("weak_crypto") else ""
+            _rv = ""
+            if s.get("remedy"):
+                _rv += f" | 対処:{s['remedy']}"
+            if s.get("verify"):
+                _rv += f" | 確認:{s['verify']}"
             lines.append(f"    - [{s.get('status','')}] {s.get('version','')} "
                          f"{s.get('initiator','')}→{s.get('responder','')} "
                          f"[{s.get('exchanges','')}] 暗号:{s.get('encr','')} DH:{s.get('dh_group','')} "
-                         f": {s.get('reason','')}{_wk}")
+                         f": {s.get('reason','')}{_wk}{_rv}")
         lines.append("    ※IKE鍵交換の失敗/未完了は、事前共有鍵(PSK)不一致・"
                      "Phase1/Phase2の提案(暗号/DHグループ)不一致・NAT-T・"
                      "ピア未応答などが典型。DHグループ1536bit以下やDES/3DES/NULL暗号は"
                      "現代基準で脆弱なため、成功していてもリスクとして報告してください。"
                      "「ピアから明示的なエラー通知」がある場合は、それは推測ではなく機器自身が"
                      "返した確定的な失敗理由（例: NO_PROPOSAL_CHOSEN=暗号/DHグループの不一致、"
-                     "AUTHENTICATION_FAILED=PSK/証明書不一致）なので、最優先の根本原因として報告してください。")
+                     "AUTHENTICATION_FAILED=PSK/証明書不一致）なので、最優先の根本原因として報告してください。"
+                     "各SAに付与した「対処」「確認」はそのまま解決策・確認方法として回答に含めてください。"
+                     "さらに、成功しているが不安定/再接続を繰り返す傾向が見える場合は、"
+                     "一般的に知られているIPsec/SSL VPNの不具合類型（特定製品のバグIDの断定ではなく一般論）"
+                     "として次を疑ってみてください: "
+                     "①MTU/フラグメンテーション・ブラックホール（ESPオーバーヘッドで実効MTUが縮み、"
+                     "大きいパケットが片方向だけ届かず特定サイズの通信のみ失敗する）、"
+                     "②DPD(Dead Peer Detection)のタイムアウト値が双方で不一致（無通信区間で片方だけ"
+                     "先にSAを切り再接続がタイミングよく揃わない）、"
+                     "③Phase2 SAライフタイム（鍵の再作成間隔）が双方で非対称（片方が先にrekeyし、"
+                     "もう片方がまだ古いSAのままで一時的に不通/再接続が必要になる）、"
+                     "④非推奨暗号(DES/3DES/SHA1等)のサポート終了によるファームウェア更新後の接続不可。"
+                     "これらは一般的な傾向であり、断定はせず「〜の可能性がある」という表現で提示してください。")
+
+    # 既知の類似不具合パターン（実在するJunosリリースノート記載事例と類似の挙動）
+    _known_issues = _ipsec.get("known_issues", [])
+    if _known_issues:
+        lines.append("")
+        lines.append(f"【既知の類似不具合パターン】{len(_known_issues)}件")
+        for _ki in _known_issues:
+            lines.append(f"    - {_ki['pattern']}（{_ki['similar_to']}）: {_ki['detail']}")
+            lines.append(f"      補足: {_ki['note']} | 確認:{_ki['verify']} | 対処:{_ki['remedy']}")
+        lines.append("    ※これはJunos 21.2R1リリースノート「未解決の問題」に実際に記載されている"
+                     "既知動作と類似したパケットパターンの検出結果（実測ベース）。断定はできないため"
+                     "「〜に類似したパターンが見られる」という表現で報告し、確認コマンドの実行を促してください。")
+
+    # OSPF隣接不一致（タイマー/エリア/認証）
+    _ospf_issues = r.get("ospf_issues", [])
+    if _ospf_issues:
+        lines.append("")
+        lines.append(f"【OSPF隣接不一致】{len(_ospf_issues)}件")
+        for o in _ospf_issues[:5]:
+            lines.append(f"    - [{o.get('category','')}] {o.get('router1','')}⇔{o.get('router2','')}: "
+                         f"{o.get('detail','')} | 対処:{o.get('remedy','')} | 確認:{o.get('verify','')}")
+        lines.append("    ※OSPF Helloのタイマー(Hello/Dead間隔)・エリアID・認証方式は"
+                     "リンク上の双方で完全一致していないと隣接(Adjacency)が形成されない。"
+                     "この不一致は実測値の突き合わせによる確定情報であり、ルーティングが"
+                     "貼れない/経路が学習されない根本原因として最優先で報告してください。")
 
     # SSH鍵交換の成否
     _ssh = r.get("ssh_handshakes", [])

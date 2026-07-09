@@ -337,22 +337,43 @@ _IKE_FAIL_PATTERNS = [
                 r"no\s+proposal\s+chosen|atts\s+are\s+not\s+acceptable|"
                 r"proposal.*do(?:es)?\s+not\s+match|local\s+and\s+remote\s+proposal", re.I),
      "提案(暗号/DHグループ)不一致",
-     "双方の暗号アルゴリズム・DHグループ・認証方式の提案(proposal/policy)を対向と揃えてください。"),
+     "双方の暗号アルゴリズム・DHグループ・認証方式の提案(proposal/policy)を対向と揃えてください。"
+     "／確認: show crypto isakmp policy／show crypto ikev2 proposal（Cisco）、"
+     "show security ike proposal <name>（Junos）"),
     (re.compile(r"authentication\s+failed|invalid\s+id\b|id\s+mismatch|"
                 r"failed\s+to\s+authenticate|pre-?shared\s*key.*(mismatch|invalid|incorrect)", re.I),
      "認証失敗(PSK/証明書/ID不一致)",
-     "事前共有鍵(PSK)・証明書・IDの設定を対向と照合してください。"),
+     "事前共有鍵(PSK)・証明書・IDの設定を対向と照合してください。"
+     "／確認: PSKは非表示のため再設定して突き合わせ。証明書は show crypto pki certificates（Cisco）、"
+     "show security pki local-certificate detail（Junos）で有効期限を確認"),
+    (re.compile(r"proxy\s+identit|quick\s+mode.*not\s+acceptable|ts_unacceptable|"
+                r"traffic\s+selector.*(mismatch|not\s+match|unacceptable)", re.I),
+     "Phase2 Proxy ID/トラフィックセレクタ不一致",
+     "Phase2で許可する送信元/宛先サブネット(ACL/トラフィックセレクタ)の範囲を対向と完全に一致させてください。"
+     "／確認: show crypto ipsec sa（Cisco, local/remote identを確認）、"
+     "show security ipsec security-associations detail（Junos）"),
+    (re.compile(r"\bpfs\b.*(mismatch|not\s+match|no\s+matching|required)|"
+                r"no\s+matching\s+pfs|pfs\s+group.*(required|mismatch)", re.I),
+     "PFS(Perfect Forward Secrecy)設定不一致",
+     "PFSの有効/無効・DHグループ番号を双方で一致させてください（例: 双方group14に統一）。"
+     "／確認: show crypto map（Cisco）、show security ipsec vpn <name>（Junos）"),
     (re.compile(r"fsm\s+error|negotiation\s+timeout|not\s+responding|no\s+response|"
                 r"retransmi(?:t|ssion)", re.I),
      "応答なし/タイムアウト",
      "対向からの応答がありません。UDP500/4500の疎通・NAT越え設定・"
-     "対向機器の起動状態を確認してください。"),
+     "対向機器の起動状態を確認してください。"
+     "／確認: ping <対向IP>、show crypto isakmp sa／show crypto ikev2 sa（Cisco）"),
     (re.compile(r"invalid\s+cookie|invalid\s+spi|bad\s+(?:isakmp\s+)?message|malformed", re.I),
      "メッセージ不正",
-     "ISAKMP/IKEメッセージの構文/SPIが不正です。IKEバージョン(v1/v2)や実装の相性を確認してください。"),
+     "ISAKMP/IKEメッセージの構文/SPIが不正です。IKEバージョン(v1/v2)や実装の相性を確認してください。"
+     "／確認: show crypto isakmp sa と show crypto ikev2 sa の両方を確認し、"
+     "どちらのバージョンで待ち受けているか切り分け"),
     (re.compile(r"\b(?:vpn|tunnel)\b.*\bdown\b|sa\s+deleted|delete.*informational", re.I),
      "トンネル切断",
-     "VPNトンネルがダウンしています。直前行に切断理由(reason)が無いか確認してください。"),
+     "VPNトンネルがダウンしています。直前行に切断理由(reason)が無いか確認してください。"
+     "DPD(Dead Peer Detection)タイムアウトの双方設定差異、Phase2 SAライフタイムの非対称による"
+     "片側先行rekeyも要確認。"
+     "／確認: show crypto session（Cisco）、show security ike security-associations（Junos）"),
 ]
 _IKE_SUCCESS_PATTERNS = [
     re.compile(r"\b(?:vpn|tunnel)\b.*\bup\b|sa\s+has\s+been\s+authenticated|"

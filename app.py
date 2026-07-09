@@ -4813,6 +4813,81 @@ with tab_pcap:
                         {"flag_pattern": "🚩 flagパターン", "base64_candidate": "🔤 Base64候補"})
                     _show_table_top_n(df_ctf, "ctf_flag_hits.csv", "dl_ctf_flag_csv")
 
+                # ── 🔬 全ストリーム自動フォレンジックスキャン ──
+                # 手動でストリームを選ばなくても、埋め込みファイル/画像フォレンジック/
+                # アーカイブ内flagを全ストリームに対して自動で舐めて検出する。
+                # 大容量キャプチャでの負荷を抑えるため、走査本数とサイズに上限を設ける。
+                _AUTOSCAN_MAX_STREAMS = 40
+                _AUTOSCAN_MAX_BYTES = 8 * 1024 * 1024
+                _img_exts_auto = {"png", "jpg", "jpeg", "gif"}
+                _arc_exts_auto = {"zip", "docx", "xlsx", "pptx", "jar"}
+                # 通常のWebトラフィックにはまず出てこない種別 → 見つかったこと自体が重要
+                _notable_exts_auto = {"exe", "elf", "ole", "rar", "7z", "sqlite", "tar", "pdf"}
+                _auto_findings = []
+                for _asi, _as in enumerate(streams[:_AUTOSCAN_MAX_STREAMS]):
+                    _as_full = _as["client_to_server"] + _as["server_to_client"]
+                    if not _as_full or len(_as_full) > _AUTOSCAN_MAX_BYTES:
+                        continue
+                    _as_label = f"#{_asi} {_as['src']}:{_as['src_port']} ⇄ {_as['dst']}:{_as['dst_port']}"
+                    try:
+                        _as_embedded = pcap_analyzer.find_embedded_files(_as_full)
+                    except Exception:
+                        _as_embedded = []
+                    for _aef in _as_embedded:
+                        _tags = [f".{_aef['ext']}（{_aef['size']}バイト）"]
+                        _data_for_dl = _aef["data"]
+                        if _aef["ext"] in _img_exts_auto:
+                            try:
+                                _aimgf = pcap_analyzer.analyze_image_forensics(_aef["ext"], _aef["data"])
+                            except Exception:
+                                _aimgf = {}
+                            if _aimgf.get("lsb_stego"):
+                                _tags.append(f"🧿LSBステガノ{len(_aimgf['lsb_stego'])}件")
+                            if _aimgf.get("appended_data"):
+                                _tags.append("📎末尾追記データ")
+                            if _aimgf.get("embedded_files"):
+                                _tags.append(f"🧬ポリグロット{len(_aimgf['embedded_files'])}件")
+                            if _aimgf.get("string_hits"):
+                                _tags.append(f"🚩文字列/flag{len(_aimgf['string_hits'])}件")
+                            if _aimgf.get("jpeg") and _aimgf["jpeg"].get("flag_hits"):
+                                _tags.append(f"🚩JPEG隠しデータ{len(_aimgf['jpeg']['flag_hits'])}件")
+                        elif _aef["ext"] in _arc_exts_auto:
+                            try:
+                                _aarc = pcap_analyzer.extract_archive_contents(_aef["data"], _aef["ext"])
+                            except Exception:
+                                _aarc = []
+                            def _count_flags(entries):
+                                n = sum(len(e["ctf_hits"]) for e in entries)
+                                for e in entries:
+                                    n += _count_flags(e.get("children", []))
+                                return n
+                            _flag_n = _count_flags(_aarc)
+                            if _flag_n:
+                                _tags.append(f"🚩アーカイブ内flag{_flag_n}件")
+                        elif _aef["ext"] in _notable_exts_auto:
+                            _tags.append("⚠️通常のWeb通信では稀な形式")
+                        if len(_tags) > 1:   # 単なるファイル種別だけでなく何か見つかった場合のみ一覧に載せる
+                            _auto_findings.append({
+                                "stream": _as_label, "offset": _aef["offset"],
+                                "summary": " / ".join(_tags), "data": _data_for_dl,
+                                "fname": f"autoscan_{_asi}.{_aef['ext']}",
+                            })
+                if _auto_findings:
+                    st.markdown(f"**🔬 全ストリーム自動フォレンジックスキャン結果（{len(_auto_findings)}件・全"
+                               f"{min(len(streams), _AUTOSCAN_MAX_STREAMS)}ストリーム走査済み）**")
+                    st.caption("ストリームを手動選択しなくても、埋め込みファイル・画像ステガノ・"
+                               "アーカイブ内flagを全ストリームに対して自動検出します。")
+                    for _afi, _af in enumerate(_auto_findings):
+                        _ac1, _ac2 = st.columns([4, 1])
+                        _ac1.warning(f"🔍 **{_af['stream']}**（オフセット{_af['offset']}）: {_af['summary']}")
+                        _ac2.download_button("📥 取り出す", data=_af["data"], file_name=_af["fname"],
+                                             mime="application/octet-stream",
+                                             key=f"dl_autoscan_{_afi}")
+                elif streams:
+                    st.caption(f"🔬 全ストリーム自動フォレンジックスキャン: "
+                              f"{min(len(streams), _AUTOSCAN_MAX_STREAMS)}ストリームを走査しましたが、"
+                              "隠しデータ/埋め込みファイルは見つかりませんでした。")
+
                 if streams:
                     st.markdown("**🔗 TCPストリーム再構成（Follow TCP Stream）**")
                     _stream_labels = {
@@ -5171,6 +5246,17 @@ with tab_pcap:
                         st.warning("⚠️ 脆弱な暗号アルゴリズム/DHグループでのIKE提案を検出しました。"
                                    "現行の推奨構成（AES-GCM＋2048bit以上のMODPまたはECP群）への"
                                    "見直しを検討してください。")
+                    # 解決方法・確認コマンド（失敗/未完了のもののみ）
+                    _ike_todo = [s for s in _ike_sas if s.get("remedy") or s.get("verify")]
+                    if _ike_todo:
+                        with st.expander("🛠️ 解決方法・確認コマンド", expanded=True):
+                            for s in _ike_todo:
+                                st.markdown(f"**{s['initiator']} ⇔ {s['responder']}**"
+                                            f"（{s['status']}: {s['reason']}）")
+                                if s.get("remedy"):
+                                    st.markdown(f"　✅ 対処: {s['remedy']}")
+                                if s.get("verify"):
+                                    st.markdown(f"　🔍 確認コマンド: `{s['verify']}`")
                 if _esp_flows:
                     st.markdown(f"**🔒 ESP/AH 暗号化通信フロー（トンネル確立後）"
                                 f"— {_ip_sum.get('esp_packets',0)}パケット**")
@@ -5183,6 +5269,39 @@ with tab_pcap:
                         st.info("ℹ️ ESP/AH通信は見えますが、IKE(鍵交換)はこのキャプチャ範囲外です"
                                 "（既に確立済みのトンネル）。鍵交換の成否を見るには、接続開始時の"
                                 "UDP500/4500を含めてキャプチャしてください。")
+
+                # 既知の類似不具合パターン(実在するJunosリリースノート記載事例と類似の挙動)
+                _known_issues = _ipsec.get("known_issues", [])
+                if _known_issues:
+                    st.markdown("**📋 既知の類似不具合パターン**")
+                    st.caption("Junos 21.2R1リリースノート「未解決の問題」に実際に記載されている"
+                               "既知動作と類似したパケットパターンです。断定はできないため、"
+                               "「〜に類似」という参考情報として扱い、実機で確認コマンドを実行してください。")
+                    for _ki in _known_issues:
+                        with st.expander(f"🔎 {_ki['pattern']}（{_ki['similar_to']}）", expanded=True):
+                            st.markdown(f"**検出内容**: {_ki['detail']}")
+                            st.markdown(f"**補足**: {_ki['note']}")
+                            st.markdown(f"**確認コマンド**: `{_ki['verify']}`")
+                            st.markdown(f"**対処**: {_ki['remedy']}")
+
+            # ── 🔀 OSPF 隣接タイマー/エリア/認証方式の不一致 ──
+            _ospf_issues = res.get("ospf_issues", [])
+            if _ospf_issues:
+                st.markdown("---")
+                st.markdown("### 🔀 OSPF 隣接不一致（タイマー/エリア/認証）")
+                st.caption("OSPF Helloパケットのタイマー値・エリアID・認証方式は暗号化されず平文で"
+                           "見えるため、実測値を突き合わせて不一致を検出します。"
+                           "隣接(Adjacency)が張れない典型原因です。")
+                df_ospf = pd.DataFrame([{
+                    "ルータ1": o["router1"], "ルータ2": o["router2"],
+                    "カテゴリ": o["category"], "内容": o["detail"],
+                } for o in _ospf_issues])
+                st.dataframe(df_ospf, use_container_width=True, hide_index=True)
+                with st.expander("🛠️ 解決方法・確認コマンド", expanded=True):
+                    for o in _ospf_issues:
+                        st.markdown(f"**{o['router1']} ⇔ {o['router2']}**（{o['category']}: {o['detail']}）")
+                        st.markdown(f"　✅ 対処: {o['remedy']}")
+                        st.markdown(f"　🔍 確認コマンド: `{o['verify']}`")
 
             # ── DHCP 解析 ────────────────────────────────
             _dhcp_issues = res.get("dhcp_issues", [])
