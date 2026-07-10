@@ -663,6 +663,26 @@ with st.sidebar:
         st.caption("☁️ クラウド環境のため Ollama（ローカルLLM）は利用できません。"
                    "Gemini / Groq をご利用ください。")
 
+    _dlp_findings = getattr(analyzer, "LAST_DLP_FINDINGS", [])
+    st.caption("🔒 送信前DLP: 有効（パスワード・事前共有鍵・APIキー・カード番号等を自動マスクしてから送信）")
+    if _dlp_findings:
+        _dlp_cat_ja = {
+            "cisco_username_password": "Cisco username password",
+            "cisco_enable_secret":     "Cisco enable secret",
+            "cisco_line_password":     "Cisco line password",
+            "ipsec_pre_shared_key":    "IPsec事前共有鍵",
+            "routing_auth_key":        "ルーティング認証キー",
+            "snmp_community":          "SNMPコミュニティ名",
+            "aws_access_key":         "AWSアクセスキー",
+            "generic_api_key":        "APIキー/トークン",
+            "private_key_block":      "秘密鍵(PEM)",
+            "credit_card":            "クレジットカード番号",
+        }
+        _dlp_detail = " / ".join(
+            f"{_dlp_cat_ja.get(f['category'], f['category'])}×{f['count']}" for f in _dlp_findings
+        )
+        st.warning(f"⚠️ 直近のLLM送信で機密情報らしき文字列をマスクしました: {_dlp_detail}")
+
     with st.expander("🔑 APIキー設定", expanded=not (claude_ok or gemini_ok or groq_ok)):
         import os
         if _is_cloud_mode():

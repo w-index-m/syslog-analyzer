@@ -2,6 +2,8 @@ import os
 import json
 import requests
 
+import dlp
+
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 OLLAMA_BASE_URL   = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL      = os.environ.get("OLLAMA_MODEL", "llama3")
@@ -11,6 +13,14 @@ GROQ_API_KEY      = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL        = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 LAST_LLM_ERROR = ""  # 直近のLLM呼び出し失敗理由（UI表示用）
+LAST_DLP_FINDINGS: list = []  # 直近のLLM送信でマスクしたDLP検出内訳（UI表示用）
+
+
+def _dlp_redact(text: str) -> str:
+    """LLMへ送信する直前のテキストをDLPでマスクし、検出内訳を記録する。"""
+    redacted, findings = dlp.sanitize(text)
+    globals()["LAST_DLP_FINDINGS"] = findings
+    return redacted
 
 # プロバイダの既定優先順位（auto時、および明示モード失敗時のフォールバック順）
 _PROVIDER_ORDER = ("claude", "gemini", "groq", "ollama")
@@ -82,7 +92,7 @@ RAWログ: {raw[:300]}
 {config_context[:3000]}
 ────────────────────────────────────────────
 """
-    return base
+    return _dlp_redact(base)
 
 def analyze_with_claude(parsed: dict, raw: str, config_context: str = "") -> tuple[str, str]:
     """Claude APIで解析。戻り値: (説明JSON文字列, モデル名)"""
@@ -367,6 +377,7 @@ def ask_llm(system: str, user: str, mode: str = "auto", max_tokens: int = 1000) 
     戻り値: (テキスト, モデル名)  全滅時は ("", "")
     """
     globals()["LAST_LLM_ERROR"] = ""
+    user = _dlp_redact(user)
 
     def _claude():
         if not ANTHROPIC_API_KEY:
@@ -529,7 +540,7 @@ def _build_judge_prompt(parsed: dict, raw: str, ai_explanation: str, config_cont
 {ai_explanation}
 ────────────────────────────────────────
 """
-    return prompt
+    return _dlp_redact(prompt)
 
 
 def judge_with_claude(parsed: dict, raw: str, ai_explanation: str,
@@ -781,7 +792,7 @@ IPアドレス: {device_health.get('source_ip', '不明')}
     if config_context:
         prompt += f"\n────────── コンフィグ情報 ──────────\n{config_context[:1500]}\n"
 
-    return prompt
+    return _dlp_redact(prompt)
 
 def _fmt_bps(bps):
     if bps is None:
@@ -917,7 +928,7 @@ def _build_icmp_redirect_prompt(ip: str, snmp_data: list, redirect_logs: list, r
         f"  {s.get('oid_name','')}: 累積={s.get('value','')}, 増分={s.get('diff','不明')}/poll, アラート={s.get('alert_level','')}"
         for s in snmp_data
     )
-    return f"""
+    prompt = f"""
 対象機器IP: {ip}
 
 【SNMPカウンタ（ICMP-MIB）】
@@ -929,6 +940,7 @@ def _build_icmp_redirect_prompt(ip: str, snmp_data: list, redirect_logs: list, r
 【機器のルーティング情報（コンフィグより）】
 {routing_summary[:2000] if routing_summary else "コンフィグ未登録"}
 """
+    return _dlp_redact(prompt)
 
 
 def diagnose_icmp_redirect(ip: str, snmp_data: list, redirect_logs: list,
@@ -1459,7 +1471,7 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
         lines.append("")
         lines.append("【出力言語】アクセス先は日本を含むアジア圏中心です。日本語で回答してください。")
 
-    return "\n".join(lines)
+    return _dlp_redact("\n".join(lines))
 
 
 def diagnose_pcap(pcap_result: dict, mode: str = "auto") -> dict:
