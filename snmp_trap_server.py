@@ -10,6 +10,15 @@ from parsers.snmp_trap import build_parsed_dict
 # importは循環参照を避けるため遅延
 trap_queue = queue.Queue(maxsize=1000)
 
+# キューが満杯の間に破棄されたTrapの件数（フラッド等の異常検知用）
+_dropped_count = 0
+_dropped_lock = threading.Lock()
+
+
+def get_dropped_count() -> int:
+    return _dropped_count
+
+
 _trap_server_thread = None
 _trap_running = False
 _trap_error = None
@@ -71,11 +80,19 @@ def _run_trap_receiver(port: int, communities: list[str]):
                 community="v2c",
                 version="v2c"
             )
-            trap_queue.put({
-                "source_ip": source_ip,
-                "raw": parsed.get("raw_for_ai", f"SNMP-Trap oid={trap_oid}"),
-                "parsed": parsed
-            })
+            try:
+                # put_nowait: 満杯時にブロックするとディスパッチャスレッドが
+                # 停止してしまう（Trapフラッドによる DoS の温床）ため、
+                # 満杯時は破棄してカウントする。
+                trap_queue.put_nowait({
+                    "source_ip": source_ip,
+                    "raw": parsed.get("raw_for_ai", f"SNMP-Trap oid={trap_oid}"),
+                    "parsed": parsed
+                })
+            except queue.Full:
+                global _dropped_count
+                with _dropped_lock:
+                    _dropped_count += 1
 
         ntfrcv.NotificationReceiver(snmpEngine, trap_callback)
         snmpEngine.transportDispatcher.jobStarted(1)

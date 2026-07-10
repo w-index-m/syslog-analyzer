@@ -1,8 +1,10 @@
 import os
 import json
+import time
 import requests
 
 import dlp
+import ai_workload_monitor
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 OLLAMA_BASE_URL   = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
@@ -378,6 +380,12 @@ def ask_llm(system: str, user: str, mode: str = "auto", max_tokens: int = 1000) 
     """
     globals()["LAST_LLM_ERROR"] = ""
     user = _dlp_redact(user)
+    _dlp_masked_n = sum(f["count"] for f in globals().get("LAST_DLP_FINDINGS", []))
+
+    _rl_ok, _rl_reason = ai_workload_monitor.check_rate_limit()
+    if not _rl_ok:
+        globals()["LAST_LLM_ERROR"] = _rl_reason
+        return "", ""
 
     def _claude():
         if not ANTHROPIC_API_KEY:
@@ -435,7 +443,13 @@ def ask_llm(system: str, user: str, mode: str = "auto", max_tokens: int = 1000) 
 
     providers = {"claude": _claude, "gemini": _gemini, "groq": _groq, "ollama": _ollama}
     for key in _cascade_order(providers, mode):
+        _t0 = time.time()
         text, model = providers[key]()
+        _latency_ms = int((time.time() - _t0) * 1000)
+        ai_workload_monitor.record_call(
+            provider=key, prompt_chars=len(user), success=bool(text),
+            latency_ms=_latency_ms, error="" if text else globals().get("LAST_LLM_ERROR", ""),
+            dlp_masked=_dlp_masked_n)
         if text:
             globals()["LAST_LLM_ERROR"] = ""  # 成功したので前段の失敗ログはクリア
             return text, model
@@ -454,6 +468,11 @@ def analyze(parsed: dict, raw: str, mode: str = "auto", config_context: str = ""
     if mode == "none":
         return "", "なし"
 
+    _rl_ok, _rl_reason = ai_workload_monitor.check_rate_limit()
+    if not _rl_ok:
+        globals()["LAST_LLM_ERROR"] = _rl_reason
+        return "", ""
+
     _providers = {
         "claude": lambda: analyze_with_claude(parsed, raw, config_context),
         "gemini": lambda: analyze_with_gemini(parsed, raw, config_context),
@@ -462,8 +481,13 @@ def analyze(parsed: dict, raw: str, mode: str = "auto", config_context: str = ""
     }
 
     explanation, model = "", ""
+    _prompt_len = len(_build_user_prompt(parsed, raw, config_context))
     for key in _cascade_order(_providers, mode):
+        _t0 = time.time()
         explanation, model = _providers[key]()
+        ai_workload_monitor.record_call(
+            provider=key, prompt_chars=_prompt_len, success=bool(explanation),
+            latency_ms=int((time.time() - _t0) * 1000))
         if explanation:
             break
 
@@ -689,6 +713,11 @@ def judge_quality(parsed: dict, raw: str, ai_explanation: str, mode: str = "auto
     if mode == "none" or not ai_explanation:
         return _rule_based_judge(parsed, ai_explanation)
 
+    _rl_ok, _rl_reason = ai_workload_monitor.check_rate_limit()
+    if not _rl_ok:
+        globals()["LAST_LLM_ERROR"] = _rl_reason
+        return _rule_based_judge(parsed, ai_explanation)
+
     _providers = {
         "claude": lambda: judge_with_claude(parsed, raw, ai_explanation, config_context),
         "gemini": lambda: judge_with_gemini(parsed, raw, ai_explanation, config_context),
@@ -697,8 +726,13 @@ def judge_quality(parsed: dict, raw: str, ai_explanation: str, mode: str = "auto
     }
 
     result = None
+    _prompt_len = len(_build_judge_prompt(parsed, raw, ai_explanation, config_context))
     for key in _cascade_order(_providers, mode):
+        _t0 = time.time()
         result = _providers[key]()
+        ai_workload_monitor.record_call(
+            provider=f"{key}(judge)", prompt_chars=_prompt_len, success=bool(result),
+            latency_ms=int((time.time() - _t0) * 1000))
         if result:
             break
 
@@ -887,6 +921,11 @@ def diagnose_health(device_health, recent_logs, mode="auto", config_context=""):
     if mode == "none":
         return _rule_based_health_diagnosis(device_health)
 
+    _rl_ok, _rl_reason = ai_workload_monitor.check_rate_limit()
+    if not _rl_ok:
+        globals()["LAST_LLM_ERROR"] = _rl_reason
+        return _rule_based_health_diagnosis(device_health)
+
     _providers = {
         "claude": lambda: diagnose_health_with_claude(device_health, recent_logs, config_context),
         "gemini": lambda: diagnose_health_with_gemini(device_health, recent_logs, config_context),
@@ -895,8 +934,13 @@ def diagnose_health(device_health, recent_logs, mode="auto", config_context=""):
     }
 
     result = None
+    _prompt_len = len(_build_health_prompt(device_health, recent_logs, config_context))
     for key in _cascade_order(_providers, mode):
+        _t0 = time.time()
         result = _providers[key]()
+        ai_workload_monitor.record_call(
+            provider=f"{key}(health)", prompt_chars=_prompt_len, success=bool(result),
+            latency_ms=int((time.time() - _t0) * 1000))
         if result:
             break
 
@@ -1016,10 +1060,18 @@ def diagnose_icmp_redirect(ip: str, snmp_data: list, redirect_logs: list,
         "groq": _call_groq,    "ollama": _call_ollama,
     }
     result = None
-    for key in _cascade_order(_icmp_providers, mode):
-        result = _icmp_providers[key]()
-        if result:
-            break
+    _rl_ok, _rl_reason = ai_workload_monitor.check_rate_limit()
+    if _rl_ok:
+        for key in _cascade_order(_icmp_providers, mode):
+            _t0 = time.time()
+            result = _icmp_providers[key]()
+            ai_workload_monitor.record_call(
+                provider=f"{key}(icmp_redirect)", prompt_chars=len(prompt), success=bool(result),
+                latency_ms=int((time.time() - _t0) * 1000))
+            if result:
+                break
+    else:
+        globals()["LAST_LLM_ERROR"] = _rl_reason
     if not result:
         # ルールベースフォールバック
         result = {
@@ -1542,10 +1594,18 @@ def diagnose_pcap(pcap_result: dict, mode: str = "auto") -> dict:
 
     result = None
     if mode != "none":
-        for key in _cascade_order(providers, mode):
-            result = providers[key]()
-            if result:
-                break
+        _rl_ok, _rl_reason = ai_workload_monitor.check_rate_limit()
+        if _rl_ok:
+            for key in _cascade_order(providers, mode):
+                _t0 = time.time()
+                result = providers[key]()
+                ai_workload_monitor.record_call(
+                    provider=f"{key}(pcap)", prompt_chars=len(prompt), success=bool(result),
+                    latency_ms=int((time.time() - _t0) * 1000))
+                if result:
+                    break
+        else:
+            globals()["LAST_LLM_ERROR"] = _rl_reason
 
     if not result:
         # ルールベースフォールバック
@@ -1586,10 +1646,15 @@ def _run_agentic_claude_loop(prompt: str, system_prompt: str, tools: list,
     """
     if not ANTHROPIC_API_KEY:
         return None
+    _rl_ok, _rl_reason = ai_workload_monitor.check_rate_limit()
+    if not _rl_ok:
+        globals()["LAST_LLM_ERROR"] = _rl_reason
+        return None
     messages = [{"role": "user", "content": prompt}]
     tool_calls_made = []
     try:
         for _ in range(max_tool_rounds):
+            _t0 = time.time()
             resp = requests.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={"x-api-key": ANTHROPIC_API_KEY,
@@ -1601,6 +1666,10 @@ def _run_agentic_claude_loop(prompt: str, system_prompt: str, tools: list,
                       "messages": messages},
                 timeout=45,
             )
+            ai_workload_monitor.record_call(
+                provider="claude(agentic)", prompt_chars=len(json.dumps(messages, ensure_ascii=False)),
+                success=resp.ok, latency_ms=int((time.time() - _t0) * 1000),
+                error="" if resp.ok else f"HTTP {resp.status_code}")
             resp.raise_for_status()
             data = resp.json()
             messages.append({"role": "assistant", "content": data["content"]})

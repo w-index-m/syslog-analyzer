@@ -516,7 +516,11 @@ with st.sidebar:
             st.success(f"✅ UDP {st.session_state.syslog_port} 受信中")
         else:
             st.warning("⏸ 停止中")
-    
+        _syslog_dropped = syslog_server.get_dropped_count()
+        if _syslog_dropped > 0:
+            st.caption(f"🛡️ 過負荷保護により破棄したログ: {_syslog_dropped:,}件"
+                       "（UDPフラッド等で処理能力を超えた分。受信自体は継続中）")
+
         st.markdown("---")
     
         # SNMP Trap サーバー制御
@@ -551,6 +555,10 @@ with st.sidebar:
             st.success(f"✅ UDP {st.session_state.snmp_trap_port} Trap受信中")
         else:
             st.warning("⏸ Trap停止中")
+        _trap_dropped = snmp_trap_server.get_dropped_count()
+        if _trap_dropped > 0:
+            st.caption(f"🛡️ 過負荷保護により破棄したTrap: {_trap_dropped:,}件"
+                       "（Trapフラッド等で処理能力を超えた分。受信自体は継続中）")
     
         # SNMPポーラー制御
         st.markdown("**SNMPポーリング（定期収集）**")
@@ -682,6 +690,22 @@ with st.sidebar:
             f"{_dlp_cat_ja.get(f['category'], f['category'])}×{f['count']}" for f in _dlp_findings
         )
         st.warning(f"⚠️ 直近のLLM送信で機密情報らしき文字列をマスクしました: {_dlp_detail}")
+
+    import ai_workload_monitor as _aim
+    st.caption(f"🛡️ AIワークロード監視: 有効（呼び出しレート制限 "
+               f"{_aim.RATE_LIMIT_WINDOW_SEC}秒あたり{_aim.RATE_LIMIT_MAX_CALLS}件まで／"
+               "異常な失敗急増・過大プロンプトを継続監視）")
+    _aim_anomalies = _aim.get_anomalies(1)
+    for _an in _aim_anomalies:
+        _an_icon = "🔴" if _an["severity"] == "high" else "🟡"
+        st.warning(f"{_an_icon} AIワークロード異常検知: {_an['detail']}")
+    _aim_summary = _aim.get_summary(1)
+    if _aim_summary["total"] > 0:
+        with st.expander(f"🛡️ AI呼び出し統計（直近1時間: {_aim_summary['total']}件）"):
+            _aim_c1, _aim_c2, _aim_c3 = st.columns(3)
+            _aim_c1.metric("失敗率", f"{_aim_summary['fail_rate_pct']}%")
+            _aim_c2.metric("平均レイテンシ", f"{_aim_summary['avg_latency_ms']:.0f}ms")
+            _aim_c3.metric("DLPマスク件数", f"{_aim_summary['dlp_masked_total']}")
 
     with st.expander("🔑 APIキー設定", expanded=not (claude_ok or gemini_ok or groq_ok)):
         import os

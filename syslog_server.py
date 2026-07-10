@@ -7,6 +7,15 @@ from parsers import parse_syslog
 # スレッド間でログを渡すキュー
 log_queue = queue.Queue(maxsize=1000)
 
+# キューが満杯の間に破棄されたログの件数（UDPフラッド等の異常検知用）
+_dropped_count = 0
+_dropped_lock = threading.Lock()
+
+
+def get_dropped_count() -> int:
+    return _dropped_count
+
+
 class SyslogUDPHandler(socketserver.BaseRequestHandler):
     def handle(self):
         data, _ = self.request
@@ -14,11 +23,19 @@ class SyslogUDPHandler(socketserver.BaseRequestHandler):
         raw = data.decode("utf-8", errors="replace").strip()
         if raw:
             parsed = parse_syslog(raw, source_ip)
-            log_queue.put({
-                "source_ip": source_ip,
-                "raw": raw,
-                "parsed": parsed
-            })
+            try:
+                # put_nowait: キュー満杯時にここでブロックすると受信スレッドが
+                # 停止し、以降の全パケットを受け付けなくなる（UDPフラッドに
+                # よるDoSの温床になる）ため、満杯時は破棄してカウントする。
+                log_queue.put_nowait({
+                    "source_ip": source_ip,
+                    "raw": raw,
+                    "parsed": parsed
+                })
+            except queue.Full:
+                global _dropped_count
+                with _dropped_lock:
+                    _dropped_count += 1
 
 class SyslogServer:
     def __init__(self, host="0.0.0.0", port=514):
@@ -33,9 +50,9 @@ class SyslogServer:
         try:
             self._server = socketserver.UDPServer((self.host, self.port), SyslogUDPHandler)
             self._server.socket.settimeout(1.0)
+            self.running = True   # スレッド開始前に立てる（開始直後のwhileチェックのレース回避）
             self._thread = threading.Thread(target=self._serve, daemon=True)
             self._thread.start()
-            self.running = True
             self.error = None
             print(f"[SyslogServer] Listening on UDP {self.host}:{self.port}")
         except PermissionError:
