@@ -5383,6 +5383,36 @@ with tab_pcap:
                                    "検出しました。中間者攻撃(MITM)の可能性、または証明書の"
                                    "更新漏れ・設定ミスを確認してください。")
 
+            # ── 🤖 生成AI/LLMサービス宛通信の検知（SNIベース） ──
+            _ai_sessions = res.get("ai_service_sessions", [])
+            if _ai_sessions:
+                st.markdown("---")
+                st.markdown("### 🤖 生成AI/LLMサービス宛通信の検知")
+                st.caption(
+                    "TLSのSNI（接続先ホスト名。暗号化されず平文で送られる）を既知の主要"
+                    "生成AI/LLMサービスと照合して検知します。**内容（送信したプロンプト等）は"
+                    "暗号化されているため見えません** — あくまで「どのAIサービスと通信したか」"
+                    "「どれくらいの時間・頻度で接続していたか」という宛先・利用実態の可視化です。"
+                )
+                _ai_long = sum(1 for s in _ai_sessions if s["long_lived"])
+                _ai_c1, _ai_c2, _ai_c3 = st.columns(3)
+                _ai_c1.metric("検知セッション数", len(_ai_sessions))
+                _ai_c2.metric("ユニークサービス数", len({s["service"] for s in _ai_sessions}))
+                _ai_c3.metric("長時間接続(30分超)", _ai_long,
+                              delta="⚠️ 張りっぱなしの可能性" if _ai_long else None)
+                df_ai = pd.DataFrame([{
+                    "サービス": s["service"], "接続先(SNI)": s["sni"],
+                    "クライアント": s["client"], "サーバー": f"{s['server']}:{s['server_port']}",
+                    "初回検出": s["first_seen"], "最終検出": s["last_seen"],
+                    "継続時間(秒)": s["duration_sec"], "バイト数": s["bytes"],
+                    "長時間接続": "⚠️ 張りっぱなしの可能性" if s["long_lived"] else "",
+                } for s in _ai_sessions])
+                st.dataframe(df_ai, use_container_width=True, hide_index=True)
+                if _ai_long:
+                    st.warning(f"⚠️ {_ai_long}件のセッションが30分を超えて継続しています。"
+                               "AIチャットのタブを開きっぱなし、またはエージェント/常時接続的な"
+                               "利用をしている可能性があります。")
+
             # ── 🔑 SSH鍵交換の成否 ──
             _ssh_sessions = res.get("ssh_handshakes", [])
             if _ssh_sessions:

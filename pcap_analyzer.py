@@ -221,6 +221,43 @@ TLS_ALERT_DESCS = {
     112: "unrecognized_name",
 }
 
+# 既知の主要生成AI/LLMサービスのホスト名サフィックス -> サービス表示名。
+# TLS ClientHelloのSNI(暗号化されない接続先ホスト名)と照合し、「どのAIサービスと
+# 通信しているか」を検知する（内容は暗号化されているため見えない。宛先の可視化のみ）。
+_AI_SERVICE_SNI_SUFFIXES = {
+    "anthropic.com":            "Anthropic (Claude API)",
+    "claude.ai":                "Claude.ai (Web/Chat)",
+    "openai.com":               "OpenAI (ChatGPT/API)",
+    "chatgpt.com":              "ChatGPT (Web)",
+    "generativelanguage.googleapis.com": "Google (Gemini API)",
+    "aistudio.google.com":      "Google AI Studio",
+    "gemini.google.com":        "Gemini (Web)",
+    "bard.google.com":          "Google Bard/Gemini (Web)",
+    "groq.com":                 "Groq API",
+    "api.mistral.ai":           "Mistral AI API",
+    "cohere.com":               "Cohere API",
+    "cohere.ai":                "Cohere API",
+    "perplexity.ai":            "Perplexity AI",
+    "x.ai":                     "xAI (Grok)",
+    "copilot.microsoft.com":    "Microsoft Copilot",
+    "huggingface.co":           "Hugging Face",
+}
+
+# セッション継続時間がこれを超えたら「長時間接続（張りっぱなしの可能性）」とみなす
+_AI_SESSION_LONGLIVED_SEC = 1800   # 30分
+
+
+def _match_ai_service(sni: str) -> str:
+    """SNIホスト名を既知の生成AI/LLMサービスと照合する（内容は見ない、宛先のみ）。"""
+    if not sni:
+        return ""
+    s = sni.lower().rstrip(".")
+    for suffix, label in _AI_SERVICE_SNI_SUFFIXES.items():
+        if s == suffix or s.endswith("." + suffix):
+            return label
+    return ""
+
+
 # TLS CipherSuite ID -> (簡易名, 弱点)。既知の脆弱/非推奨な組み合わせのみ収録。
 # （NULL暗号化・輸出グレード・RC4・DES・匿名鍵交換・静的RSA鍵交換(前方秘匿性なし)等）
 _WEAK_CIPHER_SUITES = {
@@ -1303,6 +1340,7 @@ def analyze_pcap(data: bytes) -> dict:
         "ip_fragments": [],
         "http_errors": [],    "http_summary": {},
         "tls_sessions": [],   "tls_alerts": [],
+        "ai_service_sessions": [],
         "tls_summary": {"sessions": 0, "unique_sites": 0, "fatal_alerts": 0,
                         "deprecated_tls": 0},
         "tls_handshakes": [], "tls_handshake_summary": {},
@@ -1363,6 +1401,8 @@ def analyze_pcap(data: bytes) -> dict:
     # TLS: canonical flow key -> {sni, tls_version}
     tls_flow_info: dict[tuple, dict] = {}
     tls_unique_sites: set = set()
+    # TLSフローの継続時間追跡（AIサービス宛の長時間接続＝張りっぱなし検知用）
+    tls_flow_duration: dict[tuple, dict] = {}
     # TLSハンドシェイク状態: ck -> {client_hello,server_hello,cert,server_ccs,
     #   client_ccs,app_data,fatal_alert,alert_desc,sni,version,client,server,port,ts}
     tls_hs: dict[tuple, dict] = {}
@@ -1643,6 +1683,13 @@ def analyze_pcap(data: bytes) -> dict:
                                 ck = (src, dst, sport, dport)
                             else:
                                 ck = (dst, src, dport, sport)
+
+                            # 継続時間追跡（長時間接続＝張りっぱなし検知用）
+                            _dur = tls_flow_duration.setdefault(ck, {
+                                "first_ts": ts, "last_ts": ts, "bytes": 0, "packets": 0})
+                            _dur["last_ts"]  = ts
+                            _dur["bytes"]   += len(payload_b)
+                            _dur["packets"] += 1
 
                             # ClientHello → SNI
                             ch = _parse_tls_client_hello(payload_b)
@@ -2165,6 +2212,31 @@ def analyze_pcap(data: bytes) -> dict:
 
     # TLS unique sites 集計
     result["tls_summary"]["unique_sites"] = len(tls_unique_sites)
+
+    # ── 生成AI/LLMサービス宛通信の検知（SNIベース。内容は見えないので宛先の可視化のみ） ──
+    for _ck, _info in tls_flow_info.items():
+        _sni = _info.get("sni") or ""
+        _service = _match_ai_service(_sni)
+        if not _service:
+            continue
+        _d = tls_flow_duration.get(_ck, {})
+        _first_ts = _d.get("first_ts", 0)
+        _last_ts  = _d.get("last_ts", 0)
+        _dur_sec  = round(_last_ts - _first_ts, 1)
+        result["ai_service_sessions"].append({
+            "service":     _service,
+            "sni":         _sni,
+            "client":      _ck[0],
+            "server":      _ck[1],
+            "server_port": _ck[3],
+            "first_seen":  _ts_str(_first_ts) if _first_ts else "",
+            "last_seen":   _ts_str(_last_ts) if _last_ts else "",
+            "duration_sec": _dur_sec,
+            "bytes":       _d.get("bytes", 0),
+            "packets":     _d.get("packets", 0),
+            "long_lived":  _dur_sec >= _AI_SESSION_LONGLIVED_SEC,
+        })
+    result["ai_service_sessions"].sort(key=lambda x: x["duration_sec"], reverse=True)
 
     # ICMP summary 変換
     result["icmp_summary"] = [
