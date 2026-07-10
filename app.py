@@ -1504,11 +1504,11 @@ _process_queue()
 # メインUI
 # ─────────────────────────────────────────
 (tab_health, tab1, tab_showlog, tab_prtg, tab2, tab3, tab4, tab5,
- tab_netflow, tab_pcap, tab_topo, tab_probe) = st.tabs([
+ tab_netflow, tab_pcap, tab_topo, tab_probe, tab_cloud) = st.tabs([
     "📊 品質ルーブリック", "📋 ログビューア", "📥 show log解析", "📟 MRTG風",
     "📊 テレメトリダッシュボード", "📡 SNMPモニター", "🗂️ 機器コンフィグ",
     "📖 セットアップガイド", "🌊 NetFlow", "📦 パケット解析",
-    "🗺️ トポロジー", "⏱️ 応答時間"
+    "🗺️ トポロジー", "⏱️ 応答時間", "☁️ クラウド監査ログ"
 ])
 
 # ═══════════════════════════════════════════
@@ -6113,3 +6113,115 @@ ip sla schedule 2 life forever start-time now""", language="text")
                 st.warning("IP SLA データが取得できませんでした。\n"
                            "- ip sla が設定・スケジュール済みか確認してください\n"
                            "- RESTCONF デバイスが登録済みか確認してください")
+
+with tab_cloud:
+    import cloud_audit_collector as _cac
+
+    st.markdown("## ☁️ クラウド監査ログ解析（IAM/ストレージ異常検知）")
+    st.caption(
+        "syslog/SNMP/NetFlow/pcapはネットワーク層（パケット・フロー）を見ますが、"
+        "IAMトークン悪用・不可能なトラベル・ストレージの大量ダウンロード・"
+        "スナップショットの不審なエクスポートは、クラウドの**コントロールプレーン層**"
+        "（誰が・どのAPIを・いつ・どこから呼んだか）を記録する監査ログ"
+        "（AWS CloudTrail / Azure Activity Log / GCP Audit Log 等）でしか見えません。"
+        "このタブはCloudTrail形式（ネイティブ）または汎用簡易形式のJSONを取り込んで解析します。"
+    )
+
+    with st.expander("🧪 実際のログが無くても試せます（サンプルデータ）",
+                      expanded=_cac.get_summary(24)["total_events"] == 0):
+        st.caption("不可能なトラベル・複数IP切替・クロスリージョン・大量ダウンロード・"
+                   "スナップショット急増の5パターンを投入してデモできます。")
+        _cc1, _cc2 = st.columns(2)
+        with _cc1:
+            if st.button("▶ サンプルデータ投入", use_container_width=True, key="cloud_sample_add"):
+                _cres = _cac.generate_sample_events()
+                st.success(f"{_cres['events_inserted']} 件投入しました")
+                st.rerun()
+        with _cc2:
+            if st.button("🗑 サンプルデータ削除", use_container_width=True,
+                         disabled=not _cac.has_sample_events(), key="cloud_sample_clear"):
+                _n = _cac.clear_sample_events()
+                st.info(f"{_n} 件削除しました")
+                st.rerun()
+
+    with st.expander("📥 監査ログを貼り付け/アップロード"):
+        st.caption("AWS CloudTrailのJSON（{\"Records\":[...]}形式）、JSON配列、単体JSON、"
+                   "またはNDJSON（1行1JSON）に対応。Azure/GCPネイティブ形式は未対応のため、"
+                   "汎用簡易形式（time/identity/source_ip/region/event_name/event_source/resource）"
+                   "に変換してから貼り付けてください。")
+        _cloud_text = st.text_area("監査ログJSON", height=150, key="cloud_audit_paste")
+        _cloud_file = st.file_uploader("または .json ファイルをアップロード",
+                                        type=["json", "log"], key="cloud_audit_upload")
+        if st.button("🔍 解析して取り込み", key="cloud_audit_ingest"):
+            _raw_text = _cloud_text
+            if _cloud_file is not None:
+                _raw_text = _cloud_file.read().decode("utf-8", errors="replace")
+            _events = _cac.parse_audit_log(_raw_text)
+            if _events:
+                _n = _cac.ingest_events(_events)
+                st.success(f"{_n} 件のイベントを取り込みました")
+                st.rerun()
+            else:
+                st.error("イベントを解析できませんでした。形式をご確認ください。")
+
+    _cloud_hours = st.select_slider(
+        "集計期間", options=[1, 6, 24, 72, 168], value=24,
+        format_func=lambda x: f"過去 {x} 時間", key="cloud_hours"
+    )
+    _cloud_sum = _cac.get_summary(_cloud_hours)
+
+    if _cloud_sum["total_events"] == 0:
+        st.info("まだ監査ログデータがありません。上のサンプルデータで画面イメージを確認するか、"
+                "監査ログを貼り付け/アップロードしてください。")
+    else:
+        st.markdown("### 📊 概要")
+        _cs1, _cs2, _cs3 = st.columns(3)
+        _cs1.metric("総イベント数", f"{_cloud_sum['total_events']:,}")
+        _cs2.metric("ユニークアイデンティティ", f"{_cloud_sum['unique_identities']:,}")
+        _cs3.metric("ユニークリージョン", f"{_cloud_sum['unique_regions']:,}")
+
+        st.markdown("---")
+        st.markdown("### 🚨 検知された異常")
+
+        _travel_alerts = _cac.get_impossible_travel_alerts(_cloud_hours)
+        if _travel_alerts:
+            st.markdown("**🌏 不可能なトラベル / 複数拠点からの短時間アクセス**")
+            st.caption("国判定はCN/HK/KP/MOのみ対応（geoip.py）。それ以外の国同士の移動は"
+                       "「不明」となり判定対象外です。国に依存しない複数IP切替検知も含みます。")
+            for a in _travel_alerts:
+                st.warning(f"🔴 {a['detail']}")
+
+        _region_alerts = _cac.get_cross_region_alerts(_cloud_hours)
+        if _region_alerts:
+            st.markdown("**🌐 クロスリージョンAPIバースト**")
+            for a in _region_alerts:
+                st.warning(f"🟡 {a['detail']}")
+
+        _dl_alerts = _cac.get_mass_download_alerts(_cloud_hours)
+        if _dl_alerts:
+            st.markdown("**📦 ストレージ大量ダウンロード**")
+            for a in _dl_alerts:
+                st.warning(f"🔴 {a['detail']}")
+
+        _snap_alerts = _cac.get_snapshot_export_alerts(_cloud_hours)
+        if _snap_alerts:
+            st.markdown("**💾 スナップショット/エクスポート急増**")
+            for a in _snap_alerts:
+                st.warning(f"🟡 {a['detail']}")
+
+        if not (_travel_alerts or _region_alerts or _dl_alerts or _snap_alerts):
+            st.success("✅ 現在の集計期間で異常なパターンは検出されていません。")
+
+        st.markdown("---")
+        st.markdown("### 📋 イベント一覧（直近500件）")
+        _cloud_events = _cac.get_recent_events(_cloud_hours, limit=500)
+        if _cloud_events:
+            df_cloud = pd.DataFrame(_cloud_events)
+            _cloud_cols = ["event_time", "identity", "source_ip", "country", "region",
+                           "event_name", "event_source", "event_class", "resource_name"]
+            df_cloud = df_cloud[[c for c in _cloud_cols if c in df_cloud.columns]].rename(columns={
+                "event_time": "時刻", "identity": "アイデンティティ", "source_ip": "送信元IP",
+                "country": "国", "region": "リージョン", "event_name": "イベント名",
+                "event_source": "サービス", "event_class": "分類", "resource_name": "リソース",
+            })
+            st.dataframe(df_cloud, use_container_width=True, hide_index=True)
