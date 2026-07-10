@@ -1281,6 +1281,7 @@ def analyze_pcap(data: bytes) -> dict:
         "rip_packets": [],    "arp_anomalies": [],
         "tcp_issues": [],     "tcp_retransmissions": [],
         "tcp_syn_no_synack": [], "tcp_zero_window": [],
+        "tcp_receiver_pressure": [], "tcp_path_congestion": [],
         "scan_patterns": [],
         "ctf_flag_hits": [],
         "dns_tunneling": [],
@@ -1334,6 +1335,12 @@ def analyze_pcap(data: bytes) -> dict:
     syn_ack_received: set            = set()
     zero_win_count: dict[tuple, int] = defaultdict(int)
     ip_frag_count:  dict[tuple, int] = defaultdict(int)
+    # TCPウィンドウ制御の原因切り分け用
+    # rwnd(受信ウィンドウ)の縮小トレンド: 受信側NIC/CPU/アプリの処理遅延を示す早期兆候
+    # （0に達する前の"じわじわ縮小"を捉える。scale係数は接続内で一定のため比率比較で十分）
+    win_trend: dict[tuple, dict] = {}
+    # 重複ACKバースト: 経路上のパケットロス/再送(cwnd自主規制)を示す兆候
+    dup_ack: dict[tuple, dict] = {}
     # 振る舞い検知用
     horiz_scan: dict[tuple, set]     = defaultdict(set)   # (src, dport) -> {dst,...} 横展開/ラテラルムーブメント
     conn_times: dict[tuple, list]    = defaultdict(list)  # (src, dst, dport) -> [ts,...] ビーコニング
@@ -1552,6 +1559,30 @@ def analyze_pcap(data: bytes) -> dict:
                         outbound_bytes[(src, dst)] += data_len
                     if tcp.win == 0 and not is_syn and not is_rst:
                         zero_win_count[(src, dst, sport, dport)] += 1
+
+                    # ── rwnd(受信ウィンドウ)縮小トレンド: 受信側NIC/CPU逼迫の早期兆候 ──
+                    # (0に達する前の"じわじわ縮小"。scale係数は接続内で一定なので比率で比較)
+                    if not is_syn and not is_rst:
+                        _wk = (src, dst, sport, dport)
+                        _wt = win_trend.setdefault(_wk, {"first_win": tcp.win, "min_win": tcp.win,
+                                                         "samples": 0, "low_count": 0})
+                        _wt["samples"] += 1
+                        if tcp.win < _wt["min_win"]:
+                            _wt["min_win"] = tcp.win
+                        if _wt["first_win"] > 500 and tcp.win < _wt["first_win"] * 0.2:
+                            _wt["low_count"] += 1
+
+                    # ── 重複ACKバースト: 経路上のパケットロス/再送(cwnd自主規制)の兆候 ──
+                    if is_ack and data_len == 0 and not is_syn and not is_rst:
+                        _dk = (src, dst, sport, dport)
+                        _da = dup_ack.setdefault(_dk, {"last_ack": None, "run": 0, "bursts": 0})
+                        if _da["last_ack"] == tcp.ack:
+                            _da["run"] += 1
+                            if _da["run"] == 3:   # 3重複ACK = fast retransmitトリガー相当
+                                _da["bursts"] += 1
+                        else:
+                            _da["last_ack"] = tcp.ack
+                            _da["run"] = 0
 
                     # ── 産業プロトコル: Modbus TCP（ポート502） ──
                     if data_len >= 8 and (dport == MODBUS_PORT or sport == MODBUS_PORT):
@@ -2027,6 +2058,47 @@ def analyze_pcap(data: bytes) -> dict:
                 "type": "ゼロウィンドウ", "src": src, "dst": dst, "src_port": sp, "dst_port": dp,
                 "count": cnt, "description": desc,
             })
+
+    # ── TCPウィンドウ制御の原因切り分け ──────────────────
+    # ①受信側(rwnd)要因: NIC/CPU/アプリの処理遅延で受信ウィンドウがじわじわ縮小
+    for (src, dst, sp, dp), wt in win_trend.items():
+        if wt["first_win"] <= 500 or wt["samples"] < 5:
+            continue
+        _shrink_ratio = wt["min_win"] / wt["first_win"]
+        if _shrink_ratio <= 0.2 and wt["low_count"] >= 3:
+            _hit_zero = zero_win_count.get((src, dst, sp, dp), 0)
+            result["tcp_receiver_pressure"].append({
+                "src": src, "dst": dst, "src_port": sp, "dst_port": dp,
+                "first_win": wt["first_win"], "min_win": wt["min_win"],
+                "shrink_pct": round(_shrink_ratio * 100, 1),
+                "low_count": wt["low_count"], "samples": wt["samples"],
+                "hit_zero": _hit_zero > 0, "zero_count": _hit_zero,
+                "detail": f"{src} の受信ウィンドウが初期値の{round(_shrink_ratio*100,1)}%まで縮小"
+                         f"（{wt['low_count']}/{wt['samples']}サンプルで低下）"
+                         + (f"、ゼロウィンドウ{_hit_zero}回に到達" if _hit_zero else "（0には未到達）")
+                         + f" — {src}側のNIC/CPU/アプリ処理遅延によるバッファ逼迫の可能性",
+                "remedy": f"{src} 側のNIC性能・CPU使用率・受信バッファ設定"
+                         "（ソケットバッファサイズ、オフロード設定等）を確認してください。",
+            })
+    result["tcp_receiver_pressure"].sort(key=lambda x: x["shrink_pct"])
+
+    # ②送信側(cwnd)要因: 重複ACKバースト = 経路上のパケットロス/再送(自主規制)の兆候
+    for (acker, sender, asp, adp), da in dup_ack.items():
+        if da["bursts"] < 1:
+            continue
+        _retrans_key = (sender, acker, adp, asp)   # データ送信方向(sender→acker)の再送カウント
+        _retrans_n = tcp_retrans_count.get(_retrans_key, 0)
+        result["tcp_path_congestion"].append({
+            "acker": acker, "sender": sender, "acker_port": asp, "sender_port": adp,
+            "dup_ack_bursts": da["bursts"], "retrans_count": _retrans_n,
+            "detail": f"{acker} が {sender} からのデータに対し重複ACKバーストを{da['bursts']}回検出"
+                     + (f"（対応する再送{_retrans_n}回と相関あり）" if _retrans_n else "")
+                     + " — 経路上のパケットロス/順序入れ替わりにより送信側が自主的に速度を"
+                       "絞っている(輻輳制御)可能性",
+            "remedy": "経路上の帯域差/輻輳を疑い、両端の中間区間（スイッチ/リンク速度）の"
+                     "帯域・エラーカウンタ・QoS設定を確認してください。",
+        })
+    result["tcp_path_congestion"].sort(key=lambda x: x["dup_ack_bursts"], reverse=True)
 
     # IP フラグメント
     for (src, dst, proto_num), cnt in ip_frag_count.items():

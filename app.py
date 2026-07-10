@@ -4647,6 +4647,39 @@ with tab_pcap:
                 df_zw.columns = ["Window=0送出IP", "通信相手IP", "送出Port", "相手Port", "発生回数", "説明"]
                 st.dataframe(df_zw, use_container_width=True, hide_index=True)
 
+            # ── 🪟 TCPウィンドウ制御の原因切り分け（受信側 vs 経路上） ──
+            _rx_pressure = res.get("tcp_receiver_pressure", [])
+            _path_cong = res.get("tcp_path_congestion", [])
+            if _rx_pressure or _path_cong:
+                st.markdown("---")
+                st.markdown("### 🔬 ウィンドウ制御の原因切り分け（受信側 vs 経路上）")
+                st.caption("TCPのウィンドウ制御には2種類あります。"
+                           "**①受信ウィンドウ(rwnd)**＝受信側のNIC/CPU/アプリが遅く、バッファが"
+                           "追いつかず縮小するケースと、"
+                           "**②輻輳ウィンドウ(cwnd)**＝経路上のロス/速度差を検知して送信側が"
+                           "自主的に速度を絞るケースです。重複ACKバースト・再送との相関から"
+                           "どちらが起きているかを切り分けます。")
+                if _rx_pressure:
+                    st.markdown("**① 受信側 NIC/CPU 逼迫の疑い（rwnd縮小トレンド）**")
+                    df_rx = pd.DataFrame([{
+                        "端末": r["src"], "相手": r["dst"],
+                        "初期Window": r["first_win"], "最小Window": r["min_win"],
+                        "縮小率": f"{r['shrink_pct']}%",
+                        "ゼロ到達": "○" if r["hit_zero"] else "",
+                        "内容": r["detail"],
+                    } for r in _rx_pressure])
+                    st.dataframe(df_rx, use_container_width=True, hide_index=True)
+                    st.warning("⚠️ " + _rx_pressure[0]["remedy"])
+                if _path_cong:
+                    st.markdown("**② 経路上の輻輳/パケットロスの疑い（重複ACKバースト）**")
+                    df_pc = pd.DataFrame([{
+                        "ACK送出側(受信者)": c["acker"], "データ送信側": c["sender"],
+                        "重複ACKバースト回数": c["dup_ack_bursts"], "再送回数": c["retrans_count"],
+                        "内容": c["detail"],
+                    } for c in _path_cong])
+                    st.dataframe(df_pc, use_container_width=True, hide_index=True)
+                    st.warning("⚠️ " + _path_cong[0]["remedy"])
+
             # ── DNS 解析 ────────────────────────────────
             _dns_sum = res.get("dns_summary", {})
             _dns_issues = res.get("dns_issues", [])
@@ -5550,6 +5583,7 @@ icmp.type == 5 or udp.port == 520
 | 🔁 TCP再送多発 | 同一シーケンス番号の再送（輻輳・ロス・遅延の検出） |
 | 🚫 接続失敗 | SYNに対してSYN-ACKが返ってこなかった通信 |
 | 🪟 ゼロウィンドウ | 受信バッファ枯渇によるフロー制御問題（スループット低下） |
+| 🔬 ウィンドウ制御の原因切り分け | 受信側NIC/CPU逼迫(rwnd縮小)と経路上の輻輳/ロス(cwnd・重複ACK)を区別 |
 | 🌐 DNS解析 | NXDOMAIN・SERVFAIL・REFUSED・応答遅延の検出 |
 | 🧩 IPフラグメント | MTU問題・Path MTU Discovery障害によるフラグメント化の検出 |
 | 🌍 HTTP解析 | 平文HTTPの応答コード集計・4xx/5xxエラー一覧 |

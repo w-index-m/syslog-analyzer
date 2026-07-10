@@ -1165,6 +1165,24 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
             _dst = i.get("dst","") + (f":{_dp}" if _dp else "")
             lines.append("    - " + i.get("type","") + " " + _src + "→" + _dst + " : " + i.get("description","")[:80])
 
+    # ウィンドウ制御の原因切り分け（受信側rwnd vs 経路上cwnd）
+    _rx_pressure = r.get("tcp_receiver_pressure", [])
+    _path_cong = r.get("tcp_path_congestion", [])
+    if _rx_pressure or _path_cong:
+        lines.append("")
+        lines.append(f"【TCPウィンドウ制御の原因切り分け】受信側逼迫{len(_rx_pressure)}件 / "
+                     f"経路上輻輳{len(_path_cong)}件")
+        for rp in _rx_pressure[:3]:
+            lines.append(f"    - [受信側rwnd] {rp['detail']}")
+        for pc in _path_cong[:3]:
+            lines.append(f"    - [経路上cwnd] {pc['detail']}")
+        lines.append("    ※TCPのウィンドウ制御には2種類ある。①rwnd(受信ウィンドウ)縮小は"
+                     "受信側ホストのNIC/CPU/アプリ処理遅延が原因（対処は受信側の機器を疑う）。"
+                     "②重複ACKバースト(cwnd反応)は経路上のパケットロス/速度差を送信側が検知して"
+                     "自主的に速度を絞っている状態（対処は経路上のリンク/スイッチを疑う）。"
+                     "この2つは原因箇所が全く異なるため、報告では明確に区別して"
+                     "どちらの可能性が高いかを述べてください。")
+
     if r.get("scan_patterns"):
         lines.append("")
         lines.append("【⚠️ ポートスキャン/DDoS(SYNフラッド)の統計的兆候（機械的に検出・確定情報）】")
