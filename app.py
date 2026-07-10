@@ -434,6 +434,8 @@ if "snmp_poller_started" not in st.session_state:
     st.session_state.snmp_poller_started = False
 if "netflow_started" not in st.session_state:
     st.session_state.netflow_started = False
+if "sflow_started" not in st.session_state:
+    st.session_state.sflow_started = False
 if "auto_analyze" not in st.session_state:
     st.session_state.auto_analyze = True
 if "judge_enabled" not in st.session_state:
@@ -592,6 +594,33 @@ with st.sidebar:
             st.success(f"✅ UDP {nf_port} NetFlow受信中")
         else:
             st.warning("⏸ NetFlow停止中")
+
+        # sFlow 制御
+        st.markdown("**📡 sFlow v5 受信**")
+        import sflow_collector as _sfc
+        sf_port = st.number_input("sFlow ポート", min_value=1024, max_value=65535,
+                                   value=6343, key="sflow_port_input")
+        col9, col10 = st.columns(2)
+        with col9:
+            if st.button("▶ sFlow起動", use_container_width=True,
+                         disabled=st.session_state.sflow_started):
+                srv = _sfc.get_server(port=int(sf_port))
+                srv.start()
+                if srv.running:
+                    st.session_state.sflow_started = True
+                    st.success(f"UDP {sf_port} 受信中")
+                else:
+                    st.error(srv.error or "起動失敗")
+        with col10:
+            if st.button("⏹ sFlow停止", use_container_width=True,
+                         disabled=not st.session_state.sflow_started):
+                _sfc.get_server().stop()
+                st.session_state.sflow_started = False
+                st.info("停止")
+        if st.session_state.sflow_started:
+            st.success(f"✅ UDP {sf_port} sFlow受信中")
+        else:
+            st.warning("⏸ sFlow停止中")
 
     st.markdown("---")
     st.markdown("### 🤖 AI解析エンジン")
@@ -3670,20 +3699,61 @@ output.logstash:
 # ═══════════════════════════════════════════
 with tab_netflow:
     import netflow_collector as _nfc2
+    import sflow_collector as _sfc2
 
-    st.markdown("## 🌊 NetFlow フロー解析")
-    st.caption("ルーターから送信される NetFlow v5 を受信・集計してトラフィックを可視化します。")
+    st.markdown("## 🌊 NetFlow / sFlow フロー解析")
+    st.caption("ルーター・スイッチから送信される NetFlow v5 / sFlow v5 を受信・集計し、"
+               "トラフィックを可視化します。")
 
-    if not st.session_state.netflow_started:
-        st.info("サイドバーから NetFlow サーバーを起動してください。\n\n"
-                "**ルーター側の設定例（Cisco IOS-XE）:**\n```\n"
+    with st.expander("🧪 実機がなくても試せます（サンプルデータ）", expanded=not (
+            st.session_state.netflow_started or st.session_state.sflow_started
+            or _nfc2.get_summary(24)["total_flows"] > 0)):
+        st.caption("NetFlow/sFlowはルーター・スイッチが能動的にUDPで送ってくる"
+                   "リアルタイム受信方式のため、実機が無い環境では下のボタンでデモ用データを"
+                   "投入して画面イメージを確認できます（いつでも削除できます）。")
+        _sd_c1, _sd_c2, _sd_c3, _sd_c4 = st.columns(4)
+        with _sd_c1:
+            if st.button("▶ フローのサンプル投入", use_container_width=True):
+                _res = _nfc2.generate_sample_data()
+                st.success(f"{_res['flows_inserted']} 件投入しました")
+                st.rerun()
+        with _sd_c2:
+            if st.button("🗑 フローのサンプル削除", use_container_width=True,
+                         disabled=not _nfc2.has_sample_data()):
+                _n = _nfc2.clear_sample_data()
+                st.info(f"{_n} 件削除しました")
+                st.rerun()
+        with _sd_c3:
+            if st.button("▶ IF障害のサンプル投入", use_container_width=True):
+                _res2 = _sfc2.generate_sample_counters()
+                st.success(f"IF{_res2['if_index']}（{_res2['agent_ip']}）に "
+                           f"{_res2['samples']} 件投入しました")
+                st.rerun()
+        with _sd_c4:
+            if st.button("🗑 IF障害のサンプル削除", use_container_width=True,
+                         disabled=not _sfc2.has_sample_counters()):
+                _n2 = _sfc2.clear_sample_counters()
+                st.info(f"{_n2} 件削除しました")
+                st.rerun()
+
+    _nf_has_any = (st.session_state.netflow_started or st.session_state.sflow_started
+                   or _nfc2.get_summary(24)["total_flows"] > 0)
+
+    if not _nf_has_any:
+        st.info("サイドバーから NetFlow / sFlow サーバーを起動するか、上のサンプルデータで"
+                "画面イメージを確認してください。\n\n"
+                "**ルーター側の設定例（Cisco IOS-XE / NetFlow v5）:**\n```\n"
                 "ip flow-export version 5\n"
                 "ip flow-export destination <このPCのIP> 9995\n"
                 "ip flow-cache timeout active 1\n"
                 "!\n"
                 "interface GigabitEthernet1/0/1\n"
                 " ip flow ingress\n"
-                " ip flow egress\n```")
+                " ip flow egress\n```\n"
+                "**スイッチ側の設定例（Arista EOS / sFlow v5）:**\n```\n"
+                "sflow sample 1000\n"
+                "sflow destination <このPCのIP> 6343\n"
+                "sflow run\n```")
     else:
         _nf_hours = st.select_slider(
             "集計期間", options=[1, 3, 6, 12, 24], value=1,
@@ -3703,6 +3773,37 @@ with tab_netflow:
         _nc3.metric("総パケット数",  f"{_nf_sum['total_packets']:,}")
         _nc4.metric("ユニーク送信元", f"{_nf_sum['unique_src']:,}")
         _nc5.metric("エクスポーター", f"{_nf_sum['exporters']:,}")
+
+        # ── 情報源内訳（NetFlow / sFlow） ──
+        _nf_src_breakdown = _nfc2.get_source_breakdown(_nf_hours)
+        if _nf_src_breakdown:
+            _src_labels = {"netflow5": "🌊 NetFlow v5", "sflow": "📡 sFlow v5"}
+            _src_cols = st.columns(len(_nf_src_breakdown))
+            for _sc, (_src_key, _src_val) in zip(_src_cols, _nf_src_breakdown.items()):
+                _sc.metric(_src_labels.get(_src_key, _src_key),
+                           f"{_src_val['flows']:,} フロー",
+                           f"{_src_val['total_bytes']/1024/1024:.1f} MB")
+
+        # ── トラフィック図解（フロー図） ──
+        st.markdown("---")
+        st.markdown("### 🗺️ トラフィック図解（フロー図）")
+        st.caption("送信元IP → 宛先IPの通信量を有向グラフで図解します（線が太いほど通信量が多い）。")
+        _nf_pairs = _nfc2.get_top_flow_pairs(_nf_hours, limit=20)
+        if _nf_pairs:
+            st.graphviz_chart(_nfc2.build_flow_diagram_dot(_nf_pairs), use_container_width=True)
+        else:
+            st.info("データなし")
+
+        # ── sFlow インターフェース障害（バッファ/キュー枯渇） ──
+        _sf_issues = _sfc2.get_interface_issues(_nf_hours)
+        if _sf_issues:
+            st.markdown("---")
+            st.markdown("### 🧯 sFlow インターフェース障害検出（バッファ/キュー枯渇）")
+            st.caption("sFlowのCounter Sample（IFカウンタ）から入出力の破棄率を算出し、"
+                       "閾値（0.1%）を超えたインターフェースを検出します。")
+            for _issue in _sf_issues:
+                _sev = "🔴" if _issue["discard_pct"] >= 1.0 else "🟡"
+                st.warning(f"{_sev} {_issue['detail']}")
 
         # ── タイムライン ──
         _nf_timeline = _nfc2.get_traffic_timeline(_nf_hours)

@@ -13,12 +13,13 @@ NetFlow v5 受信サーバー
      ip flow egress
 """
 import os
+import random
 import struct
 import socket
 import sqlite3
 import threading
 import socketserver
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 DB_PATH      = Path(os.environ.get("DB_PATH", str(Path(__file__).parent / "syslog.db")))
@@ -58,15 +59,23 @@ def _init_tables():
                 packets     INTEGER DEFAULT 0,
                 bytes       INTEGER DEFAULT 0,
                 tcp_flags   INTEGER DEFAULT 0,
-                tos         INTEGER DEFAULT 0
+                tos         INTEGER DEFAULT 0,
+                source      TEXT DEFAULT 'netflow5'
             )
         """)
+        # 既存DB向けマイグレーション（sourceカラムが無い場合のみ追加）
+        try:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(netflow_flows)").fetchall()]
+            if "source" not in cols:
+                conn.execute("ALTER TABLE netflow_flows ADD COLUMN source TEXT DEFAULT 'netflow5'")
+        except Exception:
+            pass
         conn.execute("CREATE INDEX IF NOT EXISTS idx_nf_recv ON netflow_flows(received_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_nf_exp  ON netflow_flows(exporter_ip)")
         conn.commit()
 
 
-def _save_flows(flows: list[dict]):
+def _save_flows(flows: list[dict], source: str = "netflow5"):
     if not flows:
         return
     _init_tables()
@@ -75,11 +84,12 @@ def _save_flows(flows: list[dict]):
         conn.executemany("""
             INSERT INTO netflow_flows
             (received_at, exporter_ip, src_ip, dst_ip,
-             src_port, dst_port, protocol, packets, bytes, tcp_flags, tos)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+             src_port, dst_port, protocol, packets, bytes, tcp_flags, tos, source)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
         """, [(now, f["exporter_ip"], f["src_ip"], f["dst_ip"],
                f["src_port"], f["dst_port"], f["protocol"],
-               f["packets"], f["bytes"], f["tcp_flags"], f["tos"])
+               f["packets"], f["bytes"], f["tcp_flags"], f["tos"],
+               f.get("source", source))
               for f in flows])
         conn.commit()
 
@@ -154,9 +164,9 @@ class NetFlowServer:
         try:
             self._srv = socketserver.UDPServer((self.host, self.port), _Handler)
             self._srv.socket.settimeout(1.0)
+            self.running = True   # スレッド開始前に立てる（開始直後のwhileチェックのレース回避）
             self._th = threading.Thread(target=self._serve, daemon=True)
             self._th.start()
-            self.running = True
             self.error   = None
             print(f"[NetFlowServer] UDP {self.host}:{self.port}")
         except Exception as e:
@@ -388,6 +398,145 @@ def get_ddos_alerts(hours: int = 1) -> list[dict]:
 # ─────────────────────────────────────────
 # 帯域トレンド（容量計画用）
 # ─────────────────────────────────────────
+
+def get_source_breakdown(hours: int = 1) -> dict:
+    """NetFlow由来 / sFlow由来のフロー内訳を返す（両対応の可視化用）。"""
+    _init_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT COALESCE(source, 'netflow5') as source,
+                   COUNT(*) as flows, COALESCE(SUM(bytes),0) as total_bytes
+            FROM netflow_flows
+            WHERE received_at >= datetime('now', ? || ' hours')
+            GROUP BY source
+        """, (f"-{hours}",)).fetchall()
+        return {r["source"]: {"flows": r["flows"], "total_bytes": r["total_bytes"]} for r in rows}
+
+
+def get_top_flow_pairs(hours: int = 1, limit: int = 15) -> list[dict]:
+    """送信元→宛先ペアで集計する（フロー図解＝Graphvizダイアグラム用）。"""
+    _init_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT src_ip, dst_ip,
+                   SUM(bytes)   as total_bytes,
+                   SUM(packets) as total_packets,
+                   COUNT(*)     as flows
+            FROM netflow_flows
+            WHERE received_at >= datetime('now', ? || ' hours')
+            GROUP BY src_ip, dst_ip ORDER BY total_bytes DESC LIMIT ?
+        """, (f"-{hours}", limit)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def build_flow_diagram_dot(pairs: list[dict], max_nodes: int = 25) -> str:
+    """
+    送信元→宛先ペアの集計から Graphviz DOT 文字列を生成する（トラフィックの図解）。
+    エッジの太さ(penwidth)・色でおおまかな通信量を表現する。
+    """
+    if not pairs:
+        return 'digraph G {\n  "（データなし）" [shape=box fillcolor="#ffe0e0" style=filled];\n}'
+    max_bytes = max(p["total_bytes"] for p in pairs) or 1
+    nodes: set[str] = set()
+    lines = [
+        "digraph G {",
+        "  layout=neato; overlap=false; splines=true;",
+        '  node [shape=box style=filled fillcolor="#d0e8ff" fontname="sans-serif" fontsize=10];',
+        '  edge [fontname="sans-serif" fontsize=8 color="#4a7d97"];',
+    ]
+    for p in pairs[:max_nodes]:
+        src, dst = p["src_ip"], p["dst_ip"]
+        nodes.add(src); nodes.add(dst)
+        ratio = p["total_bytes"] / max_bytes
+        penwidth = round(1 + ratio * 7, 1)
+        mb = p["total_bytes"] / 1024 / 1024
+        label = f"{mb:.1f}MB" if mb >= 0.1 else f"{p['total_bytes']}B"
+        lines.append(f'  "{src}" -> "{dst}" [penwidth={penwidth} label="{label}"];')
+    lines.append("}")
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────
+# サンプルデータ（実機なしでデモ表示を試すため）
+# ─────────────────────────────────────────
+
+_SAMPLE_TOS = 250   # サンプル投入行の目印（実トラフィックでは通常使われない値）
+
+
+def generate_sample_data(hours_span: float = 1.0) -> dict:
+    """
+    デモ用のサンプルフローデータを生成してDBに投入する。
+    NetFlow/sFlowの実機（ルーター/スイッチ）が無くても、トップトーカー・
+    プロトコル分布・フロー図解・DDoS検出などの表示イメージを確認できる。
+    """
+    _init_tables()
+    now = datetime.now()
+    rng = random.Random(42)
+
+    internal_hosts = [f"10.0.{i}.{j}" for i in (1, 2) for j in (10, 11, 12, 20)]
+    external_hosts = ["203.0.113.5", "198.51.100.9", "192.0.2.44", "203.0.113.77"]
+    attacker_ip = "198.51.100.200"
+    victim = internal_hosts[0]
+
+    rows = []
+
+    def add(exporter, src, dst, sport, dport, proto, pkts, bytes_, flags, ts, source):
+        rows.append((ts.isoformat(), exporter, src, dst, sport, dport,
+                      proto, pkts, bytes_, flags, _SAMPLE_TOS, source))
+
+    for _ in range(120):
+        ts = now - timedelta(seconds=rng.uniform(0, hours_span * 3600))
+        dport = rng.choice([443, 443, 443, 80, 53, 22])
+        proto = 17 if dport == 53 else 6
+        pkts = rng.randint(5, 200)
+        add("192.168.100.1", rng.choice(internal_hosts), rng.choice(external_hosts),
+            rng.randint(40000, 60000), dport, proto, pkts, pkts * rng.randint(64, 1400),
+            0x18, ts, rng.choice(["netflow5", "sflow"]))
+
+    for _ in range(3):
+        ts = now - timedelta(seconds=rng.uniform(0, hours_span * 3600))
+        add("192.168.100.2", rng.choice(internal_hosts), rng.choice(external_hosts),
+            rng.randint(40000, 60000), 443, 6, 50000, 180_000_000, 0x18, ts, "sflow")
+
+    for port in range(1, 90):
+        ts = now - timedelta(seconds=rng.uniform(0, hours_span * 3600))
+        add("192.168.100.1", attacker_ip, victim, rng.randint(1024, 65000), port,
+            6, 1, 60, 0x02, ts, "netflow5")
+
+    for _ in range(150):
+        ts = now - timedelta(seconds=rng.uniform(0, hours_span * 3600))
+        add("192.168.100.1", attacker_ip, victim, rng.randint(1024, 65000), 80,
+            6, 1, 60, 0x02, ts, "netflow5")
+
+    with sqlite3.connect(DB_PATH, check_same_thread=False) as conn:
+        conn.executemany("""
+            INSERT INTO netflow_flows
+            (received_at, exporter_ip, src_ip, dst_ip, src_port, dst_port,
+             protocol, packets, bytes, tcp_flags, tos, source)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        """, rows)
+        conn.commit()
+    return {"flows_inserted": len(rows)}
+
+
+def clear_sample_data() -> int:
+    """generate_sample_data() で投入したデモ行のみを削除する（実データは残す）。"""
+    _init_tables()
+    with sqlite3.connect(DB_PATH, check_same_thread=False) as conn:
+        cur = conn.execute("DELETE FROM netflow_flows WHERE tos = ?", (_SAMPLE_TOS,))
+        conn.commit()
+        return cur.rowcount
+
+
+def has_sample_data() -> bool:
+    _init_tables()
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT 1 FROM netflow_flows WHERE tos = ? LIMIT 1",
+                            (_SAMPLE_TOS,)).fetchone()
+        return row is not None
+
 
 def get_bandwidth_history(days: int = 7) -> list[dict]:
     """時間別帯域使用量（容量計画・トレンド分析用）"""
