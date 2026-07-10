@@ -17,6 +17,7 @@ from datetime import datetime
 
 import dpkt
 
+import ai_service_domains as _ai_svc
 
 # ══════════════════════════════════════════════════════════════════
 #  アップロード自動解凍（zip/gzip でまとめられた pcap・syslog を展開）
@@ -221,41 +222,11 @@ TLS_ALERT_DESCS = {
     112: "unrecognized_name",
 }
 
-# 既知の主要生成AI/LLMサービスのホスト名サフィックス -> サービス表示名。
+# 既知の主要生成AI/LLMサービスの判定（ai_service_domains.py で共用）。
 # TLS ClientHelloのSNI(暗号化されない接続先ホスト名)と照合し、「どのAIサービスと
 # 通信しているか」を検知する（内容は暗号化されているため見えない。宛先の可視化のみ）。
-_AI_SERVICE_SNI_SUFFIXES = {
-    "anthropic.com":            "Anthropic (Claude API)",
-    "claude.ai":                "Claude.ai (Web/Chat)",
-    "openai.com":               "OpenAI (ChatGPT/API)",
-    "chatgpt.com":              "ChatGPT (Web)",
-    "generativelanguage.googleapis.com": "Google (Gemini API)",
-    "aistudio.google.com":      "Google AI Studio",
-    "gemini.google.com":        "Gemini (Web)",
-    "bard.google.com":          "Google Bard/Gemini (Web)",
-    "groq.com":                 "Groq API",
-    "api.mistral.ai":           "Mistral AI API",
-    "cohere.com":               "Cohere API",
-    "cohere.ai":                "Cohere API",
-    "perplexity.ai":            "Perplexity AI",
-    "x.ai":                     "xAI (Grok)",
-    "copilot.microsoft.com":    "Microsoft Copilot",
-    "huggingface.co":           "Hugging Face",
-}
-
-# セッション継続時間がこれを超えたら「長時間接続（張りっぱなしの可能性）」とみなす
-_AI_SESSION_LONGLIVED_SEC = 1800   # 30分
-
-
-def _match_ai_service(sni: str) -> str:
-    """SNIホスト名を既知の生成AI/LLMサービスと照合する（内容は見ない、宛先のみ）。"""
-    if not sni:
-        return ""
-    s = sni.lower().rstrip(".")
-    for suffix, label in _AI_SERVICE_SNI_SUFFIXES.items():
-        if s == suffix or s.endswith("." + suffix):
-            return label
-    return ""
+_AI_SESSION_LONGLIVED_SEC = _ai_svc.AI_SESSION_LONGLIVED_SEC
+_match_ai_service = _ai_svc.match_ai_service
 
 
 # TLS CipherSuite ID -> (簡易名, 弱点)。既知の脆弱/非推奨な組み合わせのみ収録。
