@@ -314,18 +314,24 @@ def evaluate_device_health(source_ip: str, hostname: str,
                 issues.append({"level": "warning", "category": "ブロードキャスト",
                               "msg": f"IF {ifidx} ブロードキャスト多め: {bc}%"})
 
-        # 破棄
+        # 破棄（ifOutDiscards/ifInDiscards＝スイッチ自身が報告するバッファ/キュー溢れ）
         disc = tp.get("discard_pct")
+        util = tp.get("bandwidth_util_pct")
         if disc is not None:
             th = HEALTH_THRESHOLDS["discard_pct"]
+            _util_note = ""
+            if util is not None and util >= 80:
+                _util_note = f"、使用率も{util}%と高い→速度差(上流がより高速なリンク)によるegressバッファ枯渇の疑い"
             if disc >= th["critical"]:
                 score -= 12
                 issues.append({"level": "critical", "category": "破棄",
-                              "msg": f"IF {ifidx} パケット破棄多発: {disc}% (輻輳の疑い)"})
+                              "msg": f"IF {ifidx} パケット破棄多発: {disc}%"
+                                     f"（バッファ/キュー枯渇の疑い{_util_note}）"})
             elif disc >= th["warning"]:
                 score -= 5
                 issues.append({"level": "warning", "category": "破棄",
-                              "msg": f"IF {ifidx} パケット破棄: {disc}%"})
+                              "msg": f"IF {ifidx} パケット破棄: {disc}%"
+                                     f"（バッファ/キュー枯渇の可能性{_util_note}）"})
 
         # エラー
         err = tp.get("error_pct")

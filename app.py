@@ -4679,6 +4679,26 @@ with tab_pcap:
                     } for c in _path_cong])
                     st.dataframe(df_pc, use_container_width=True, hide_index=True)
                     st.warning("⚠️ " + _path_cong[0]["remedy"])
+                    # SNMP監視中の機器で同時にdiscard急増が出ていれば、経路上の犯人を特定できる
+                    try:
+                        _health_by_ip = {h["source_ip"]: h for h in he.get_latest_health_all()}
+                    except Exception:
+                        _health_by_ip = {}
+                    _pc_hosts = {ip for c in _path_cong for ip in (c["acker"], c["sender"])}
+                    _corroborated = []
+                    for _ip in _pc_hosts:
+                        _dh = _health_by_ip.get(_ip)
+                        if not _dh:
+                            continue
+                        for _iss in _dh.get("issues", []):
+                            if _iss.get("category") == "破棄":
+                                _corroborated.append((_ip, _iss["msg"]))
+                    if _corroborated:
+                        st.error("🎯 **SNMP監視データと相関**: 以下の機器でも同時期にパケット破棄"
+                                 "（バッファ/キュー枯渇）が報告されており、pcapの重複ACKバーストと"
+                                 "整合します。経路上の犯人を特定できる可能性が高いです。")
+                        for _ip, _msg in _corroborated:
+                            st.markdown(f"　🔴 **{_ip}**: {_msg}")
 
             # ── DNS 解析 ────────────────────────────────
             _dns_sum = res.get("dns_summary", {})

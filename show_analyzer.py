@@ -231,6 +231,54 @@ def _check_intf_brief(body: str, anoms: list):
             pass  # 意図的shutdown（設定由来）なので単体では警告しない
 
 
+# show interface(詳細形式)の1インターフェース分ブロックの開始行
+# 例: "GigabitEthernet1/0/1 is up, line protocol is up"
+_INTF_BLOCK_RE = re.compile(r"^(\S+)\s+is\s+(up|down|administratively down)", re.IGNORECASE | re.MULTILINE)
+# バッファ/キュー破棄系カウンタ（Cisco IOS/IOS-XE系の代表的な表記ゆれに対応）
+_INTF_QUEUE_DROP_RE = re.compile(r"input\s+queue:\s*\d+/\d+/(\d+)/(\d+)", re.IGNORECASE)
+_INTF_NO_BUFFER_RE = re.compile(r"(\d+)\s+no\s+buffer", re.IGNORECASE)
+_INTF_OUT_DROPS_RE = re.compile(r"total\s+output\s+drops?:?\s*(\d+)", re.IGNORECASE)
+_INTF_OUT_BUFFER_FAIL_RE = re.compile(r"(\d+)\s+output\s+buffer\s+failures?", re.IGNORECASE)
+
+
+def _check_intf_buffer_drops(body: str, anoms: list):
+    """
+    show interface <name>(詳細形式)からバッファ/キュー破棄カウンタを検出する。
+    ifOutDiscards(SNMP)と同じ現象をテキストログからも拾えるようにする。
+    10G→1G等の速度差(egress側の細いリンク)によるバッファ枯渇が典型原因。
+    """
+    if not body:
+        return
+    starts = [(m.start(), m.group(1)) for m in _INTF_BLOCK_RE.finditer(body)]
+    if not starts:
+        return
+    for i, (pos, ifname) in enumerate(starts):
+        end = starts[i + 1][0] if i + 1 < len(starts) else len(body)
+        block = body[pos:end]
+        findings = []
+        m = _INTF_QUEUE_DROP_RE.search(block)
+        if m and int(m.group(1)) > 0:
+            findings.append(f"入力キュー破棄 {m.group(1)}件（フラッシュ{m.group(2)}件）")
+        m = _INTF_NO_BUFFER_RE.search(block)
+        if m and int(m.group(1)) > 0:
+            findings.append(f"no buffer {m.group(1)}件")
+        m = _INTF_OUT_DROPS_RE.search(block)
+        if m and int(m.group(1)) > 0:
+            findings.append(f"出力破棄(total output drops) {m.group(1)}件")
+        m = _INTF_OUT_BUFFER_FAIL_RE.search(block)
+        if m and int(m.group(1)) > 0:
+            findings.append(f"出力バッファ失敗 {m.group(1)}件")
+        if findings:
+            _add(anoms, "WARNING", "バッファ/キュー破棄",
+                 f"{ifname}: {' / '.join(findings)} — バッファ/キュー枯渇の可能性",
+                 f"{ifname}: " + " / ".join(findings),
+                 remedy=f"{ifname} がegress側(出口)の場合、上流により高速なリンクが繋がっている"
+                        "（例: 10G→1Gの速度差）とバッファ枯渇の典型原因になります。"
+                        "対向・上流インターフェースの速度(speed)と使用率(bandwidth utilization)を比較し、"
+                        f"この{ifname}側だけ使用率が高い/discardsが伸びていれば速度差によるボトルネックです。"
+                        "QoS/バッファ設定の見直し、または上位リンクとの速度整合を検討してください。")
+
+
 def _check_license(sections_text: str, anoms: list):
     if re.search(r"no valid license", sections_text, re.IGNORECASE):
         _add(anoms, "WARNING", "ライセンス",
@@ -477,6 +525,9 @@ def check_anomalies(sections: list) -> dict:
         elif s["kind"] == "ike_debug":
             ike_findings.extend(_check_ike_debug(s["body"], anoms))
             extra_parts.append(f"[IKE/IPsecデバッグログ: {s.get('cmd','')}]\n{s['body'][:4000]}")
+        elif s["kind"] == "interfaces":
+            _check_intf_buffer_drops(s["body"], anoms)
+            extra_parts.append(f"[show interfaces: {s.get('cmd','')}]\n{s['body']}")
         else:
             # interfaces / cpu / cdp / f5_virtual / cert / panos_threat / system_info / other
             # 等は専用チェックが無いため LLM 相関解析へ回す
