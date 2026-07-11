@@ -5484,6 +5484,57 @@ with tab_pcap:
                             df_ls = pd.DataFrame(_ls_res["sessions"])
                             st.dataframe(df_ls, use_container_width=True, hide_index=True)
 
+            # ── 🦈 pyshark/tshark連携（Wireshark全ディセクタ・Expert Info） ──
+            st.markdown("---")
+            st.markdown("### 🦈 Wireshark深掘り解析（pyshark/tshark連携）")
+            st.caption(
+                "Wiresharkの数千のプロトコルディセクタと **Expert Info**（Wireshark自身が"
+                "検出した再送・不正パケット・シーケンス異常等）で、当アプリの手書きパーサ"
+                "（主要約20プロトコル）を補完します（[pyshark](https://github.com/KimiNewt/pyshark)＋"
+                "tshark本体が必要・任意機能。Streamlit Cloud等tsharkを導入できない環境では"
+                "利用できません）。"
+            )
+            import pyshark_bridge as _pb
+            if not _pb.TSHARK_AVAILABLE:
+                st.info("tsharkが見つかりません。使う場合は `apt install tshark`（Debian/Ubuntu）"
+                        "等でtsharkを導入し、`pip install pyshark` してください。")
+            else:
+                _pb_bytes = st.session_state.get("_pcap_bytes")
+                if st.button("🦈 tsharkで深掘り解析", key="pyshark_run"):
+                    with st.spinner("tsharkで解析中..."):
+                        _pb_res = _pb.analyze_with_tshark(_pb_bytes) if _pb_bytes else {"available": True, "error": "pcapデータがありません。"}
+                    st.session_state["_pyshark_res"] = _pb_res
+                _pb_res = st.session_state.get("_pyshark_res")
+                if _pb_res:
+                    if _pb_res.get("error"):
+                        st.error(_pb_res["error"])
+                    else:
+                        _beyond = _pb_res.get("protocols_beyond_builtin", [])
+                        if _beyond:
+                            st.warning("🔎 当アプリの手書きパーサでは個別解析していないが、"
+                                       "tsharkが検出したプロトコル: **" + ", ".join(_beyond) + "**")
+                        else:
+                            st.caption("当アプリが個別対応済みのプロトコルのみ検出されました。")
+
+                        _expert = _pb_res.get("expert_info", [])
+                        if _expert:
+                            st.markdown("**⚠️ Wireshark Expert Info（検出された注意事項）**")
+                            _sev_icon = {"error": "🔴", "warn": "🟠", "note": "🟡", "chat": "💬"}
+                            df_exp = pd.DataFrame([{
+                                "重大度": f"{_sev_icon.get(e['severity'],'')} {e['severity_label']}",
+                                "件数": e["count"], "プロトコル": e["protocol"], "内容": e["message"],
+                            } for e in _expert])
+                            st.dataframe(df_exp, use_container_width=True, hide_index=True)
+
+                        _hier = _pb_res.get("protocol_hierarchy", [])
+                        if _hier:
+                            with st.expander("📊 プロトコル階層（Protocol Hierarchy）"):
+                                df_hier = pd.DataFrame([{
+                                    "プロトコル": "　" * h["depth"] + h["protocol"],
+                                    "フレーム数": h["frames"], "バイト数": h["bytes"],
+                                } for h in _hier])
+                                st.dataframe(df_hier, use_container_width=True, hide_index=True)
+
             # ── 🔑 SSH鍵交換の成否 ──
             _ssh_sessions = res.get("ssh_handshakes", [])
             if _ssh_sessions:
