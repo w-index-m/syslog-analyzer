@@ -191,7 +191,7 @@ def _show_table_top_n(df, csv_name: str, dl_key: str, limit: int = 20):
     """
     if len(df) > limit:
         st.caption(f"{len(df)}件あるため、上位{limit}件のみ表示します（全件はCSVでダウンロードできます）。")
-        st.dataframe(df.head(limit), use_container_width=True, hide_index=True)
+        st.dataframe(df.head(limit), width='stretch', hide_index=True)
         st.download_button(
             "📥 全件をCSVでダウンロード",
             data=df.to_csv(index=False).encode("utf-8-sig"),
@@ -200,7 +200,7 @@ def _show_table_top_n(df, csv_name: str, dl_key: str, limit: int = 20):
             key=dl_key,
         )
     else:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width='stretch', hide_index=True)
 
 
 def _render_pcap_ai_diagnosis(res: dict, key_prefix: str = "main"):
@@ -224,7 +224,7 @@ def _render_pcap_ai_diagnosis(res: dict, key_prefix: str = "main"):
         f"非アジア圏{_rh.get('western_domains',0)}）")
     with _ai_col2:
         _pcap_ai_btn = st.button("🤖 AI診断実行", key=f"pcap_ai_diag_{key_prefix}",
-                                 disabled=not _llm_ok, use_container_width=True,
+                                 disabled=not _llm_ok, width='stretch',
                                  type="primary")
     if not _llm_ok:
         st.caption("AI診断を使うにはサイドバーの「🔑 APIキー設定」でClaude / Gemini / Groqのいずれかを設定してください。")
@@ -267,7 +267,7 @@ def _render_pcap_ai_diagnosis(res: dict, key_prefix: str = "main"):
                          "ツール呼び出しで取得してから診断します（Claude APIのみ対応・MVP）。")
         with _ag_col2:
             _agentic_btn = st.button("🕵️ 実行", key=f"pcap_agentic_{key_prefix}",
-                                      use_container_width=True)
+                                      width='stretch')
         _agentic_state_key = f"_pcap_agentic_{key_prefix}"
         if _agentic_btn:
             with st.spinner("Claudeがツール呼び出しで深掘りしながら分析中..."):
@@ -304,7 +304,7 @@ def _render_pcap_ai_diagnosis(res: dict, key_prefix: str = "main"):
                     "比較するモデルを選択", _installed_models,
                     default=_installed_models[:2], key=f"ollama_multi_sel_{key_prefix}")
                 if st.button("▶ 選択したモデルで比較解析", key=f"ollama_multi_run_{key_prefix}",
-                             disabled=not _sel_models, use_container_width=True):
+                             disabled=not _sel_models, width='stretch'):
                     _multi_results = {}
                     _progress = st.progress(0.0)
                     for _mi, _mname in enumerate(_sel_models):
@@ -468,7 +468,7 @@ with st.sidebar:
         st.markdown("### 🔒 管理者ログイン")
         if _is_admin_authenticated():
             st.success("✅ 管理者ログイン中（アップロード上限なし）")
-            if st.button("ログアウト", key="_admin_logout_btn", use_container_width=True):
+            if st.button("ログアウト", key="_admin_logout_btn", width='stretch'):
                 st.session_state["_admin_authenticated"] = False
                 st.rerun()
         else:
@@ -494,7 +494,7 @@ with st.sidebar:
     
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("▶ 起動", use_container_width=True,
+            if st.button("▶ 起動", width='stretch',
                          disabled=st.session_state.server_started):
                 srv = syslog_server.get_server(port=int(port))
                 srv.start()
@@ -505,7 +505,7 @@ with st.sidebar:
                 else:
                     st.error(srv.error or "起動失敗")
         with col2:
-            if st.button("⏹ 停止", use_container_width=True,
+            if st.button("⏹ 停止", width='stretch',
                          disabled=not st.session_state.server_started):
                 srv = syslog_server.get_server()
                 srv.stop()
@@ -533,7 +533,7 @@ with st.sidebar:
     
         col3, col4 = st.columns(2)
         with col3:
-            if st.button("▶ Trap起動", use_container_width=True,
+            if st.button("▶ Trap起動", width='stretch',
                          disabled=st.session_state.snmp_trap_started):
                 communities = [c.strip() for c in snmp_communities.split(",")]
                 srv = snmp_trap_server.get_snmp_server(port=int(snmp_port), communities=communities)
@@ -545,7 +545,7 @@ with st.sidebar:
                 else:
                     st.error(srv.error or "起動失敗")
         with col4:
-            if st.button("⏹ Trap停止", use_container_width=True,
+            if st.button("⏹ Trap停止", width='stretch',
                          disabled=not st.session_state.snmp_trap_started):
                 snmp_trap_server.get_snmp_server().stop()
                 st.session_state.snmp_trap_started = False
@@ -564,13 +564,13 @@ with st.sidebar:
         st.markdown("**SNMPポーリング（定期収集）**")
         col5, col6 = st.columns(2)
         with col5:
-            if st.button("▶ Poller起動", use_container_width=True,
+            if st.button("▶ Poller起動", width='stretch',
                          disabled=st.session_state.snmp_poller_started):
                 snmp_poller.start_poller()
                 st.session_state.snmp_poller_started = True
                 st.success("ポーラー起動")
         with col6:
-            if st.button("⏹ Poller停止", use_container_width=True,
+            if st.button("⏹ Poller停止", width='stretch',
                          disabled=not st.session_state.snmp_poller_started):
                 snmp_poller.stop_poller()
                 st.session_state.snmp_poller_started = False
@@ -583,7 +583,7 @@ with st.sidebar:
                                    value=9995, key="netflow_port_input")
         col7, col8 = st.columns(2)
         with col7:
-            if st.button("▶ NetFlow起動", use_container_width=True,
+            if st.button("▶ NetFlow起動", width='stretch',
                          disabled=st.session_state.netflow_started):
                 srv = _nfc.get_server(port=int(nf_port))
                 srv.start()
@@ -593,7 +593,7 @@ with st.sidebar:
                 else:
                     st.error(srv.error or "起動失敗")
         with col8:
-            if st.button("⏹ NetFlow停止", use_container_width=True,
+            if st.button("⏹ NetFlow停止", width='stretch',
                          disabled=not st.session_state.netflow_started):
                 _nfc.get_server().stop()
                 st.session_state.netflow_started = False
@@ -610,7 +610,7 @@ with st.sidebar:
                                    value=6343, key="sflow_port_input")
         col9, col10 = st.columns(2)
         with col9:
-            if st.button("▶ sFlow起動", use_container_width=True,
+            if st.button("▶ sFlow起動", width='stretch',
                          disabled=st.session_state.sflow_started):
                 srv = _sfc.get_server(port=int(sf_port))
                 srv.start()
@@ -620,7 +620,7 @@ with st.sidebar:
                 else:
                     st.error(srv.error or "起動失敗")
         with col10:
-            if st.button("⏹ sFlow停止", use_container_width=True,
+            if st.button("⏹ sFlow停止", width='stretch',
                          disabled=not st.session_state.sflow_started):
                 _sfc.get_server().stop()
                 st.session_state.sflow_started = False
@@ -661,7 +661,7 @@ with st.sidebar:
         st.markdown(f"{'✅' if ollama_ok else '❌'} Ollama "
                     f"({'接続OK' if ollama_ok else 'localhost:11434 未起動'})")
         if not ollama_ok:
-            if st.button("▶ Ollama を起動する", key="start_ollama_btn", use_container_width=True):
+            if st.button("▶ Ollama を起動する", key="start_ollama_btn", width='stretch'):
                 with st.spinner("Ollama を起動中…"):
                     _ok, _msg = analyzer.start_ollama(wait_sec=10)
                 (st.success if _ok else st.error)(_msg)
@@ -726,7 +726,7 @@ with st.sidebar:
                                  value=os.environ.get("GROQ_API_KEY",""),
                                  help="console.groq.com で無料取得")
             _c_apply, _c_clear = st.columns(2)
-            if _c_apply.button("適用して保存", key="apply_api_keys", use_container_width=True):
+            if _c_apply.button("適用して保存", key="apply_api_keys", width='stretch'):
                 if _gk:
                     os.environ["GEMINI_API_KEY"] = _gk
                     analyzer.GEMINI_API_KEY = _gk
@@ -737,7 +737,7 @@ with st.sidebar:
                 _save_user_settings({"GEMINI_API_KEY": _gk or None, "GROQ_API_KEY": _rk or None})
                 st.success("APIキーを保存しました（次回以降は自動で読み込まれます）")
                 st.rerun()
-            if _c_clear.button("保存キーを削除", key="clear_api_keys", use_container_width=True):
+            if _c_clear.button("保存キーを削除", key="clear_api_keys", width='stretch'):
                 _save_user_settings({"GEMINI_API_KEY": "", "GROQ_API_KEY": ""})
                 os.environ.pop("GEMINI_API_KEY", None); analyzer.GEMINI_API_KEY = ""
                 os.environ.pop("GROQ_API_KEY", None);   analyzer.GROQ_API_KEY = ""
@@ -755,7 +755,7 @@ with st.sidebar:
                     "（保存すると自動的に反映されます）。")
             st.caption("この方式ならWebhook URLの値が訪問者に見えることはありません。")
             if _is_admin_authenticated():
-                if st.button("🧪 テスト送信", key="slack_test_send_cloud", use_container_width=True):
+                if st.button("🧪 テスト送信", key="slack_test_send_cloud", width='stretch'):
                     _ok, _err = notifier.send_slack_message(
                         "🔔 [テスト通知] Syslog AI Analyzerからのテスト送信です。")
                     (st.success("Slackへ送信しました") if _ok else st.error(_err))
@@ -767,7 +767,7 @@ with st.sidebar:
                                value=_os.environ.get("SLACK_NOTIFY_ENABLED", "") == "1",
                                key="slack_notify_enabled_cb")
             _c_apply, _c_clear = st.columns(2)
-            if _c_apply.button("適用して保存", key="apply_slack_settings", use_container_width=True):
+            if _c_apply.button("適用して保存", key="apply_slack_settings", width='stretch'):
                 if _wh:
                     _os.environ["SLACK_WEBHOOK_URL"] = _wh
                 _os.environ["SLACK_NOTIFY_ENABLED"] = "1" if _en else "0"
@@ -775,13 +775,13 @@ with st.sidebar:
                                       "SLACK_NOTIFY_ENABLED": "1" if _en else "0"})
                 st.success("Slack通知設定を保存しました（次回以降は自動で読み込まれます）")
                 st.rerun()
-            if _c_clear.button("保存URLを削除", key="clear_slack_settings", use_container_width=True):
+            if _c_clear.button("保存URLを削除", key="clear_slack_settings", width='stretch'):
                 _save_user_settings({"SLACK_WEBHOOK_URL": "", "SLACK_NOTIFY_ENABLED": "0"})
                 _os.environ.pop("SLACK_WEBHOOK_URL", None)
                 _os.environ["SLACK_NOTIFY_ENABLED"] = "0"
                 st.info("保存したWebhook URLを削除しました")
                 st.rerun()
-            if st.button("🧪 テスト送信", key="slack_test_send", use_container_width=True):
+            if st.button("🧪 テスト送信", key="slack_test_send", width='stretch'):
                 _test_url = _wh or _os.environ.get("SLACK_WEBHOOK_URL", "")
                 if not _test_url:
                     st.warning("先にWebhook URLを入力してください。")
@@ -872,7 +872,7 @@ with st.sidebar:
             else:
                 _base_model_sel = st.text_input("ベースモデル名", value="gemma3", key="packet_analyst_base_txt")
             _target_name = st.text_input("作成するモデル名", value="packet-analyst", key="packet_analyst_name")
-            if st.button("🏗️ 専用モデルを作成", key="packet_analyst_create_btn", use_container_width=True):
+            if st.button("🏗️ 専用モデルを作成", key="packet_analyst_create_btn", width='stretch'):
                 with st.spinner(f"'{_target_name}' を作成中…"):
                     _pa_ok, _pa_msg = analyzer.create_packet_analyst_model(_base_model_sel, _target_name)
                 (st.success if _pa_ok else st.error)(_pa_msg)
@@ -902,7 +902,7 @@ with st.sidebar:
         format_func=lambda k: _demo_sim.SCENARIOS[k],
         key="demo_scenario_sel",
     )
-    if st.button("▶ データ生成", key="demo_run", use_container_width=True):
+    if st.button("▶ データ生成", key="demo_run", width='stretch'):
         with st.spinner("シミュレーションデータ生成中..."):
             _demo_result = _demo_sim.run_scenario(_demo_scenario)
         st.session_state["_demo_result"]    = _demo_result
@@ -937,7 +937,7 @@ with st.sidebar:
                 data=_demo_r["pcap_bytes"],
                 file_name=f"demo_{_demo_r['scenario']}.pcap",
                 mime="application/octet-stream",
-                use_container_width=True,
+                width='stretch',
             )
 
     st.markdown("---")
@@ -949,7 +949,7 @@ with st.sidebar:
         "富士通 IPCOM", "富士通 SR-S", "F5 BIG-IP LTM", "Palo Alto",
         "APRESIA", "RHEL/Linux", "Windows"
     ])
-    if st.button("📨 テストログ送信", use_container_width=True):
+    if st.button("📨 テストログ送信", width='stretch'):
         _inject_test_log(test_vendor)
         st.success("投入しました")
 
@@ -965,7 +965,7 @@ with st.sidebar:
                             key="show_log_text",
                             placeholder="*Jul  3 10:00:01.123: %LINK-3-UPDOWN: Interface Gi1/0/1, changed state to down\n"
                                         "*Jul  3 10:00:02.456: %LINEPROTO-5-UPDOWN: Line protocol on Gi1/0/1, down")
-    if st.button("🔍 解析して取り込み", use_container_width=True, key="show_log_ingest"):
+    if st.button("🔍 解析して取り込み", width='stretch', key="show_log_ingest"):
         if _sl_text.strip():
             _sl_res = _ingest_show_logging(_sl_text, _sl_src.strip() or "pasted-device")
             if _sl_res["total"]:
@@ -980,7 +980,7 @@ with st.sidebar:
     st.markdown("---")
 
     # ログクリア
-    if st.button("🗑️ 全ログ削除", use_container_width=True):
+    if st.button("🗑️ 全ログ削除", width='stretch'):
         db.clear_logs()
         st.success("クリアしました")
 
@@ -1593,7 +1593,7 @@ with tab_health:
     with col_run2:
         run_llm = st.checkbox("LLM診断を含める", value=False,
                               help="各機器をLLMが総合診断します（時間とAPI呼び出しが増えます）")
-        if st.button("🤖 品質チェック実行", use_container_width=True, type="primary"):
+        if st.button("🤖 品質チェック実行", width='stretch', type="primary"):
             devices = snmp_poller.get_devices()
             if not devices:
                 st.warning("SNMPデバイスが登録されていません。SNMPモニタータブで登録してください。")
@@ -1674,7 +1674,7 @@ with tab_health:
                 if analyzer.check_claude_available():
                     _hdev_ip = dh["source_ip"]
                     if st.button("🕵️ エージェント診断（メトリクス推移を深掘り）",
-                                 key=f"health_agentic_{_hdev_ip}", use_container_width=True):
+                                 key=f"health_agentic_{_hdev_ip}", width='stretch'):
                         with st.spinner("Claudeがメトリクス推移を確認しながら分析中..."):
                             _recent_logs = db.get_logs(limit=10, source_ip=_hdev_ip)
                             st.session_state[f"_health_agentic_{_hdev_ip}"] = \
@@ -1858,7 +1858,7 @@ with tab1:
                     col_a, col_b = st.columns([1, 4])
                     with col_a:
                         if st.button("🤖 AI解析", key=f"analyze_{log['id']}",
-                                    type="primary", use_container_width=True):
+                                    type="primary", width='stretch'):
                             with st.spinner("解析中..."):
                                 raw = log.get("raw","")
                                 from parsers import parse_syslog as ps
@@ -1888,7 +1888,7 @@ with tab1:
         with _batch_col2:
             _batch_btn = st.button("🤖 一括 AI 分析", key="batch_llm_run",
                                    disabled=not _batch_llm_ok,
-                                   use_container_width=True, type="primary")
+                                   width='stretch', type="primary")
         if not _batch_llm_ok:
             st.caption("一括 AI 分析はサイドバーの「🔑 APIキー設定」でいずれかのLLMを設定してから使用してください。")
 
@@ -1960,7 +1960,7 @@ with tab1:
                 data=_csv_buf.getvalue().encode("utf-8-sig"),
                 file_name=f"syslog_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv",
-                use_container_width=True,
+                width='stretch',
             )
         else:
             st.caption("ログがないのでダウンロードできません")
@@ -1977,7 +1977,7 @@ with tab1:
                 data=_db_bytes,
                 file_name=f"syslog_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
                 mime="application/octet-stream",
-                use_container_width=True,
+                width='stretch',
                 help="Windowsでも DB Browser for SQLite で開けます"
             )
         else:
@@ -1995,7 +1995,7 @@ with tab1:
                 data=_json_data.encode("utf-8"),
                 file_name=f"syslog_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                 mime="application/json",
-                use_container_width=True,
+                width='stretch',
             )
         else:
             st.caption("ログがないのでダウンロードできません")
@@ -2080,7 +2080,7 @@ with tab_showlog:
         with _spl_col2:
             st.write("")
             st.write("")
-            if st.button("📋 読み込む", key="showlog_sample_load", use_container_width=True):
+            if st.button("📋 読み込む", key="showlog_sample_load", width='stretch'):
                 st.session_state["show_log_text_tab"] = SHOWLOG_SAMPLES[_spl_vendor]
                 st.success(f"{_spl_vendor} のサンプルを読み込みました（下の欄に反映済み）")
                 st.rerun()
@@ -2106,7 +2106,7 @@ with tab_showlog:
         _sl_src_tab = st.text_input("送信元IP/ホスト", value="pasted-device",
                                     key="show_log_src_tab",
                                     help="貼り付けたログの送信元として記録されます")
-        _sl_go_tab = st.button("🤖 解析（取り込み＋異常＋LLM）", use_container_width=True,
+        _sl_go_tab = st.button("🤖 解析（取り込み＋異常＋LLM）", width='stretch',
                                key="show_log_ingest_tab", type="primary")
         _sl_auto_llm = st.checkbox("解析時にLLMまで自動実行", value=True,
                                    key="show_log_auto_llm",
@@ -2235,7 +2235,7 @@ with tab_showlog:
             "カテゴリ": f["category"], "対向IP": f.get("peer", ""),
             "該当行": f["line"], "対処": f.get("remedy", ""),
         } for f in _ike_findings])
-        st.dataframe(df_iked, use_container_width=True, hide_index=True)
+        st.dataframe(df_iked, width='stretch', hide_index=True)
         if _ike_fail:
             st.warning("⚠️ 鍵交換の失敗を示す行が見つかりました。カテゴリごとの対処案を参考に、"
                        "対向機器の暗号/DHグループ/PSK設定を照合してください。")
@@ -2414,7 +2414,7 @@ with tab_showlog:
             _run_showlog_llm()
         # 手動再実行ボタン（やり直したいとき）
         if st.button("🤖 LLM で再解析する", key="showlog_llm",
-                     use_container_width=True, type="primary"):
+                     width='stretch', type="primary"):
             _run_showlog_llm()
     if st.session_state.get("_showlog_llm_report"):
         st.markdown(
@@ -2470,7 +2470,7 @@ with tab_prtg:
         with _pc4:
             _pd_int = st.number_input("間隔(秒)", value=60, min_value=10, max_value=3600, key="prtg_add_int")
         _pb0, _pb1, _pb2, _pb3 = st.columns(4)
-        if _pb0.button("🔍 SNMP Walk 探索", use_container_width=True, key="prtg_walk",
+        if _pb0.button("🔍 SNMP Walk 探索", width='stretch', key="prtg_walk",
                        disabled=_prtg_cloud):
             if _pd_ip.strip():
                 with st.spinner(f"{_pd_ip} を SNMP Walk で探索中…"):
@@ -2480,7 +2480,7 @@ with tab_prtg:
                     st.session_state["_prtg_discover"] = _dres
             else:
                 st.error("IPアドレスを入力してください")
-        if _pb1.button("➕ デバイス追加", use_container_width=True, key="prtg_add_dev",
+        if _pb1.button("➕ デバイス追加", width='stretch', key="prtg_add_dev",
                        disabled=_prtg_cloud):
             if _pd_ip.strip():
                 snmp_poller.add_device(_pd_ip.strip(), _pd_comm.strip() or "public", _pd_ver, 161, int(_pd_int))
@@ -2523,19 +2523,19 @@ with tab_prtg:
             else:
                 st.error(f"❌ {_disc.get('error','応答なし')}")
         if not st.session_state.get("snmp_poller_started"):
-            if _pb2.button("▶ ポーリング開始", use_container_width=True, type="primary",
+            if _pb2.button("▶ ポーリング開始", width='stretch', type="primary",
                            key="prtg_poll_start", disabled=_prtg_cloud):
                 snmp_poller.start_poller()
                 st.session_state.snmp_poller_started = True
                 st.success("ポーリングを開始しました（数十秒後にゲージ・グラフが出ます）")
                 st.rerun()
         else:
-            if _pb2.button("⏹ ポーリング停止", use_container_width=True, key="prtg_poll_stop"):
+            if _pb2.button("⏹ ポーリング停止", width='stretch', key="prtg_poll_stop"):
                 snmp_poller.stop_poller()
                 st.session_state.snmp_poller_started = False
                 st.info("ポーリングを停止しました")
                 st.rerun()
-        _pb3.button("🔄 表示を更新", use_container_width=True, key="prtg_refresh")
+        _pb3.button("🔄 表示を更新", width='stretch', key="prtg_refresh")
         # 登録済みデバイスの簡易一覧＋削除
         _reg = snmp_poller.get_devices()
         if _reg:
@@ -2625,7 +2625,7 @@ with tab_prtg:
             st.info("解析モードが「⛔ AI解析なし」です。サイドバーでモードを切り替えてください。")
         else:
             if st.button("🤖 このダッシュボードをLLMで診断する", key="prtg_llm_btn",
-                        type="primary", use_container_width=True):
+                        type="primary", width='stretch'):
                 with st.spinner("🤖 LLM がデバイス状態・センサー値・アラートを分析中…"):
                     _prep, _pmdl = _llm_analyze_prtg(_devices, _latest, _alerts, _label_map, _prtg_mode,
                                                      running_configs=_prtg_running_configs)
@@ -2787,7 +2787,7 @@ with tab_prtg:
                 })
             if _raw_rows:
                 _df_raw = pd.DataFrame(_raw_rows).sort_values(["デバイス", "OID名"])
-                st.dataframe(_df_raw, use_container_width=True, hide_index=True)
+                st.dataframe(_df_raw, width='stretch', hide_index=True)
                 st.caption(f"{len(_raw_rows)} 項目を表示中（直近ポーリング分・最大300件の範囲内）")
             else:
                 st.caption("まだデータがありません。ポーリングを開始すると表示されます。")
@@ -2848,7 +2848,7 @@ with tab2:
         if summary["by_source"]:
             df_src = pd.DataFrame(summary["by_source"])
             df_src.columns = ["送信元IP", "件数"]
-            st.dataframe(df_src, use_container_width=True, hide_index=True)
+            st.dataframe(df_src, width='stretch', hide_index=True)
         else:
             st.info("データなし")
 
@@ -2995,7 +2995,7 @@ snmp-server trap enable
             st.markdown("#### 登録デバイス")
             df_dev = pd.DataFrame(devices)[["ip","hostname","community","version","interval_sec","last_polled","last_status"]]
             df_dev.columns = ["IP","ホスト名","コミュニティ","バージョン","間隔(秒)","最終ポーリング","状態"]
-            st.dataframe(df_dev, use_container_width=True, hide_index=True)
+            st.dataframe(df_dev, width='stretch', hide_index=True)
 
             # 手動ポーリング
             sel_ip = st.selectbox("手動ポーリング対象", [d["ip"] for d in devices])
@@ -3073,13 +3073,13 @@ snmp-server trap enable
                     st.caption("📡 RESTCONF 取得結果")
                     df_rc = pd.DataFrame(rc_rt)[["dest","mask","nexthop","proto","metric"]]
                     df_rc.columns = ["宛先","マスク","ネクストホップ","プロトコル","メトリック"]
-                    st.dataframe(df_rc, use_container_width=True, hide_index=True)
+                    st.dataframe(df_rc, width='stretch', hide_index=True)
                 else:
                     rt_rows = snmp_poller.get_routing_table(sel_ip)
                     if rt_rows:
                         df_rt = pd.DataFrame(rt_rows)[["dest","mask","nexthop","route_type","proto","fetched_at"]]
                         df_rt.columns = ["宛先","マスク","ネクストホップ","タイプ","プロトコル","取得時刻"]
-                        st.dataframe(df_rt, use_container_width=True, hide_index=True)
+                        st.dataframe(df_rt, width='stretch', hide_index=True)
                     else:
                         st.caption("ルーティングテーブルなし（上のボタンで取得してください）")
         else:
@@ -3149,7 +3149,7 @@ snmp-server trap enable
                         })
             if redirect_dest_tags:
                 st.markdown("**🎯 syslogから抽出したredirect先情報**")
-                st.dataframe(pd.DataFrame(redirect_dest_tags), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(redirect_dest_tags), width='stretch', hide_index=True)
 
             # ── ③ ルーティングテーブル照合 ──
             # 優先順位: RESTCONF（取得済みキャッシュがあれば最優先・高速&高精度） > SNMP Walk > コンフィグ解析
@@ -3161,7 +3161,7 @@ snmp-server trap enable
                     st.caption("⚡ RESTCONFで取得したルートを使用中（「SNMPモニター」タブの「⚡ RESTCONF で取得」ボタンで更新できます）")
                     df_rc_icmp = pd.DataFrame(_rc_routes_icmp)[["dest","mask","nexthop","proto","metric"]]
                     df_rc_icmp.columns = ["宛先","マスク","ネクストホップ","プロトコル","メトリック"]
-                    st.dataframe(df_rc_icmp, use_container_width=True, hide_index=True)
+                    st.dataframe(df_rc_icmp, width='stretch', hide_index=True)
                     if redirect_dest_tags:
                         st.markdown("**宛先IP照合結果:**")
                         dest_ips = [t["値"] for t in redirect_dest_tags if t["種別"] == "dest"]
@@ -3179,7 +3179,7 @@ snmp-server trap enable
                 with st.expander(f"🗺️ ルーティングテーブル（SNMP Walk取得済み: {len(snmp_routes)}件）"):
                     df_rt_icmp = pd.DataFrame(snmp_routes)[["dest","mask","nexthop","route_type","proto","fetched_at"]]
                     df_rt_icmp.columns = ["宛先","マスク","ネクストホップ","タイプ","プロトコル","取得時刻"]
-                    st.dataframe(df_rt_icmp, use_container_width=True, hide_index=True)
+                    st.dataframe(df_rt_icmp, width='stretch', hide_index=True)
                     if redirect_dest_tags:
                         st.markdown("**宛先IP照合結果:**")
                         dest_ips = [t["値"] for t in redirect_dest_tags if t["種別"] == "dest"]
@@ -3274,7 +3274,7 @@ snmp-server trap enable
                     st.markdown("**EPC イベント履歴**")
                     df_epc = pd.DataFrame(epc_events)[["triggered_at","trigger_reason","capture_name","status","pcap_flash_path"]]
                     df_epc.columns = ["日時","トリガー理由","キャプチャ名","状態","pcapパス"]
-                    st.dataframe(df_epc, use_container_width=True, hide_index=True)
+                    st.dataframe(df_epc, width='stretch', hide_index=True)
                 else:
                     st.caption("EPC イベント履歴なし")
 
@@ -3294,17 +3294,17 @@ snmp-server trap enable
                     rds = an.get("icmp_redirects", [])
                     if rds:
                         st.markdown(f"**🔀 ICMP Redirect 詳細 ({len(rds)} 件)**")
-                        st.dataframe(pd.DataFrame(rds), use_container_width=True, hide_index=True)
+                        st.dataframe(pd.DataFrame(rds), width='stretch', hide_index=True)
 
                     rip = an.get("rip_packets", [])
                     if rip:
                         with st.expander(f"🗺️ RIP パケット ({len(rip)} 件)"):
-                            st.dataframe(pd.DataFrame(rip), use_container_width=True, hide_index=True)
+                            st.dataframe(pd.DataFrame(rip), width='stretch', hide_index=True)
 
                     arp = an.get("arp_anomalies", [])
                     if arp:
                         with st.expander(f"⚠️ ARP 異常 ({len(arp)} 件)"):
-                            st.dataframe(pd.DataFrame(arp), use_container_width=True, hide_index=True)
+                            st.dataframe(pd.DataFrame(arp), width='stretch', hide_index=True)
 
                     if len(analyses) > 1:
                         with st.expander(f"📜 過去の解析履歴 ({len(analyses)-1} 件)"):
@@ -3400,17 +3400,17 @@ snmp-server trap enable
                         if redirects:
                             st.markdown(f"**🔀 ICMP Redirect ({len(redirects)} 件)**")
                             df_rd = pd.DataFrame(redirects)
-                            st.dataframe(df_rd, use_container_width=True, hide_index=True)
+                            st.dataframe(df_rd, width='stretch', hide_index=True)
 
                         rip_pkts = pcap_result.get("rip_packets", [])
                         if rip_pkts:
                             st.markdown(f"**🗺️ RIP パケット ({len(rip_pkts)} 件)**")
-                            st.dataframe(pd.DataFrame(rip_pkts), use_container_width=True, hide_index=True)
+                            st.dataframe(pd.DataFrame(rip_pkts), width='stretch', hide_index=True)
 
                         arp_issues = pcap_result.get("arp_anomalies", [])
                         if arp_issues:
                             st.markdown(f"**⚠️ ARP 異常 ({len(arp_issues)} 件)**")
-                            st.dataframe(pd.DataFrame(arp_issues), use_container_width=True, hide_index=True)
+                            st.dataframe(pd.DataFrame(arp_issues), width='stretch', hide_index=True)
 
                         # ダウンロードボタン（ローカル保存用）
                         st.download_button(
@@ -3441,7 +3441,7 @@ end""", language="text")
             if llm_ok:
                 _icmp_c1, _icmp_c2 = st.columns(2)
                 if _icmp_c1.button("🤖 ICMP redirect根本原因をAIで診断", key="icmp_ai_diag",
-                                    type="primary", use_container_width=True):
+                                    type="primary", width='stretch'):
                     with st.spinner("AIがICMP redirect原因を分析中..."):
                         dev_snmp = [r for r in icmp_rows if r["source_ip"] == sel_icmp_ip]
                         dev_logs = [l for l in redirect_logs if l.get("source_ip") == sel_icmp_ip]
@@ -3454,7 +3454,7 @@ end""", language="text")
                         )
                 if analyzer.check_claude_available():
                     if _icmp_c2.button("🕵️ エージェント診断（ルート検索を深掘り）", key="icmp_agentic",
-                                        use_container_width=True):
+                                        width='stretch'):
                         with st.spinner("Claudeがルーティングテーブルを検索しながら分析中..."):
                             dev_snmp = [r for r in icmp_rows if r["source_ip"] == sel_icmp_ip]
                             dev_logs = [l for l in redirect_logs if l.get("source_ip") == sel_icmp_ip]
@@ -3502,7 +3502,7 @@ end""", language="text")
         if metrics:
             df_m = pd.DataFrame(metrics)[["recorded_at","source_ip","oid_name","value","unit","alert_level"]]
             df_m.columns = ["取得時刻","送信元IP","OID名","値","単位","アラート"]
-            st.dataframe(df_m, use_container_width=True, hide_index=True)
+            st.dataframe(df_m, width='stretch', hide_index=True)
         else:
             st.info("メトリクスがまだ収集されていません")
 
@@ -3818,7 +3818,7 @@ with tab_netflow:
                    "投入して画面イメージを確認できます（いつでも削除できます）。")
         _sd_c1, _sd_c2, _sd_c3, _sd_c4 = st.columns(4)
         with _sd_c1:
-            if st.button("▶ フローのサンプル投入", use_container_width=True):
+            if st.button("▶ フローのサンプル投入", width='stretch'):
                 _res = _nfc2.generate_sample_data()
                 st.success(f"{_res['flows_inserted']} 件投入しました")
                 st.rerun()
@@ -3827,13 +3827,13 @@ with tab_netflow:
                 _has_data = _nfc2.has_sample_data()
             except Exception:
                 _has_data = False
-            if st.button("🗑 フローのサンプル削除", use_container_width=True,
+            if st.button("🗑 フローのサンプル削除", width='stretch',
                          disabled=not _has_data):
                 _n = _nfc2.clear_sample_data()
                 st.info(f"{_n} 件削除しました")
                 st.rerun()
         with _sd_c3:
-            if st.button("▶ IF障害のサンプル投入", use_container_width=True):
+            if st.button("▶ IF障害のサンプル投入", width='stretch'):
                 _res2 = _sfc2.generate_sample_counters()
                 st.success(f"IF{_res2['if_index']}（{_res2['agent_ip']}）に "
                            f"{_res2['samples']} 件投入しました")
@@ -3843,7 +3843,7 @@ with tab_netflow:
                 _has_counters = _sfc2.has_sample_counters()
             except Exception:
                 _has_counters = False
-            if st.button("🗑 IF障害のサンプル削除", use_container_width=True,
+            if st.button("🗑 IF障害のサンプル削除", width='stretch',
                          disabled=not _has_counters):
                 _n2 = _sfc2.clear_sample_counters()
                 st.info(f"{_n2} 件削除しました")
@@ -3916,7 +3916,7 @@ with tab_netflow:
         except Exception:
             _nf_pairs = []
         if _nf_pairs:
-            st.graphviz_chart(_nfc2.build_flow_diagram_dot(_nf_pairs), use_container_width=True)
+            st.graphviz_chart(_nfc2.build_flow_diagram_dot(_nf_pairs), width='stretch')
         else:
             st.info("データなし")
 
@@ -3963,7 +3963,7 @@ with tab_netflow:
                 st.bar_chart(df_tk.set_index("ip")["MB"].head(10))
                 _tk_show = df_tk[["ip", "MB", "total_packets", "flows"]]
                 _tk_show.columns = ["IPアドレス", "MB", "パケット数", "フロー数"]
-                st.dataframe(_tk_show, use_container_width=True, hide_index=True)
+                st.dataframe(_tk_show, width='stretch', hide_index=True)
             else:
                 st.info("データなし")
 
@@ -3979,7 +3979,7 @@ with tab_netflow:
                 st.bar_chart(df_pr.set_index("protocol_name")["MB"])
                 _pr_show = df_pr[["protocol_name", "MB", "total_packets", "flows"]]
                 _pr_show.columns = ["プロトコル", "MB", "パケット数", "フロー数"]
-                st.dataframe(_pr_show, use_container_width=True, hide_index=True)
+                st.dataframe(_pr_show, width='stretch', hide_index=True)
             else:
                 st.info("データなし")
 
@@ -3999,7 +3999,7 @@ with tab_netflow:
             with _pt_col2:
                 _pt_show = df_pt[["app", "dst_port", "MB", "flows"]]
                 _pt_show.columns = ["アプリ", "ポート", "MB", "フロー"]
-                st.dataframe(_pt_show, use_container_width=True, hide_index=True)
+                st.dataframe(_pt_show, width='stretch', hide_index=True)
 
         # ── フロー一覧 ──
         st.markdown("---")
@@ -4019,7 +4019,7 @@ with tab_netflow:
                 "proto_name":   "プロトコル","app":          "アプリ",
                 "packets":      "パケット数","bytes":        "バイト数",
             })
-            st.dataframe(df_fl, use_container_width=True, hide_index=True)
+            st.dataframe(df_fl, width='stretch', hide_index=True)
         else:
             st.info("まだフローデータがありません。ルーターの flow-export 設定を確認してください。")
 
@@ -4035,7 +4035,7 @@ with tab_netflow:
             _nf_llm_ok = (analyzer.check_claude_available() or analyzer.check_gemini_available()
                           or analyzer.check_groq_available() or analyzer.check_ollama_available())
             if st.button("🤖 AI分析", key="nf_ddos_ai", disabled=not _nf_llm_ok,
-                         use_container_width=True, type="primary"):
+                         width='stretch', type="primary"):
                 try:
                     _nf_sum2 = _nfc2.get_summary(_nf_hours)
                 except Exception:
@@ -4150,7 +4150,7 @@ with tab_pcap:
         _lc1, _lc2 = st.columns([4, 1])
         _lc1.success(f"✅ {_src_label} を解析済みです。**このページ下部**に結果を表示しています"
                      "（ダウンロード不要でそのまま解析されています）。")
-        if _lc2.button("🗑️ クリア", key="pcap_clear_loaded", use_container_width=True):
+        if _lc2.button("🗑️ クリア", key="pcap_clear_loaded", width='stretch'):
             for _k in ("_pcap_key", "_pcap_res", "_pcap_convs", "_pcap_talkers", "_pcap_streams"):
                 st.session_state.pop(_k, None)
             st.rerun()
@@ -4167,7 +4167,7 @@ with tab_pcap:
             st.markdown("**登録済みデバイス**")
             _dev_df = pd.DataFrame(_saved_devs)[["name", "ip", "username", "ssh_port"]]
             _dev_df.columns = ["名前", "IPアドレス", "ユーザー名", "SSHポート"]
-            st.dataframe(_dev_df, use_container_width=True, hide_index=True)
+            st.dataframe(_dev_df, width='stretch', hide_index=True)
             _del_opts = {f"{d['name']} ({d['ip']})": d["id"] for d in _saved_devs}
             _del_sel  = st.selectbox("削除するデバイス", ["（選択）"] + list(_del_opts.keys()),
                                      key="pcap_del_dev")
@@ -4643,12 +4643,12 @@ with tab_pcap:
                     st.markdown("**🎯 redirect元パケット宛先（orig_dst）別**")
                     dest_count = df_red["orig_dst"].value_counts().reset_index()
                     dest_count.columns = ["元パケット宛先IP", "件数"]
-                    st.dataframe(dest_count, use_container_width=True, hide_index=True)
+                    st.dataframe(dest_count, width='stretch', hide_index=True)
                 with dc2:
                     st.markdown("**🔀 正しいゲートウェイ（gateway）別**")
                     gw_count = df_red["gateway"].value_counts().reset_index()
                     gw_count.columns = ["ゲートウェイIP", "件数"]
-                    st.dataframe(gw_count, use_container_width=True, hide_index=True)
+                    st.dataframe(gw_count, width='stretch', hide_index=True)
 
                 st.markdown("---")
 
@@ -4704,7 +4704,7 @@ with tab_pcap:
                                        "gateway","orig_src","orig_dst","orig_proto","code_desc"]]
                     df_show.columns = ["時刻","ルーターIP","対象ホスト",
                                         "正しいGW","元送信元","元宛先","プロトコル","種別"]
-                    st.dataframe(df_show, use_container_width=True, hide_index=True)
+                    st.dataframe(df_show, width='stretch', hide_index=True)
 
                 # AI統合診断
                 st.markdown("---")
@@ -4755,7 +4755,7 @@ with tab_pcap:
 
                     _int_c1, _int_c2 = st.columns(2)
                     if _int_c1.button("🤖 統合AI診断を実行", key="pcap_ai_diag",
-                                       type="primary", use_container_width=True):
+                                       type="primary", width='stretch'):
                         sel_router, full_routing_ctx, dev_logs = _build_integrated_icmp_context()
                         with st.spinner("AIが pcap + syslog + SNMP を統合分析中..."):
                             st.session_state["_icmp_diag_integrated"] = analyzer.diagnose_icmp_redirect(
@@ -4767,7 +4767,7 @@ with tab_pcap:
                             )
                     if analyzer.check_claude_available():
                         if _int_c2.button("🕵️ エージェント診断（ルート検索を深掘り）", key="pcap_icmp_agentic",
-                                           use_container_width=True):
+                                           width='stretch'):
                             sel_router, full_routing_ctx, dev_logs = _build_integrated_icmp_context()
                             with st.spinner("Claudeがルーティングテーブルを検索しながら分析中..."):
                                 st.session_state["_icmp_diag_integrated"] = analyzer.diagnose_icmp_redirect_agentic(
@@ -4844,7 +4844,7 @@ with tab_pcap:
                 st.markdown("### 🔄 RIPパケット")
                 df_rip = pd.DataFrame(res["rip_packets"])
                 df_rip.columns = ["時刻","送信元","宛先","バージョン","コマンド","サイズ(bytes)"]
-                st.dataframe(df_rip, use_container_width=True, hide_index=True)
+                st.dataframe(df_rip, width='stretch', hide_index=True)
                 rip_peers = df_rip["送信元"].unique()
                 st.caption(f"RIPネイバー候補: {', '.join(rip_peers)}")
 
@@ -4854,7 +4854,7 @@ with tab_pcap:
                 st.markdown("### ⚠️ ARP 異常検出")
                 df_arp = pd.DataFrame(res["arp_anomalies"])
                 df_arp.columns = ["時刻","IPアドレス","旧MACアドレス","新MACアドレス","説明"]
-                st.dataframe(df_arp, use_container_width=True, hide_index=True)
+                st.dataframe(df_arp, width='stretch', hide_index=True)
 
             # ── TCP 問題 ───────────────────────────────
             if res["tcp_issues"]:
@@ -4915,7 +4915,7 @@ with tab_pcap:
                 df_zw = pd.DataFrame(res["tcp_zero_window"])
                 df_zw = df_zw[["src", "dst", "src_port", "dst_port", "count", "description"]]
                 df_zw.columns = ["Window=0送出IP", "通信相手IP", "送出Port", "相手Port", "発生回数", "説明"]
-                st.dataframe(df_zw, use_container_width=True, hide_index=True)
+                st.dataframe(df_zw, width='stretch', hide_index=True)
 
             # ── 🪟 TCPウィンドウ制御の原因切り分け（受信側 vs 経路上） ──
             _rx_pressure = res.get("tcp_receiver_pressure", [])
@@ -4938,7 +4938,7 @@ with tab_pcap:
                         "ゼロ到達": "○" if r["hit_zero"] else "",
                         "内容": r["detail"],
                     } for r in _rx_pressure])
-                    st.dataframe(df_rx, use_container_width=True, hide_index=True)
+                    st.dataframe(df_rx, width='stretch', hide_index=True)
                     st.warning("⚠️ " + _rx_pressure[0]["remedy"])
                 if _path_cong:
                     st.markdown("**② 経路上の輻輳/パケットロスの疑い（重複ACKバースト）**")
@@ -4947,7 +4947,7 @@ with tab_pcap:
                         "重複ACKバースト回数": c["dup_ack_bursts"], "再送回数": c["retrans_count"],
                         "内容": c["detail"],
                     } for c in _path_cong])
-                    st.dataframe(df_pc, use_container_width=True, hide_index=True)
+                    st.dataframe(df_pc, width='stretch', hide_index=True)
                     st.warning("⚠️ " + _path_cong[0]["remedy"])
                     # SNMP監視中の機器で同時にdiscard急増が出ていれば、経路上の犯人を特定できる
                     try:
@@ -5000,7 +5000,7 @@ with tab_pcap:
                         "name": "ドメイン名", "qtype": "タイプ", "rcode": "応答コード",
                         "rtt_ms": "RTT(ms)", "issue": "問題",
                     })
-                    st.dataframe(df_dns, use_container_width=True, hide_index=True)
+                    st.dataframe(df_dns, width='stretch', hide_index=True)
                 else:
                     st.success("✅ DNS エラー・遅延は検出されませんでした")
 
@@ -5013,7 +5013,7 @@ with tab_pcap:
                 df_frag = pd.DataFrame(_ip_frags)
                 df_frag = df_frag[["src", "dst", "protocol", "fragment_count", "description"]]
                 df_frag.columns = ["送信元IP", "宛先IP", "プロトコル", "フラグメント数", "説明"]
-                st.dataframe(df_frag, use_container_width=True, hide_index=True)
+                st.dataframe(df_frag, width='stretch', hide_index=True)
 
             # ── プロトコル不明（ID/sessionキーワード検出） ──────
             _unk_hints = res.get("unknown_proto_hints", [])
@@ -5057,14 +5057,14 @@ with tab_pcap:
                         st.markdown("**フロー別集計**")
                         df_sid_flows = pd.DataFrame(_sel_c["flows"])
                         df_sid_flows.columns = ["プロトコル", "送信元IP", "宛先IP", "送信元Port", "宛先Port", "回数"]
-                        st.dataframe(df_sid_flows, use_container_width=True, hide_index=True)
+                        st.dataframe(df_sid_flows, width='stretch', hide_index=True)
                     with _sid_c2:
                         st.markdown("**出現順（シーケンス）**")
                         st.caption(f"最大間隔: {_sel_c.get('max_gap_sec', 0)}秒")
                         df_sid_tl = pd.DataFrame(_sel_c["timeline"])
                         df_sid_tl.columns = ["時刻", "プロトコル", "送信元IP", "宛先IP",
                                               "送信元Port", "宛先Port", "前回からの間隔(秒)"]
-                        st.dataframe(df_sid_tl, use_container_width=True, hide_index=True)
+                        st.dataframe(df_sid_tl, width='stretch', hide_index=True)
 
                     # TCPフローであれば、再構成したストリームとして中身を確認できるようにする
                     _sid_tcp_flows = [f for f in _sel_c["flows"] if f["protocol"] == "TCP"]
@@ -5106,7 +5106,7 @@ with tab_pcap:
                                     "qtypes", "client_count"]]
                     df_dt.columns = ["ベースドメイン", "クエリ数", "平均サブ長", "最大サブ長",
                                       "クエリ型", "クライアント数"]
-                    st.dataframe(df_dt, use_container_width=True, hide_index=True)
+                    st.dataframe(df_dt, width='stretch', hide_index=True)
                     with st.expander("サブドメインのサンプルを見る"):
                         for _dt in _dns_tun:
                             st.markdown(f"**{_dt['domain']}**")
@@ -5226,7 +5226,7 @@ with tab_pcap:
                     _search_port = _sr_c2.text_input("ポート番号で検索(任意)", key="stream_search_port")
                     with _sr_c3:
                         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-                        if st.button("🔎 検索してジャンプ", key="stream_search_btn", use_container_width=True):
+                        if st.button("🔎 検索してジャンプ", key="stream_search_btn", width='stretch'):
                             _matched = next((
                                 s for s in streams
                                 if (not _search_ip or _search_ip in (s["src"], s["dst"]))
@@ -5413,7 +5413,7 @@ with tab_pcap:
                     df_http_sum.columns = ["ステータスコード", "件数"]
                     _hc1, _hc2 = st.columns([1, 2])
                     with _hc1:
-                        st.dataframe(df_http_sum, use_container_width=True, hide_index=True)
+                        st.dataframe(df_http_sum, width='stretch', hide_index=True)
                     with _hc2:
                         st.bar_chart(df_http_sum.set_index("ステータスコード"))
                 if _http_errs:
@@ -5425,7 +5425,7 @@ with tab_pcap:
                         "server_port": "Port", "status_code": "ステータス",
                         "reason": "理由", "category": "カテゴリ",
                     })
-                    st.dataframe(df_http_err, use_container_width=True, hide_index=True)
+                    st.dataframe(df_http_err, width='stretch', hide_index=True)
                 else:
                     st.success("✅ HTTP 4xx/5xx エラーは検出されませんでした")
 
@@ -5459,7 +5459,7 @@ with tab_pcap:
                         "timestamp": "時刻", "client": "クライアントIP", "server": "サーバーIP",
                         "server_port": "Port", "sni": "接続先ホスト名(SNI)", "tls_version": "TLSバージョン",
                     })
-                    st.dataframe(df_tls, use_container_width=True, hide_index=True)
+                    st.dataframe(df_tls, width='stretch', hide_index=True)
                 if _tls_alerts:
                     st.markdown("**⚠️ TLS Alert 一覧**")
                     df_ta = pd.DataFrame(_tls_alerts)
@@ -5469,7 +5469,7 @@ with tab_pcap:
                         "server_port": "Port", "sni": "接続先ホスト名(SNI)",
                         "alert": "アラート内容", "issue": "問題",
                     })
-                    st.dataframe(df_ta, use_container_width=True, hide_index=True)
+                    st.dataframe(df_ta, width='stretch', hide_index=True)
 
                 # ── TLSハンドシェイク(鍵交換)の成否 ──
                 _tls_hs = res.get("tls_handshakes", [])
@@ -5498,7 +5498,7 @@ with tab_pcap:
                         "証明書の問題": " / ".join(h.get("cert_issues") or []),
                         "理由": h["reason"],
                     } for h in _tls_hs])
-                    st.dataframe(df_hs, use_container_width=True, hide_index=True)
+                    st.dataframe(df_hs, width='stretch', hide_index=True)
                     if _tls_hs_sum.get("weak_cipher"):
                         st.warning("⚠️ 前方秘匿性のない鍵交換・RC4・DES・NULL暗号など、"
                                    "脆弱な暗号スイートでの接続を検出しました。"
@@ -5532,7 +5532,7 @@ with tab_pcap:
                     "継続時間(秒)": s["duration_sec"], "バイト数": s["bytes"],
                     "長時間接続": "⚠️ 張りっぱなしの可能性" if s["long_lived"] else "",
                 } for s in _ai_sessions])
-                st.dataframe(df_ai, use_container_width=True, hide_index=True)
+                st.dataframe(df_ai, width='stretch', hide_index=True)
                 if _ai_long:
                     st.warning(f"⚠️ {_ai_long}件のセッションが30分を超えて継続しています。"
                                "AIチャットのタブを開きっぱなし、またはエージェント/常時接続的な"
@@ -5593,7 +5593,7 @@ with tab_pcap:
                                 st.warning(f"⚠️ {_p}")
                         if _ls_res.get("sessions"):
                             df_ls = pd.DataFrame(_ls_res["sessions"])
-                            st.dataframe(df_ls, use_container_width=True, hide_index=True)
+                            st.dataframe(df_ls, width='stretch', hide_index=True)
 
             # ── 🦈 pyshark/tshark連携（Wireshark全ディセクタ・Expert Info） ──
             st.markdown("---")
@@ -5635,7 +5635,7 @@ with tab_pcap:
                                 "重大度": f"{_sev_icon.get(e['severity'],'')} {e['severity_label']}",
                                 "件数": e["count"], "プロトコル": e["protocol"], "内容": e["message"],
                             } for e in _expert])
-                            st.dataframe(df_exp, use_container_width=True, hide_index=True)
+                            st.dataframe(df_exp, width='stretch', hide_index=True)
 
                         _hier = _pb_res.get("protocol_hierarchy", [])
                         if _hier:
@@ -5644,7 +5644,7 @@ with tab_pcap:
                                     "プロトコル": "　" * h["depth"] + h["protocol"],
                                     "フレーム数": h["frames"], "バイト数": h["bytes"],
                                 } for h in _hier])
-                                st.dataframe(df_hier, use_container_width=True, hide_index=True)
+                                st.dataframe(df_hier, width='stretch', hide_index=True)
 
             # ── 🔑 SSH鍵交換の成否 ──
             _ssh_sessions = res.get("ssh_handshakes", [])
@@ -5667,7 +5667,7 @@ with tab_pcap:
                     "サーバーSSHバージョン": s.get("server_banner", ""),
                     "理由": s["reason"],
                 } for s in _ssh_sessions])
-                st.dataframe(df_ssh, use_container_width=True, hide_index=True)
+                st.dataframe(df_ssh, width='stretch', hide_index=True)
 
             # ── 🔐 IPsec（IKE鍵交換／ESPトンネル）解析 ──
             _ipsec = res.get("ipsec", {})
@@ -5698,7 +5698,7 @@ with tab_pcap:
                         "弱点": " / ".join(s.get("weak_crypto") or []),
                         "理由": s["reason"],
                     } for s in _ike_sas])
-                    st.dataframe(df_ike, use_container_width=True, hide_index=True)
+                    st.dataframe(df_ike, width='stretch', hide_index=True)
                     for s in _ike_sas:
                         if s.get("notify_error"):
                             st.error(f"🔴 **{s['initiator']} ⇔ {s['responder']}**: "
@@ -5725,7 +5725,7 @@ with tab_pcap:
                         "プロトコル": f["proto"], "送信元": f["src"], "宛先": f["dst"],
                         "パケット数": f["packets"],
                     } for f in _esp_flows])
-                    st.dataframe(df_esp, use_container_width=True, hide_index=True)
+                    st.dataframe(df_esp, width='stretch', hide_index=True)
                     if not _ike_sas:
                         st.info("ℹ️ ESP/AH通信は見えますが、IKE(鍵交換)はこのキャプチャ範囲外です"
                                 "（既に確立済みのトンネル）。鍵交換の成否を見るには、接続開始時の"
@@ -5757,7 +5757,7 @@ with tab_pcap:
                     "ルータ1": o["router1"], "ルータ2": o["router2"],
                     "カテゴリ": o["category"], "内容": o["detail"],
                 } for o in _ospf_issues])
-                st.dataframe(df_ospf, use_container_width=True, hide_index=True)
+                st.dataframe(df_ospf, width='stretch', hide_index=True)
                 with st.expander("🛠️ 解決方法・確認コマンド", expanded=True):
                     for o in _ospf_issues:
                         st.markdown(f"**{o['router1']} ⇔ {o['router2']}**（{o['category']}: {o['detail']}）")
@@ -5775,7 +5775,7 @@ with tab_pcap:
                     df_dhcp_sum = pd.DataFrame(
                         [{"メッセージタイプ": k, "件数": v} for k, v in sorted(_dhcp_sum.items())]
                     )
-                    st.dataframe(df_dhcp_sum, use_container_width=True, hide_index=True)
+                    st.dataframe(df_dhcp_sum, width='stretch', hide_index=True)
                 if _dhcp_issues:
                     st.markdown("**⚠️ DHCP 問題検出**")
                     df_dhcp = pd.DataFrame(_dhcp_issues)
@@ -5784,7 +5784,7 @@ with tab_pcap:
                         "timestamp": "時刻", "server": "サーバーIP", "client_mac": "クライアントMAC",
                         "hostname": "ホスト名", "event": "イベント", "detail": "詳細", "issue": "問題",
                     })
-                    st.dataframe(df_dhcp, use_container_width=True, hide_index=True)
+                    st.dataframe(df_dhcp, width='stretch', hide_index=True)
                 else:
                     st.success("✅ DHCP 問題は検出されませんでした")
 
@@ -5815,7 +5815,7 @@ with tab_pcap:
                         "duration_s": "継続(秒)", "jitter_ms": "ジッター(ms)",
                         "loss_pct": "パケットロス%", "mos": "MOS", "quality": "品質",
                     })
-                    st.dataframe(df_voip, use_container_width=True, hide_index=True)
+                    st.dataframe(df_voip, width='stretch', hide_index=True)
                     st.info("💡 MOS 4.0以上=良好 / 3.6以上=普通 / 3.1以上=やや悪い / 3.1未満=悪い（電話品質不可）")
 
             # ── 会話フロー一覧 ──────────────────────────
@@ -5843,7 +5843,7 @@ with tab_pcap:
                     "duration_sec": "継続(秒)", "rtt_ms": "RTT(ms)",
                     "tcp_state": "TCP状態",
                 })
-                st.dataframe(df_conv, use_container_width=True, hide_index=True)
+                st.dataframe(df_conv, width='stretch', hide_index=True)
                 st.caption(f"合計 {len(_convs_f)} フロー（双方向集計・バイト数降順）")
             else:
                 st.info("TCP/UDP フローが検出されませんでした")
@@ -5859,7 +5859,7 @@ with tab_pcap:
                 df_tk["total_MB"] = (df_tk["total_bytes"] / 1024 / 1024).round(3)
                 df_tk_show = df_tk[["ip", "total_MB", "sent_MB", "recv_MB", "sent_pkts", "recv_pkts"]]
                 df_tk_show.columns = ["IPアドレス", "合計(MB)", "送信(MB)", "受信(MB)", "送信パケット数", "受信パケット数"]
-                st.dataframe(df_tk_show, use_container_width=True, hide_index=True)
+                st.dataframe(df_tk_show, width='stretch', hide_index=True)
 
                 _tk_chart = df_tk.set_index("ip")[["sent_MB", "recv_MB"]].head(10)
                 _tk_chart.columns = ["送信MB", "受信MB"]
@@ -5912,7 +5912,7 @@ with tab_pcap:
                         "length": "長さ(B)", "info": "情報",
                         "payload_text": "ペイロード（一部）",
                     })
-                    st.dataframe(df_filt, use_container_width=True, hide_index=True)
+                    st.dataframe(df_filt, width='stretch', hide_index=True)
                 else:
                     st.warning("条件に一致するパケットが見つかりませんでした")
 
@@ -5962,7 +5962,7 @@ with tab_pcap:
                         "位置": m["offset"], "一致": m["match_text"],
                         "前後（《》が一致箇所）": m["preview"],
                     } for m in _gres["matches"]])
-                    st.dataframe(_gdf, use_container_width=True, hide_index=True)
+                    st.dataframe(_gdf, width='stretch', hide_index=True)
                 else:
                     st.warning("一致するパケットが見つかりませんでした"
                                "（『TCPストリーム再構成後』にすると、セグメントを跨ぐ文字列も"
@@ -6051,7 +6051,7 @@ with tab_topo:
             key="topo_proto",
         )
         st.markdown("---")
-        if st.button("🔄 トポロジー取得", key="topo_refresh", use_container_width=True):
+        if st.button("🔄 トポロジー取得", key="topo_refresh", width='stretch'):
             _proto_label = {"lldp": "LLDP", "cdp": "CDP", "both": "LLDP+CDP"}[_topo_proto]
             with st.spinner(f"RESTCONF で {_proto_label} ネイバーを取得中..."):
                 _topo_neighbors = _rc_topo.get_all_topology(_topo_proto)
@@ -6118,7 +6118,7 @@ end""", language="text")
                             st.markdown(_tai[0])
 
                 _dot_str = _rc_topo.build_topology_dot(_cached_topo)
-                st.graphviz_chart(_dot_str, use_container_width=True)
+                st.graphviz_chart(_dot_str, width='stretch')
                 st.markdown("---")
                 st.markdown("**ネイバー一覧**")
                 df_topo = pd.DataFrame(_cached_topo)
@@ -6128,7 +6128,7 @@ end""", language="text")
                     "neighbor_id": "ネイバー名", "neighbor_if": "ネイバーIF",
                     "neighbor_ip": "ネイバー管理IP", "protocol": "プロトコル",
                 })
-                st.dataframe(_topo_show, use_container_width=True, hide_index=True)
+                st.dataframe(_topo_show, width='stretch', hide_index=True)
 
                 # プロトコル別件数
                 if "protocol" in df_topo.columns:
@@ -6224,18 +6224,18 @@ with tab_probe:
             _probe_interval = st.number_input("自動計測間隔（秒）", min_value=30,
                                               value=60, step=30, key="probe_interval")
             _pb_col1, _pb_col2 = st.columns(2)
-            if _pb_col1.button("▶ 自動計測開始", use_container_width=True,
+            if _pb_col1.button("▶ 自動計測開始", width='stretch',
                                disabled=st.session_state.probe_bg_started):
                 _probe.start_background_probe(_probe_interval)
                 st.session_state.probe_bg_started = True
                 st.rerun()
-            if _pb_col2.button("⏹ 停止", use_container_width=True,
+            if _pb_col2.button("⏹ 停止", width='stretch',
                                disabled=not st.session_state.probe_bg_started):
                 _probe.stop_background_probe()
                 st.session_state.probe_bg_started = False
                 st.rerun()
 
-            if st.button("🔄 今すぐ計測", use_container_width=True):
+            if st.button("🔄 今すぐ計測", width='stretch'):
                 with st.spinner("計測中..."):
                     _now_results = _probe.run_all_probes()
                 st.session_state["_probe_now"] = _now_results
@@ -6335,7 +6335,7 @@ ip sla schedule 2 life forever start-time now""", language="text")
                     "rtt_min_ms": "RTT最小(ms)", "rtt_max_ms": "RTT最大(ms)",
                     "success_count": "成功", "failure_count": "失敗", "return_code": "結果",
                 })
-                st.dataframe(df_sla, use_container_width=True, hide_index=True)
+                st.dataframe(df_sla, width='stretch', hide_index=True)
 
                 # RTT グラフ
                 if "RTT平均(ms)" in df_sla.columns and not df_sla.empty:
@@ -6366,12 +6366,12 @@ with tab_cloud:
                    "スナップショット急増の5パターンを投入してデモできます。")
         _cc1, _cc2 = st.columns(2)
         with _cc1:
-            if st.button("▶ サンプルデータ投入", use_container_width=True, key="cloud_sample_add"):
+            if st.button("▶ サンプルデータ投入", width='stretch', key="cloud_sample_add"):
                 _cres = _cac.generate_sample_events()
                 st.success(f"{_cres['events_inserted']} 件投入しました")
                 st.rerun()
         with _cc2:
-            if st.button("🗑 サンプルデータ削除", use_container_width=True,
+            if st.button("🗑 サンプルデータ削除", width='stretch',
                          disabled=not _cac.has_sample_events(), key="cloud_sample_clear"):
                 _n = _cac.clear_sample_events()
                 st.info(f"{_n} 件削除しました")
@@ -6457,7 +6457,7 @@ with tab_cloud:
                 "country": "国", "region": "リージョン", "event_name": "イベント名",
                 "event_source": "サービス", "event_class": "分類", "resource_name": "リソース",
             })
-            st.dataframe(df_cloud, use_container_width=True, hide_index=True)
+            st.dataframe(df_cloud, width='stretch', hide_index=True)
 
 with tab_chat:
     st.markdown("## 💬 AIチャット（解析データについて質問する）")
