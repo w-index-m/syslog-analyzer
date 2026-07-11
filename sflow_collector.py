@@ -321,39 +321,42 @@ def get_interface_issues(hours: int = 1, discard_threshold_pct: float = 0.1) -> 
     直近のsFlowカウンタから、破棄率(discard)・エラー率が閾値を超えるIFを検出する。
     SNMPの health_engine.discard_pct 判定と同じ考え方（バッファ/キュー枯渇）。
     """
-    _init_tables()
-    issues = []
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute("""
-            SELECT agent_ip, if_index,
-                   MAX(in_octets) - MIN(in_octets)     as d_in_octets,
-                   MAX(in_pkts) - MIN(in_pkts)         as d_in_pkts,
-                   MAX(in_discards) - MIN(in_discards) as d_in_disc,
-                   MAX(out_octets) - MIN(out_octets)   as d_out_octets,
-                   MAX(out_pkts) - MIN(out_pkts)       as d_out_pkts,
-                   MAX(out_discards) - MIN(out_discards) as d_out_disc,
-                   MAX(if_speed) as if_speed,
-                   COUNT(*) as samples
-            FROM sflow_counters
-            WHERE received_at >= datetime('now', ? || ' hours')
-            GROUP BY agent_ip, if_index HAVING samples >= 2
-        """, (f"-{hours}",)).fetchall()
-        for r in rows:
-            for direction, pkts, disc in (("入力", r["d_in_pkts"], r["d_in_disc"]),
-                                          ("出力", r["d_out_pkts"], r["d_out_disc"])):
-                if pkts and pkts > 0 and disc and disc > 0:
-                    pct = disc / pkts * 100
-                    if pct >= discard_threshold_pct:
-                        issues.append({
-                            "agent_ip": r["agent_ip"], "if_index": r["if_index"],
-                            "direction": direction, "discard_pct": round(pct, 3),
-                            "discards": disc, "packets": pkts,
-                            "detail": f"{r['agent_ip']} IF{r['if_index']} {direction}破棄率 {round(pct,3)}%"
-                                     f"（{disc}/{pkts}パケット）— バッファ/キュー枯渇の可能性",
-                        })
-    issues.sort(key=lambda x: x["discard_pct"], reverse=True)
-    return issues
+    try:
+        _init_tables()
+        issues = []
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""
+                SELECT agent_ip, if_index,
+                       MAX(in_octets) - MIN(in_octets)     as d_in_octets,
+                       MAX(in_pkts) - MIN(in_pkts)         as d_in_pkts,
+                       MAX(in_discards) - MIN(in_discards) as d_in_disc,
+                       MAX(out_octets) - MIN(out_octets)   as d_out_octets,
+                       MAX(out_pkts) - MIN(out_pkts)       as d_out_pkts,
+                       MAX(out_discards) - MIN(out_discards) as d_out_disc,
+                       MAX(if_speed) as if_speed,
+                       COUNT(*) as samples
+                FROM sflow_counters
+                WHERE received_at >= datetime('now', ? || ' hours')
+                GROUP BY agent_ip, if_index HAVING samples >= 2
+            """, (f"-{hours}",)).fetchall()
+            for r in rows:
+                for direction, pkts, disc in (("入力", r["d_in_pkts"], r["d_in_disc"]),
+                                              ("出力", r["d_out_pkts"], r["d_out_disc"])):
+                    if pkts and pkts > 0 and disc and disc > 0:
+                        pct = disc / pkts * 100
+                        if pct >= discard_threshold_pct:
+                            issues.append({
+                                "agent_ip": r["agent_ip"], "if_index": r["if_index"],
+                                "direction": direction, "discard_pct": round(pct, 3),
+                                "discards": disc, "packets": pkts,
+                                "detail": f"{r['agent_ip']} IF{r['if_index']} {direction}破棄率 {round(pct,3)}%"
+                                         f"（{disc}/{pkts}パケット）— バッファ/キュー枯渇の可能性",
+                            })
+        issues.sort(key=lambda x: x["discard_pct"], reverse=True)
+        return issues
+    except Exception:
+        return []
 
 
 # ─────────────────────────────────────────
@@ -402,11 +405,14 @@ def clear_sample_counters() -> int:
 
 
 def has_sample_counters() -> bool:
-    _init_tables()
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute("SELECT 1 FROM sflow_counters WHERE agent_ip = ? LIMIT 1",
-                            (_SAMPLE_AGENT_IP,)).fetchone()
-        return row is not None
+    try:
+        _init_tables()
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute("SELECT 1 FROM sflow_counters WHERE agent_ip = ? LIMIT 1",
+                                (_SAMPLE_AGENT_IP,)).fetchone()
+            return row is not None
+    except Exception:
+        return False
 
 
 if __name__ == "__main__":

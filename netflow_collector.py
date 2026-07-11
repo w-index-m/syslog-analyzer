@@ -202,19 +202,22 @@ def get_server(port: int = NETFLOW_PORT) -> NetFlowServer:
 # ─────────────────────────────────────────
 
 def get_summary(hours: int = 1) -> dict:
-    _init_tables()
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute("""
-            SELECT COUNT(*) as flows,
-                   COALESCE(SUM(bytes),0)   as total_bytes,
-                   COALESCE(SUM(packets),0) as total_packets,
-                   COUNT(DISTINCT src_ip)   as unique_src,
-                   COUNT(DISTINCT exporter_ip) as exporters
-            FROM netflow_flows
-            WHERE received_at >= datetime('now', ? || ' hours')
-        """, (f"-{hours}",)).fetchone()
-        return {"total_flows": row[0], "total_bytes": row[1],
-                "total_packets": row[2], "unique_src": row[3], "exporters": row[4]}
+    try:
+        _init_tables()
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute("""
+                SELECT COUNT(*) as flows,
+                       COALESCE(SUM(bytes),0)   as total_bytes,
+                       COALESCE(SUM(packets),0) as total_packets,
+                       COUNT(DISTINCT src_ip)   as unique_src,
+                       COUNT(DISTINCT exporter_ip) as exporters
+                FROM netflow_flows
+                WHERE received_at >= datetime('now', ? || ' hours')
+            """, (f"-{hours}",)).fetchone()
+            return {"total_flows": row[0], "total_bytes": row[1],
+                    "total_packets": row[2], "unique_src": row[3], "exporters": row[4]}
+    except Exception:
+        return {"total_flows": 0, "total_bytes": 0, "total_packets": 0, "unique_src": 0, "exporters": 0}
 
 
 def get_top_talkers(hours: int = 1, limit: int = 20) -> list[dict]:
@@ -438,34 +441,40 @@ def get_lateral_movement_alerts(hours: float = 1, threshold: int = 10) -> list[d
 
 def get_source_breakdown(hours: int = 1) -> dict:
     """NetFlow由来 / sFlow由来のフロー内訳を返す（両対応の可視化用）。"""
-    _init_tables()
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute("""
-            SELECT COALESCE(source, 'netflow5') as source,
-                   COUNT(*) as flows, COALESCE(SUM(bytes),0) as total_bytes
-            FROM netflow_flows
-            WHERE received_at >= datetime('now', ? || ' hours')
-            GROUP BY source
-        """, (f"-{hours}",)).fetchall()
-        return {r["source"]: {"flows": r["flows"], "total_bytes": r["total_bytes"]} for r in rows}
+    try:
+        _init_tables()
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""
+                SELECT COALESCE(source, 'netflow5') as source,
+                       COUNT(*) as flows, COALESCE(SUM(bytes),0) as total_bytes
+                FROM netflow_flows
+                WHERE received_at >= datetime('now', ? || ' hours')
+                GROUP BY source
+            """, (f"-{hours}",)).fetchall()
+            return {r["source"]: {"flows": r["flows"], "total_bytes": r["total_bytes"]} for r in rows}
+    except Exception:
+        return {}
 
 
 def get_top_flow_pairs(hours: int = 1, limit: int = 15) -> list[dict]:
     """送信元→宛先ペアで集計する（フロー図解＝Graphvizダイアグラム用）。"""
-    _init_tables()
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute("""
-            SELECT src_ip, dst_ip,
-                   SUM(bytes)   as total_bytes,
-                   SUM(packets) as total_packets,
-                   COUNT(*)     as flows
-            FROM netflow_flows
-            WHERE received_at >= datetime('now', ? || ' hours')
-            GROUP BY src_ip, dst_ip ORDER BY total_bytes DESC LIMIT ?
-        """, (f"-{hours}", limit)).fetchall()
-        return [dict(r) for r in rows]
+    try:
+        _init_tables()
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""
+                SELECT src_ip, dst_ip,
+                       SUM(bytes)   as total_bytes,
+                       SUM(packets) as total_packets,
+                       COUNT(*)     as flows
+                FROM netflow_flows
+                WHERE received_at >= datetime('now', ? || ' hours')
+                GROUP BY src_ip, dst_ip ORDER BY total_bytes DESC LIMIT ?
+            """, (f"-{hours}", limit)).fetchall()
+            return [dict(r) for r in rows]
+    except Exception:
+        return []
 
 
 def build_flow_diagram_dot(pairs: list[dict], max_nodes: int = 25) -> str:
