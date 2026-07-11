@@ -4243,10 +4243,16 @@ with tab_pcap:
         _pcap_key = f"{_pcap_upname}_{len(raw_bytes)}"
         if st.session_state.get("_pcap_key") != _pcap_key:
             with st.spinner("パケットを解析中..."):
-                res      = pcap_analyzer.analyze_pcap(raw_bytes)
-                convs    = pcap_analyzer.get_conversations(raw_bytes)
-                talkers  = pcap_analyzer.get_top_talkers(raw_bytes)
-                streams  = pcap_analyzer.get_tcp_streams(raw_bytes)
+                try:
+                    res      = pcap_analyzer.analyze_pcap(raw_bytes)
+                    convs    = pcap_analyzer.get_conversations(raw_bytes)
+                    talkers  = pcap_analyzer.get_top_talkers(raw_bytes)
+                    streams  = pcap_analyzer.get_tcp_streams(raw_bytes)
+                except Exception as e:
+                    st.error(f"❌ パケット解析エラー: {type(e).__name__}: {str(e)}")
+                    import traceback
+                    st.error(traceback.format_exc())
+                    st.stop()
             st.session_state["_pcap_key"]     = _pcap_key
             st.session_state["_pcap_res"]     = res
             st.session_state["_pcap_convs"]   = convs
