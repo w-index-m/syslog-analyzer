@@ -3777,8 +3777,12 @@ with tab_netflow:
                 st.success(f"{_res['flows_inserted']} 件投入しました")
                 st.rerun()
         with _sd_c2:
+            try:
+                _has_data = _nfc2.has_sample_data()
+            except Exception:
+                _has_data = False
             if st.button("🗑 フローのサンプル削除", use_container_width=True,
-                         disabled=not _nfc2.has_sample_data()):
+                         disabled=not _has_data):
                 _n = _nfc2.clear_sample_data()
                 st.info(f"{_n} 件削除しました")
                 st.rerun()
@@ -3789,8 +3793,12 @@ with tab_netflow:
                            f"{_res2['samples']} 件投入しました")
                 st.rerun()
         with _sd_c4:
+            try:
+                _has_counters = _sfc2.has_sample_counters()
+            except Exception:
+                _has_counters = False
             if st.button("🗑 IF障害のサンプル削除", use_container_width=True,
-                         disabled=not _sfc2.has_sample_counters()):
+                         disabled=not _has_counters):
                 _n2 = _sfc2.clear_sample_counters()
                 st.info(f"{_n2} 件削除しました")
                 st.rerun()
