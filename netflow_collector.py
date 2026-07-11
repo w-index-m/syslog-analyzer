@@ -22,6 +22,8 @@ import socketserver
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import worm_target_ports as _worm_ports
+
 DB_PATH      = Path(os.environ.get("DB_PATH", str(Path(__file__).parent / "syslog.db")))
 NETFLOW_PORT = int(os.environ.get("NETFLOW_PORT", 9995))
 
@@ -392,6 +394,41 @@ def get_ddos_alerts(hours: int = 1) -> list[dict]:
 
     severity_order = {"high": 0, "medium": 1, "low": 2}
     alerts.sort(key=lambda x: severity_order.get(x.get("severity", "low"), 2))
+    return alerts
+
+
+def get_lateral_movement_alerts(hours: float = 1, threshold: int = 10) -> list[dict]:
+    """
+    同一送信元から同一ポートへ多数の異なる宛先に接続していないかを検知する
+    （ワーム横展開/ラテラルムーブメントの兆候。pcap解析のworm_propagationと
+    同じ振る舞いベース検知——シグネチャ不要——をNetFlowデータにも適用する）。
+    """
+    _init_tables()
+    alerts = []
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT src_ip, dst_port, COUNT(DISTINCT dst_ip) AS n_dsts, COUNT(*) AS flows
+            FROM netflow_flows
+            WHERE received_at >= datetime('now', ? || ' hours')
+            GROUP BY src_ip, dst_port HAVING n_dsts >= ?
+            ORDER BY n_dsts DESC
+        """, (f"-{hours}", threshold)).fetchall()
+        for r in rows:
+            is_worm_port = r["dst_port"] in _worm_ports.WORM_TARGET_PORTS
+            port_name = _worm_ports.WORM_TARGET_PORTS.get(r["dst_port"], "")
+            severity = "critical" if (is_worm_port and r["n_dsts"] >= threshold * 2) \
+                       else "high" if is_worm_port else "medium"
+            alerts.append({
+                "src_ip": r["src_ip"], "dst_port": r["dst_port"], "port_name": port_name,
+                "distinct_dsts": r["n_dsts"], "flows": r["flows"], "severity": severity,
+                "detail": f"{r['src_ip']} が ポート{r['dst_port']}"
+                          + (f"({port_name})" if port_name else "")
+                          + f" へ {r['n_dsts']}個の異なる宛先に接続 — "
+                            "ワーム横展開/ラテラルムーブメントの可能性",
+            })
+    severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    alerts.sort(key=lambda x: (severity_order.get(x["severity"], 3), -x["distinct_dsts"]))
     return alerts
 
 

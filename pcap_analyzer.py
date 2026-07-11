@@ -18,6 +18,7 @@ from datetime import datetime
 import dpkt
 
 import ai_service_domains as _ai_svc
+import worm_target_ports as _worm_ports
 
 # ══════════════════════════════════════════════════════════════════
 #  アップロード自動解凍（zip/gzip でまとめられた pcap・syslog を展開）
@@ -116,13 +117,9 @@ def decompress_upload(data: bytes, filename: str = "", prefer: str = "pcap") -> 
 SYSLOG_PORTS = {514, 5140, 5141, 516, 601}
 RIP_PORT     = 520
 
-# ワーム/ボットが横展開でよく狙うポート（振る舞い検知の重大度判定に使う）
-_WORM_TARGET_PORTS = {
-    22: "SSH", 23: "Telnet", 135: "MS-RPC", 139: "NetBIOS", 445: "SMB",
-    1433: "MSSQL", 3306: "MySQL", 3389: "RDP", 5432: "PostgreSQL",
-    5555: "ADB", 6379: "Redis", 7547: "TR-069", 1900: "UPnP", 5900: "VNC",
-    2323: "Telnet(IoT)", 9200: "Elasticsearch", 27017: "MongoDB", 11211: "Memcached",
-}
+# ワーム/ボットが横展開でよく狙うポート（振る舞い検知の重大度判定に使う。
+# worm_target_ports.py でNetFlow解析と共用）
+_WORM_TARGET_PORTS = _worm_ports.WORM_TARGET_PORTS
 
 # マルウェアがコード保管/持ち出しに悪用しがちな公開サービス（配下端末が
 # サーバ的にこれらへアクセスしていたら要確認 = GitPaste-12型/C2の兆候）。

@@ -1718,6 +1718,21 @@ with tab1:
 
     st.caption(f"表示中: {len(logs)} 件")
 
+    # ── 🚨 不正アクセス検知（ブルートフォース・突破の疑い） ──
+    import access_security as _acs
+    _breach_alerts = _acs.get_breach_suspected_alerts(hours=1)
+    _bf_alerts = _acs.get_brute_force_alerts(hours=1)
+    if _breach_alerts or _bf_alerts:
+        st.markdown("### 🚨 不正アクセス検知")
+        st.caption("同一の攻撃元IPから同一機器への認証失敗を集計し、ブルートフォース攻撃・"
+                   "突破（不正アクセス成功）の疑いを検知します（直近1時間）。")
+        for a in _breach_alerts:
+            st.error(f"🔴 {a['detail']}")
+        for a in _bf_alerts:
+            _icon = "🔴" if a["severity"] == "critical" else "🟡"
+            st.warning(f"{_icon} {a['detail']}")
+        st.markdown("---")
+
     if not logs:
         st.info("ログがありません。サーバーを起動してネットワーク機器からsyslogを送信するか、テストログを投入してください。")
     else:
@@ -3975,6 +3990,19 @@ with tab_netflow:
                 _c3.markdown(_al["detail"])
         else:
             st.success("✅ 現在の集計期間で異常なトラフィックパターンは検出されていません。")
+
+        # ── 🐛 ワーム横展開/ラテラルムーブメント検出 ──
+        st.markdown("---")
+        st.markdown("### 🐛 ワーム横展開 / ラテラルムーブメント検出")
+        st.caption("同一送信元から同一ポートへ多数の異なる宛先に接続していないかを検知します"
+                   "（シグネチャ不要の振る舞い検知。pcap解析の同種検知をNetFlowにも適用）。")
+        _lateral_alerts = _nfc2.get_lateral_movement_alerts(_nf_hours)
+        if _lateral_alerts:
+            for _la in _lateral_alerts:
+                _la_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(_la["severity"], "🟡")
+                st.warning(f"{_la_icon} {_la['detail']}")
+        else:
+            st.success("✅ 現在の集計期間でワーム横展開らしきパターンは検出されていません。")
 
         # ── 帯域トレンド（容量計画） ──
         st.markdown("---")
