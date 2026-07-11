@@ -1206,7 +1206,14 @@ def _port_label(port) -> str:
 
 
 def _build_pcap_prompt(pcap_result: dict) -> str:
+    # 入力値の型チェック
+    if not isinstance(pcap_result, dict):
+        raise TypeError(f"pcap_result は dict である必要があります (受け取った型: {type(pcap_result).__name__})")
+
     r = pcap_result
+    if not r or r.get("error"):
+        raise ValueError(f"pcap_result にエラーが含まれています: {r.get('error', 'Unknown error')}")
+
     try:
         icmp_types   = ", ".join(i["name"] + "(" + str(i["count"]) + "件)" for i in r.get("icmp_summary", []))
     except (KeyError, TypeError):
