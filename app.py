@@ -3830,7 +3830,10 @@ with tab_netflow:
         if st.button("🔄 更新", key="nf_refresh"):
             st.rerun()
 
-        _nf_sum = _nfc2.get_summary(_nf_hours)
+        try:
+            _nf_sum = _nfc2.get_summary(_nf_hours)
+        except Exception:
+            _nf_sum = {"total_flows": 0, "total_bytes": 0, "total_packets": 0, "unique_src": 0, "exporters": 0}
 
         # ── 概要メトリクス ──
         st.markdown("### 📊 概要")
@@ -3842,7 +3845,10 @@ with tab_netflow:
         _nc5.metric("エクスポーター", f"{_nf_sum['exporters']:,}")
 
         # ── 情報源内訳（NetFlow / sFlow） ──
-        _nf_src_breakdown = _nfc2.get_source_breakdown(_nf_hours)
+        try:
+            _nf_src_breakdown = _nfc2.get_source_breakdown(_nf_hours)
+        except Exception:
+            _nf_src_breakdown = {}
         if _nf_src_breakdown:
             _src_labels = {"netflow5": "🌊 NetFlow v5", "sflow": "📡 sFlow v5"}
             _src_cols = st.columns(len(_nf_src_breakdown))
@@ -3855,14 +3861,20 @@ with tab_netflow:
         st.markdown("---")
         st.markdown("### 🗺️ トラフィック図解（フロー図）")
         st.caption("送信元IP → 宛先IPの通信量を有向グラフで図解します（線が太いほど通信量が多い）。")
-        _nf_pairs = _nfc2.get_top_flow_pairs(_nf_hours, limit=20)
+        try:
+            _nf_pairs = _nfc2.get_top_flow_pairs(_nf_hours, limit=20)
+        except Exception:
+            _nf_pairs = []
         if _nf_pairs:
             st.graphviz_chart(_nfc2.build_flow_diagram_dot(_nf_pairs), use_container_width=True)
         else:
             st.info("データなし")
 
         # ── sFlow インターフェース障害（バッファ/キュー枯渇） ──
-        _sf_issues = _sfc2.get_interface_issues(_nf_hours)
+        try:
+            _sf_issues = _sfc2.get_interface_issues(_nf_hours)
+        except Exception:
+            _sf_issues = []
         if _sf_issues:
             st.markdown("---")
             st.markdown("### 🧯 sFlow インターフェース障害検出（バッファ/キュー枯渇）")
@@ -3873,7 +3885,10 @@ with tab_netflow:
                 st.warning(f"{_sev} {_issue['detail']}")
 
         # ── タイムライン ──
-        _nf_timeline = _nfc2.get_traffic_timeline(_nf_hours)
+        try:
+            _nf_timeline = _nfc2.get_traffic_timeline(_nf_hours)
+        except Exception:
+            _nf_timeline = []
         if _nf_timeline:
             st.markdown("---")
             st.markdown("### 📈 トラフィックタイムライン")
@@ -3888,7 +3903,10 @@ with tab_netflow:
 
         with _ta_col:
             st.markdown("### 📡 トップトーカー（送信元IP）")
-            _nf_talkers = _nfc2.get_top_talkers(_nf_hours, limit=15)
+            try:
+                _nf_talkers = _nfc2.get_top_talkers(_nf_hours, limit=15)
+            except Exception:
+                _nf_talkers = []
             if _nf_talkers:
                 df_tk = pd.DataFrame(_nf_talkers)
                 df_tk["MB"] = (df_tk["total_bytes"] / 1024 / 1024).round(3)
@@ -3901,7 +3919,10 @@ with tab_netflow:
 
         with _pr_col:
             st.markdown("### 🔌 プロトコル分布")
-            _nf_protos = _nfc2.get_protocol_stats(_nf_hours)
+            try:
+                _nf_protos = _nfc2.get_protocol_stats(_nf_hours)
+            except Exception:
+                _nf_protos = []
             if _nf_protos:
                 df_pr = pd.DataFrame(_nf_protos)
                 df_pr["MB"] = (df_pr["total_bytes"] / 1024 / 1024).round(3)
@@ -3913,7 +3934,10 @@ with tab_netflow:
                 st.info("データなし")
 
         # ── アプリケーション（ポート別） ──
-        _nf_ports = _nfc2.get_port_stats(_nf_hours)
+        try:
+            _nf_ports = _nfc2.get_port_stats(_nf_hours)
+        except Exception:
+            _nf_ports = []
         if _nf_ports:
             st.markdown("---")
             st.markdown("### 🌐 アプリケーション別トラフィック（TCP/UDP 宛先ポート）")
@@ -3930,7 +3954,10 @@ with tab_netflow:
         # ── フロー一覧 ──
         st.markdown("---")
         st.markdown("### 📋 フロー一覧（直近500件）")
-        _nf_flows = _nfc2.get_recent_flows(_nf_hours, limit=500)
+        try:
+            _nf_flows = _nfc2.get_recent_flows(_nf_hours, limit=500)
+        except Exception:
+            _nf_flows = []
         if _nf_flows:
             df_fl = pd.DataFrame(_nf_flows)
             _fl_cols = ["received_at", "exporter_ip", "src_ip", "dst_ip",
@@ -3950,7 +3977,10 @@ with tab_netflow:
         st.markdown("---")
         _ddos_row1, _ddos_row2 = st.columns([4, 1])
         _ddos_row1.markdown("### 🚨 DDoS / 攻撃パターン検出")
-        _nf_alerts = _nfc2.get_ddos_alerts(_nf_hours)
+        try:
+            _nf_alerts = _nfc2.get_ddos_alerts(_nf_hours)
+        except Exception:
+            _nf_alerts = []
         with _ddos_row2:
             _nf_llm_ok = (analyzer.check_claude_available() or analyzer.check_gemini_available()
                           or analyzer.check_groq_available() or analyzer.check_ollama_available())
