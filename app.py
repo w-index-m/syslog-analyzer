@@ -1521,25 +1521,24 @@ _cat = st.session_state._menu_category
 if _cat == "🔍 ネットワーク監視":
     st.markdown("## 🔍 ネットワーク監視")
     (tab_health, tab1, tab_showlog, tab_prtg, tab2, tab3,
-     tab_netflow, tab_pcap, tab_topo, tab_probe) = st.tabs([
+     tab_netflow, tab_pcap, tab_topo, tab_probe, tab_chat) = st.tabs([
         "📊 品質ルーブリック", "📋 ログビューア", "📥 show log解析", "📟 MRTG風",
         "📊 テレメトリダッシュボード", "📡 SNMPモニター",
-        "🌊 NetFlow", "📦 パケット解析", "🗺️ トポロジー", "⏱️ 応答時間"
+        "🌊 NetFlow", "📦 パケット解析", "🗺️ トポロジー", "⏱️ 応答時間", "💬 AIチャット"
     ])
-    tab4 = tab5 = tab_cloud = tab_chat = None
+    tab4 = tab5 = tab_cloud = None
 
 elif _cat == "🛡️ セキュリティ":
     st.markdown("## 🛡️ セキュリティ監視")
     st.info("ネットワークセキュリティ関連の機能を実装予定です")
-    (tab_health, tab1) = st.tabs(["📊 脅威検知ダッシュボード", "🛡️ IPS/脅威インテリジェンス"])
-    tab_showlog = tab_prtg = tab2 = tab3 = tab_netflow = tab_pcap = tab_topo = tab_probe = tab4 = tab5 = tab_cloud = tab_chat = None
+    (tab_health, tab1, tab_chat) = st.tabs(["📊 脅威検知ダッシュボード", "🛡️ IPS/脅威インテリジェンス", "💬 AIチャット"])
+    tab_showlog = tab_prtg = tab2 = tab3 = tab_netflow = tab_pcap = tab_topo = tab_probe = tab4 = tab5 = tab_cloud = None
 
 elif _cat == "☁️ クラウド":
     st.markdown("## ☁️ クラウド環境")
-    tab_cloud = st.container()
-    with tab_cloud:
-        pass  # コンテンツは下で定義
-    tab_health = tab1 = tab_showlog = tab_prtg = tab2 = tab3 = tab_netflow = tab_pcap = tab_topo = tab_probe = tab4 = tab5 = tab_chat = None
+    tab_cloud_main, tab_chat = st.tabs(["☁️ 監査ログ", "💬 AIチャット"])
+    tab_cloud = tab_cloud_main  # コンテンツ定義用に保持
+    tab_health = tab1 = tab_showlog = tab_prtg = tab2 = tab3 = tab_netflow = tab_pcap = tab_topo = tab_probe = tab4 = tab5 = None
 
 else:  # ツール
     st.markdown("## 🔧 ツール・設定")
