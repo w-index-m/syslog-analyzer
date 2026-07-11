@@ -3764,9 +3764,13 @@ with tab_netflow:
     st.caption("ルーター・スイッチから送信される NetFlow v5 / sFlow v5 を受信・集計し、"
                "トラフィックを可視化します。")
 
+    try:
+        _has_data = _nfc2.get_summary(24).get("total_flows", 0) > 0
+    except Exception:
+        _has_data = False
     with st.expander("🧪 実機がなくても試せます（サンプルデータ）", expanded=not (
             st.session_state.netflow_started or st.session_state.sflow_started
-            or _nfc2.get_summary(24)["total_flows"] > 0)):
+            or _has_data)):
         st.caption("NetFlow/sFlowはルーター・スイッチが能動的にUDPで送ってくる"
                    "リアルタイム受信方式のため、実機が無い環境では下のボタンでデモ用データを"
                    "投入して画面イメージを確認できます（いつでも削除できます）。")
@@ -3803,8 +3807,12 @@ with tab_netflow:
                 st.info(f"{_n2} 件削除しました")
                 st.rerun()
 
+    try:
+        _nf_has_data = _nfc2.get_summary(24).get("total_flows", 0) > 0
+    except Exception:
+        _nf_has_data = False
     _nf_has_any = (st.session_state.netflow_started or st.session_state.sflow_started
-                   or _nfc2.get_summary(24)["total_flows"] > 0)
+                   or _nf_has_data)
 
     if not _nf_has_any:
         st.info("サイドバーから NetFlow / sFlow サーバーを起動するか、上のサンプルデータで"
@@ -3986,7 +3994,10 @@ with tab_netflow:
                           or analyzer.check_groq_available() or analyzer.check_ollama_available())
             if st.button("🤖 AI分析", key="nf_ddos_ai", disabled=not _nf_llm_ok,
                          use_container_width=True, type="primary"):
-                _nf_sum2 = _nfc2.get_summary(_nf_hours)
+                try:
+                    _nf_sum2 = _nfc2.get_summary(_nf_hours)
+                except Exception:
+                    _nf_sum2 = {"total_flows": 0, "total_bytes": 0, "total_packets": 0, "unique_src": 0, "exporters": 0}
                 _nf_ai_ctx = (
                     f"NetFlow集計期間: 過去{_nf_hours}時間\n"
                     f"総フロー: {_nf_sum2['total_flows']:,} / 総バイト: {_nf_sum2['total_bytes']/1024/1024:.1f}MB\n\n"
@@ -4034,7 +4045,10 @@ with tab_netflow:
         st.markdown("### 🐛 ワーム横展開 / ラテラルムーブメント検出")
         st.caption("同一送信元から同一ポートへ多数の異なる宛先に接続していないかを検知します"
                    "（シグネチャ不要の振る舞い検知。pcap解析の同種検知をNetFlowにも適用）。")
-        _lateral_alerts = _nfc2.get_lateral_movement_alerts(_nf_hours)
+        try:
+            _lateral_alerts = _nfc2.get_lateral_movement_alerts(_nf_hours)
+        except Exception:
+            _lateral_alerts = []
         if _lateral_alerts:
             for _la in _lateral_alerts:
                 _la_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(_la["severity"], "🟡")
@@ -4052,7 +4066,10 @@ with tab_netflow:
         _cap_threshold = st.number_input(
             "容量閾値 (MB/時間)", min_value=0, value=100, step=10, key="nf_cap_thresh"
         )
-        _bw_hist = _nfc2.get_bandwidth_history(_nf_trend_days)
+        try:
+            _bw_hist = _nfc2.get_bandwidth_history(_nf_trend_days)
+        except Exception:
+            _bw_hist = []
         if _bw_hist:
             import pandas as pd
             df_bw = pd.DataFrame(_bw_hist)
