@@ -1501,50 +1501,8 @@ def _process_queue():
 _process_queue()
 
 # ─────────────────────────────────────────
-# メインUI - 3行に分割したタブ
+# メインUI - タブメニュー
 # ─────────────────────────────────────────
-st.markdown("### 📂 タブメニュー（3行表示・iPad対応）")
-
-# 1行目（5個）
-col1, col2, col3, col4, col5 = st.columns(5)
-with col1:
-    st.caption("📊 品質")
-with col2:
-    st.caption("📋 ログ")
-with col3:
-    st.caption("📥 解析")
-with col4:
-    st.caption("📟 MRTG")
-with col5:
-    st.caption("📊 テレ")
-
-# 2行目（5個）
-col1, col2, col3, col4, col5 = st.columns(5)
-with col1:
-    st.caption("📡 SNMP")
-with col2:
-    st.caption("🌊 Flow")
-with col3:
-    st.caption("📦 pcap")
-with col4:
-    st.caption("🗺️  Topo")
-with col5:
-    st.caption("⏱️ 応答")
-
-# 3行目（4個）
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    st.caption("☁️  Cloud")
-with col2:
-    st.caption("🗂️  Config")
-with col3:
-    st.caption("📖 Setup")
-with col4:
-    st.caption("💬 Chat")
-
-st.divider()
-
-# 元のst.tabs()システムに戻す
 (tab_health, tab1, tab_showlog, tab_prtg, tab2, tab3,
  tab_netflow, tab_pcap, tab_topo, tab_probe, tab_cloud, tab4, tab5, tab_chat) = st.tabs([
     "📊 品質ルーブリック", "📋 ログビューア", "📥 show log解析", "📟 MRTG風",
