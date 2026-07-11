@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import requests
@@ -23,6 +24,20 @@ def _dlp_redact(text: str) -> str:
     redacted, findings = dlp.sanitize(text)
     globals()["LAST_DLP_FINDINGS"] = findings
     return redacted
+
+
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def _clean_llm_json_text(text: str) -> str:
+    """
+    LLM応答からJSON抽出前の前処理を行う。
+    DeepSeek-R1系モデルは応答の先頭に<think>...</think>という推論ブロックを
+    付けることがあり、素の```json```除去だけではjson.loads()が失敗するため、
+    まずこのブロックを除去してからコードフェンスを剥がす。
+    """
+    text = _THINK_BLOCK_RE.sub("", text or "").strip()
+    return text.replace("```json", "").replace("```", "").strip()
 
 # プロバイダの既定優先順位（auto時、および明示モード失敗時のフォールバック順）
 _PROVIDER_ORDER = ("claude", "gemini", "groq", "ollama")
@@ -123,7 +138,7 @@ def analyze_with_claude(parsed: dict, raw: str, config_context: str = "") -> tup
         data = resp.json()
         text = data["content"][0]["text"].strip()
         # JSON整形
-        text = text.replace("```json", "").replace("```", "").strip()
+        text = _clean_llm_json_text(text)
         return text, "claude-sonnet-4-6"
     except Exception as e:
         _note_llm_error("Claude", exc=e)
@@ -148,7 +163,7 @@ def analyze_with_ollama(parsed: dict, raw: str, config_context: str = "") -> tup
         )
         resp.raise_for_status()
         text = resp.json()["message"]["content"].strip()
-        text = text.replace("```json", "").replace("```", "").strip()
+        text = _clean_llm_json_text(text)
         return text, f"ollama/{OLLAMA_MODEL}"
     except Exception as e:
         print(f"[Ollama error] {e}")
@@ -329,7 +344,7 @@ def _call_gemini_raw(system: str, user: str, max_tokens: int = 800) -> tuple[str
             print(f"[Gemini error] HTTP {resp.status_code}: {resp.text[:200]}")
             return "", ""
         text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-        return text.replace("```json", "").replace("```", "").strip(), f"gemini/{GEMINI_MODEL}"
+        return _clean_llm_json_text(text), f"gemini/{GEMINI_MODEL}"
     except Exception as e:
         _note_llm_error("Gemini", exc=e)
         print(f"[Gemini error] {e}")
@@ -358,7 +373,7 @@ def _call_groq_raw(system: str, user: str, max_tokens: int = 800) -> tuple[str, 
             print(f"[Groq error] HTTP {resp.status_code}: {resp.text[:200]}")
             return "", ""
         text = resp.json()["choices"][0]["message"]["content"].strip()
-        return text.replace("```json", "").replace("```", "").strip(), f"groq/{GROQ_MODEL}"
+        return _clean_llm_json_text(text), f"groq/{GROQ_MODEL}"
     except Exception as e:
         _note_llm_error("Groq", exc=e)
         print(f"[Groq error] {e}")
@@ -590,7 +605,7 @@ def judge_with_claude(parsed: dict, raw: str, ai_explanation: str,
         )
         resp.raise_for_status()
         text = resp.json()["content"][0]["text"].strip()
-        text = text.replace("```json", "").replace("```", "").strip()
+        text = _clean_llm_json_text(text)
         result = json.loads(text)
         result["judge_model"] = "claude-sonnet-4-6"
         return result
@@ -618,7 +633,7 @@ def judge_with_ollama(parsed: dict, raw: str, ai_explanation: str,
         )
         resp.raise_for_status()
         text = resp.json()["message"]["content"].strip()
-        text = text.replace("```json", "").replace("```", "").strip()
+        text = _clean_llm_json_text(text)
         result = json.loads(text)
         result["judge_model"] = f"ollama/{OLLAMA_MODEL}"
         return result
@@ -855,7 +870,7 @@ def diagnose_health_with_claude(device_health, recent_logs, config_context=""):
         )
         resp.raise_for_status()
         text = resp.json()["content"][0]["text"].strip()
-        text = text.replace("```json", "").replace("```", "").strip()
+        text = _clean_llm_json_text(text)
         result = json.loads(text)
         result["diagnosis_model"] = "claude-sonnet-4-6"
         return result
@@ -876,7 +891,7 @@ def diagnose_health_with_ollama(device_health, recent_logs, config_context=""):
         )
         resp.raise_for_status()
         text = resp.json()["message"]["content"].strip()
-        text = text.replace("```json", "").replace("```", "").strip()
+        text = _clean_llm_json_text(text)
         result = json.loads(text)
         result["diagnosis_model"] = f"ollama/{OLLAMA_MODEL}"
         return result
@@ -1006,7 +1021,7 @@ def diagnose_icmp_redirect(ip: str, snmp_data: list, redirect_logs: list,
                 timeout=40
             )
             resp.raise_for_status()
-            text = resp.json()["content"][0]["text"].strip().replace("```json","").replace("```","").strip()
+            text = _clean_llm_json_text(resp.json()["content"][0]["text"].strip())
             result = json.loads(text)
             result["diagnosis_model"] = "claude-sonnet-4-6"
             return result
@@ -1025,7 +1040,7 @@ def diagnose_icmp_redirect(ip: str, snmp_data: list, redirect_logs: list,
                 timeout=90
             )
             resp.raise_for_status()
-            text = resp.json()["message"]["content"].strip().replace("```json","").replace("```","").strip()
+            text = _clean_llm_json_text(resp.json()["message"]["content"].strip())
             result = json.loads(text)
             result["diagnosis_model"] = f"ollama/{OLLAMA_MODEL}"
             return result
@@ -1558,7 +1573,7 @@ def diagnose_pcap(pcap_result: dict, mode: str = "auto") -> dict:
                 timeout=45,
             )
             resp.raise_for_status()
-            text = resp.json()["content"][0]["text"].strip().replace("```json","").replace("```","").strip()
+            text = _clean_llm_json_text(resp.json()["content"][0]["text"].strip())
             return _parse(text, "claude-sonnet-4-6")
         except Exception as e:
             print(f"[pcap diag:Claude] {e}")
@@ -1575,7 +1590,7 @@ def diagnose_pcap(pcap_result: dict, mode: str = "auto") -> dict:
                 timeout=120,
             )
             resp.raise_for_status()
-            text = resp.json()["message"]["content"].strip().replace("```json","").replace("```","").strip()
+            text = _clean_llm_json_text(resp.json()["message"]["content"].strip())
             return _parse(text, f"ollama/{OLLAMA_MODEL}")
         except Exception as e:
             print(f"[pcap diag:Ollama] {e}")
@@ -1676,7 +1691,7 @@ def _run_agentic_claude_loop(prompt: str, system_prompt: str, tools: list,
 
             if data.get("stop_reason") != "tool_use":
                 text_blocks = [b["text"] for b in data["content"] if b.get("type") == "text"]
-                text = "\n".join(text_blocks).strip().replace("```json", "").replace("```", "").strip()
+                text = _clean_llm_json_text("\n".join(text_blocks).strip())
                 result = json.loads(text)
                 result["tool_calls_made"] = tool_calls_made
                 return result
@@ -1850,7 +1865,7 @@ def diagnose_pcap_with_ollama_model(pcap_result: dict, model_name: str) -> dict 
             timeout=180,
         )
         resp.raise_for_status()
-        text = resp.json()["message"]["content"].strip().replace("```json", "").replace("```", "").strip()
+        text = _clean_llm_json_text(resp.json()["message"]["content"].strip())
         r = json.loads(text)
         r["diagnosis_model"] = f"ollama/{model_name}"
         return r
