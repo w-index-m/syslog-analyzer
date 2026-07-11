@@ -1504,11 +1504,11 @@ _process_queue()
 # メインUI
 # ─────────────────────────────────────────
 (tab_health, tab1, tab_showlog, tab_prtg, tab2, tab3, tab4, tab5,
- tab_netflow, tab_pcap, tab_topo, tab_probe, tab_cloud) = st.tabs([
+ tab_netflow, tab_pcap, tab_topo, tab_probe, tab_cloud, tab_chat) = st.tabs([
     "📊 品質ルーブリック", "📋 ログビューア", "📥 show log解析", "📟 MRTG風",
     "📊 テレメトリダッシュボード", "📡 SNMPモニター", "🗂️ 機器コンフィグ",
     "📖 セットアップガイド", "🌊 NetFlow", "📦 パケット解析",
-    "🗺️ トポロジー", "⏱️ 応答時間", "☁️ クラウド監査ログ"
+    "🗺️ トポロジー", "⏱️ 応答時間", "☁️ クラウド監査ログ", "💬 AIチャット"
 ])
 
 # ═══════════════════════════════════════════
@@ -6296,3 +6296,114 @@ with tab_cloud:
                 "event_source": "サービス", "event_class": "分類", "resource_name": "リソース",
             })
             st.dataframe(df_cloud, use_container_width=True, hide_index=True)
+
+with tab_chat:
+    st.markdown("## 💬 AIチャット（解析データについて質問する）")
+    st.caption("読み込み済みのパケット解析結果、またはNetFlow/sFlow解析結果について、"
+               "自然言語で質問できます（例: 「ICMPリダイレクトの数を数えて」"
+               "「不安なところある？」「トップ10教えて」「悪そうな兆候を洗い出して」）。")
+
+    _chat_source = st.radio("質問対象", ["📦 パケット解析結果", "🌊 NetFlow / sFlow結果"],
+                             horizontal=True, key="chat_source_select")
+
+    _chat_context = None
+    _chat_context_label = ""
+    if _chat_source == "📦 パケット解析結果":
+        _chat_pcap_res = st.session_state.get("_pcap_res")
+        if not _chat_pcap_res or _chat_pcap_res.get("error"):
+            st.info("まだパケット解析結果がありません。「📦 パケット解析」タブでpcapを"
+                    "アップロードしてから質問してください。")
+        else:
+            _chat_context = analyzer.build_pcap_chat_context(_chat_pcap_res)
+            _chat_context_label = "pcap"
+    else:
+        import netflow_collector as _nfc3
+        import sflow_collector as _sfc3
+        _nf_sum3 = _nfc3.get_summary(1)
+        if _nf_sum3["total_flows"] == 0:
+            st.info("まだNetFlow/sFlowデータがありません。「🌊 NetFlow」タブでサーバーを"
+                    "起動するか、サンプルデータを投入してから質問してください。")
+        else:
+            _talkers3       = _nfc3.get_top_talkers(1, limit=20)
+            _protos3        = _nfc3.get_protocol_stats(1)
+            _ports3         = _nfc3.get_port_stats(1)
+            _ddos3          = _nfc3.get_ddos_alerts(1)
+            _lateral3       = _nfc3.get_lateral_movement_alerts(1)
+            _sflow_issues3  = _sfc3.get_interface_issues(1)
+            _src_breakdown3 = _nfc3.get_source_breakdown(1)
+
+            _lines = ["【概要（直近1時間）】",
+                      f"総フロー数: {_nf_sum3['total_flows']} / "
+                      f"総バイト数: {_nf_sum3['total_bytes']/1024/1024:.1f}MB / "
+                      f"ユニーク送信元: {_nf_sum3['unique_src']} / "
+                      f"エクスポーター数: {_nf_sum3['exporters']}"]
+            if _src_breakdown3:
+                _lines.append("【情報源内訳】")
+                for _src, _v in _src_breakdown3.items():
+                    _lines.append(f"  {_src}: {_v['flows']}フロー / {_v['total_bytes']/1024/1024:.1f}MB")
+            _lines.append("【トップトーカー（送信元IP、上位20件、バイト数降順）】")
+            for _t in _talkers3:
+                _lines.append(f"  {_t['ip']}: {_t['total_bytes']/1024/1024:.2f}MB / "
+                              f"{_t['total_packets']}パケット / {_t['flows']}フロー")
+            _lines.append("【プロトコル分布】")
+            for _p in _protos3:
+                _lines.append(f"  {_p['protocol_name']}: {_p['total_bytes']/1024/1024:.2f}MB / {_p['flows']}フロー")
+            _lines.append("【アプリケーション別（宛先ポート）】")
+            for _p in _ports3:
+                _lines.append(f"  {_p['app']} (port {_p['dst_port']}): "
+                              f"{_p['total_bytes']/1024/1024:.2f}MB / {_p['flows']}フロー")
+            if _ddos3:
+                _lines.append("【DDoS/攻撃パターン検出】")
+                for _a in _ddos3:
+                    _lines.append(f"  [{_a['severity']}] {_a['type']} src={_a['src_ip']}: {_a['detail']}")
+            if _lateral3:
+                _lines.append("【ワーム横展開/ラテラルムーブメント検出】")
+                for _a in _lateral3:
+                    _lines.append(f"  [{_a['severity']}] {_a['detail']}")
+            if _sflow_issues3:
+                _lines.append("【sFlow インターフェース障害（バッファ/キュー枯渇）】")
+                for _i in _sflow_issues3:
+                    _lines.append(f"  {_i['detail']}")
+            if not (_ddos3 or _lateral3 or _sflow_issues3):
+                _lines.append("【異常検知】現在の集計期間で異常なパターンは検出されていません。")
+
+            _chat_context = "\n".join(_lines)
+            _chat_context_label = "netflow"
+
+    if _chat_context:
+        _hist_key = f"_chat_history_{_chat_context_label}"
+        if _hist_key not in st.session_state:
+            st.session_state[_hist_key] = []
+
+        for _msg in st.session_state[_hist_key]:
+            with st.chat_message(_msg["role"]):
+                st.markdown(_msg["content"])
+
+        _chat_llm_ok = (analyzer.check_claude_available() or analyzer.check_gemini_available()
+                        or analyzer.check_groq_available() or analyzer.check_ollama_available())
+        if not _chat_llm_ok:
+            st.warning("AI解析エンジンが利用できません（サイドバーでAPIキーを設定するか、"
+                       "Ollamaを起動してください）。")
+
+        _user_q = st.chat_input("データについて質問する", disabled=not _chat_llm_ok)
+        if _user_q:
+            st.session_state[_hist_key].append({"role": "user", "content": _user_q})
+            with st.chat_message("user"):
+                st.markdown(_user_q)
+            with st.chat_message("assistant"):
+                with st.spinner("考え中..."):
+                    _answer, _model = analyzer.ask_about_data(
+                        _chat_context, _user_q, history=st.session_state[_hist_key][:-1],
+                        mode=st.session_state.get("llm_mode", "auto"))
+                if _answer:
+                    st.markdown(_answer)
+                    st.caption(f"モデル: {_model}")
+                    st.session_state[_hist_key].append({"role": "assistant", "content": _answer})
+                else:
+                    _chat_err = getattr(analyzer, "LAST_LLM_ERROR", "") or "回答を取得できませんでした。"
+                    st.error(_chat_err)
+
+        if st.session_state[_hist_key]:
+            if st.button("🗑️ 会話をクリア", key=f"chat_clear_{_chat_context_label}"):
+                st.session_state[_hist_key] = []
+                st.rerun()

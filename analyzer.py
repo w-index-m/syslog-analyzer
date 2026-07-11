@@ -1541,6 +1541,54 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
     return _dlp_redact("\n".join(lines))
 
 
+def build_pcap_chat_context(pcap_result: dict) -> str:
+    """pcap解析結果を、チャットQ&Aで使うコンテキスト文字列に変換する。"""
+    return _build_pcap_prompt(pcap_result)
+
+
+CHAT_SYSTEM_PROMPT = """あなたはネットワーク解析アシスタントです。
+提示される解析データ（pcapキャプチャ解析結果、またはNetFlow/sFlowのフロー
+解析結果）に基づいて、ユーザーの質問に日本語で回答してください。
+
+ルール:
+- データに含まれる具体的な数値・IPアドレス・件数を挙げて具体的に回答する
+- データに存在しない情報について聞かれたら、憶測で答えず
+  「提供されたデータからは判断できません」と正直に答える
+- 「怪しい/不安な兆候」を聞かれた場合は、検知済みの異常（ワーム横展開・
+  ビーコニング・脅威インテリジェンス照合・DDoS/ポートスキャン・IF障害等）を
+  重大度順に整理して答える
+- ランキング（トップN等）を聞かれた場合は、データ中の該当リストを
+  数値の大きい順に整理して答える
+"""
+
+
+def ask_about_data(context: str, question: str, history: list | None = None,
+                    mode: str = "auto") -> tuple[str, str]:
+    """
+    pcap/NetFlow等の解析結果データについて、自然言語のチャット形式で質問し
+    LLMの回答を得る（アプリ内蔵チャットUIから使用）。
+
+    Args:
+        context: 解析結果から構築したコンテキスト文字列
+                （build_pcap_chat_context()等で生成）
+        question: ユーザーの新しい質問
+        history: 直近の会話履歴 [{"role": "user"/"assistant", "content": str}, ...]
+        mode: LLMプロバイダ選択（"auto"等）
+    """
+    convo = ""
+    if history:
+        for turn in history[-6:]:
+            role_label = "ユーザー" if turn.get("role") == "user" else "アシスタント"
+            convo += f"\n{role_label}: {turn.get('content', '')}"
+
+    user_msg = (
+        f"{context}\n\n"
+        f"────────── これまでの会話 ──────────{convo or '（なし）'}\n\n"
+        f"────────── 新しい質問 ──────────\n{question}"
+    )
+    return ask_llm(CHAT_SYSTEM_PROMPT, user_msg, mode, max_tokens=1500)
+
+
 def diagnose_pcap(pcap_result: dict, mode: str = "auto") -> dict:
     """
     pcap解析結果を LLM に投げて総合診断を返す。
