@@ -5441,6 +5441,49 @@ with tab_pcap:
                                "AIチャットのタブを開きっぱなし、またはエージェント/常時接続的な"
                                "利用をしている可能性があります。")
 
+            # ── 🦈 llmshark連携（LLMストリーミング性能: TTFT/ITL） ──
+            st.markdown("---")
+            st.markdown("### 🦈 LLMストリーミング性能解析（llmshark連携）")
+            st.caption(
+                "Time to First Token(TTFT)・Inter-Token Latency(ITL)等、LLM APIの"
+                "ストリーミング応答パフォーマンスを解析します（[llmshark](https://github.com/llmshark/llmshark)、"
+                "`pip install llmshark`が必要・任意機能）。**暗号化されていないHTTP/SSE通信"
+                "にしか使えません**（例: ローカルOllama http://localhost:11434 のキャプチャ。"
+                "Claude/OpenAI等のHTTPS通信は復号しない限り解析できません）。"
+            )
+            import llmshark_bridge as _lsb
+            if not _lsb.LLMSHARK_AVAILABLE:
+                st.info("llmsharkが未インストールです。使う場合は `pip install llmshark` を実行してください"
+                        "（デフォルトでは重い依存関係を避けるため未インストールです）。")
+            else:
+                _ls_bytes = st.session_state.get("_pcap_bytes")
+                if st.button("🦈 llmsharkで解析", key="llmshark_run"):
+                    with st.spinner("llmsharkで解析中..."):
+                        _ls_res = _lsb.analyze_streaming_pcap(_ls_bytes) if _ls_bytes else {"available": True, "session_count": 0}
+                    st.session_state["_llmshark_res"] = _ls_res
+                _ls_res = st.session_state.get("_llmshark_res")
+                if _ls_res:
+                    if _ls_res.get("session_count", 0) == 0:
+                        st.info("平文HTTP/SSEストリーミングセッションが見つかりませんでした"
+                                "（暗号化されている、またはLLMストリーミング以外の通信の可能性）。")
+                    else:
+                        _ls_c1, _ls_c2, _ls_c3, _ls_c4 = st.columns(4)
+                        _ls_c1.metric("セッション数", _ls_res["session_count"])
+                        _ls_c2.metric("TTFT", f"{_ls_res['ttft_ms']} ms" if _ls_res.get("ttft_ms") is not None else "—")
+                        _ls_c3.metric("平均ITL", f"{_ls_res['mean_itl_ms']} ms" if _ls_res.get("mean_itl_ms") is not None else "—")
+                        _ls_c4.metric("トークン/秒", _ls_res.get("tokens_per_second", "—"))
+                        if _ls_res.get("key_insights"):
+                            with st.expander("📋 主な所見", expanded=True):
+                                for _ins in _ls_res["key_insights"]:
+                                    st.markdown(f"- {_ins}")
+                        _ls_anom = _ls_res.get("anomalies", {})
+                        if _ls_anom.get("unusual_patterns"):
+                            for _p in _ls_anom["unusual_patterns"]:
+                                st.warning(f"⚠️ {_p}")
+                        if _ls_res.get("sessions"):
+                            df_ls = pd.DataFrame(_ls_res["sessions"])
+                            st.dataframe(df_ls, use_container_width=True, hide_index=True)
+
             # ── 🔑 SSH鍵交換の成否 ──
             _ssh_sessions = res.get("ssh_handshakes", [])
             if _ssh_sessions:
