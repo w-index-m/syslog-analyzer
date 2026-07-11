@@ -1501,15 +1501,52 @@ def _process_queue():
 _process_queue()
 
 # ─────────────────────────────────────────
-# メインUI
+# メインUI - 3段階メニュー構造
 # ─────────────────────────────────────────
-(tab_health, tab1, tab_showlog, tab_prtg, tab2, tab3, tab4, tab5,
- tab_netflow, tab_pcap, tab_topo, tab_probe, tab_cloud, tab_chat) = st.tabs([
-    "📊 品質ルーブリック", "📋 ログビューア", "📥 show log解析", "📟 MRTG風",
-    "📊 テレメトリダッシュボード", "📡 SNMPモニター", "🗂️ 機器コンフィグ",
-    "📖 セットアップガイド", "🌊 NetFlow", "📦 パケット解析",
-    "🗺️ トポロジー", "⏱️ 応答時間", "☁️ クラウド監査ログ", "💬 AIチャット"
-])
+# 1段目：大カテゴリ（サイドバー）
+if "_menu_category" not in st.session_state:
+    st.session_state._menu_category = "🔍 ネットワーク監視"
+
+st.sidebar.markdown("### 📂 メニューカテゴリ")
+st.session_state._menu_category = st.sidebar.radio(
+    "カテゴリ選択",
+    ["🔍 ネットワーク監視", "🛡️ セキュリティ", "☁️ クラウド", "🔧 ツール"],
+    index=["🔍 ネットワーク監視", "🛡️ セキュリティ", "☁️ クラウド", "🔧 ツール"].index(st.session_state._menu_category),
+    label_visibility="collapsed"
+)
+
+# 2段目・3段目：大カテゴリ別に中カテゴリタブを表示
+_cat = st.session_state._menu_category
+
+if _cat == "🔍 ネットワーク監視":
+    st.markdown("## 🔍 ネットワーク監視")
+    (tab_health, tab1, tab_showlog, tab_prtg, tab2, tab3,
+     tab_netflow, tab_pcap, tab_topo, tab_probe) = st.tabs([
+        "📊 品質ルーブリック", "📋 ログビューア", "📥 show log解析", "📟 MRTG風",
+        "📊 テレメトリダッシュボード", "📡 SNMPモニター",
+        "🌊 NetFlow", "📦 パケット解析", "🗺️ トポロジー", "⏱️ 応答時間"
+    ])
+    tab4 = tab5 = tab_cloud = tab_chat = None
+
+elif _cat == "🛡️ セキュリティ":
+    st.markdown("## 🛡️ セキュリティ監視")
+    st.info("ネットワークセキュリティ関連の機能を実装予定です")
+    (tab_health, tab1) = st.tabs(["📊 脅威検知ダッシュボード", "🛡️ IPS/脅威インテリジェンス"])
+    tab_showlog = tab_prtg = tab2 = tab3 = tab_netflow = tab_pcap = tab_topo = tab_probe = tab4 = tab5 = tab_cloud = tab_chat = None
+
+elif _cat == "☁️ クラウド":
+    st.markdown("## ☁️ クラウド環境")
+    tab_cloud = st.container()
+    with tab_cloud:
+        pass  # コンテンツは下で定義
+    tab_health = tab1 = tab_showlog = tab_prtg = tab2 = tab3 = tab_netflow = tab_pcap = tab_topo = tab_probe = tab4 = tab5 = tab_chat = None
+
+else:  # ツール
+    st.markdown("## 🔧 ツール・設定")
+    (tab4, tab5, tab_chat) = st.tabs([
+        "🗂️ 機器コンフィグ", "📖 セットアップガイド", "💬 AIチャット"
+    ])
+    tab_health = tab1 = tab_showlog = tab_prtg = tab2 = tab3 = tab_netflow = tab_pcap = tab_topo = tab_probe = tab_cloud = None
 
 # ═══════════════════════════════════════════
 # TAB: 品質ルーブリック（メイン画面）
