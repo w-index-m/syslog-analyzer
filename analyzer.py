@@ -1207,18 +1207,31 @@ def _port_label(port) -> str:
 
 def _build_pcap_prompt(pcap_result: dict) -> str:
     r = pcap_result
-    icmp_types   = ", ".join(i["name"] + "(" + str(i["count"]) + "件)" for i in r.get("icmp_summary", []))
-    dhcp_types   = ", ".join(str(k) + ":" + str(v) for k, v in r.get("dhcp_summary", {}).items())
-    http_status  = ", ".join(str(i["status_code"]) + ":" + str(i["count"]) + "件" for i in r.get("http_summary", []))
-    dns_s        = r.get("dns_summary", {})
-    tls_s        = r.get("tls_summary", {})
+    try:
+        icmp_types   = ", ".join(i["name"] + "(" + str(i["count"]) + "件)" for i in r.get("icmp_summary", []))
+    except (KeyError, TypeError):
+        icmp_types = ""
+    try:
+        dhcp_types   = ", ".join(str(k) + ":" + str(v) for k, v in r.get("dhcp_summary", {}).items())
+    except (KeyError, TypeError):
+        dhcp_types = ""
+    try:
+        http_status  = ", ".join(str(i["status_code"]) + ":" + str(i["count"]) + "件" for i in r.get("http_summary", []))
+    except (KeyError, TypeError):
+        http_status = ""
+    dns_s        = r.get("dns_summary", {}) or {}
+    tls_s        = r.get("tls_summary", {}) or {}
 
-    retrans_s = r.get("tcp_retrans_summary", {})
+    retrans_s = r.get("tcp_retrans_summary", {}) or {}
     _dur_sec = r.get("capture_duration_sec", 0) or 0
-    _redirect_n = len(r.get("icmp_redirects", []))
-    if _dur_sec > 0:
-        _redirect_rate = f"（{_dur_sec:.0f}秒間で{_redirect_n}件 ＝ 約{_redirect_n/_dur_sec*60:.1f}件/分）"
-    else:
+    try:
+        _redirect_n = len(r.get("icmp_redirects", []))
+        if _dur_sec > 0:
+            _redirect_rate = f"（{_dur_sec:.0f}秒間で{_redirect_n}件 ＝ 約{_redirect_n/_dur_sec*60:.1f}件/分）"
+        else:
+            _redirect_rate = ""
+    except (TypeError, ZeroDivisionError):
+        _redirect_n = 0
         _redirect_rate = ""
     lines = [
         f"キャプチャ期間: {r.get('capture_start','')} 〜 {r.get('capture_end','')}"
@@ -1238,23 +1251,33 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
         f"  ゼロウィンドウ: {len(r.get('tcp_zero_window', []))} フロー",
     ]
     if r.get("tcp_issues"):
-        for i in r["tcp_issues"][:5]:
-            _sp, _dp = _port_label(i.get("src_port")), _port_label(i.get("dst_port"))
-            _src = i.get("src","") + (f":{_sp}" if _sp else "")
-            _dst = i.get("dst","") + (f":{_dp}" if _dp else "")
-            lines.append("    - " + i.get("type","") + " " + _src + "→" + _dst + " : " + i.get("description","")[:80])
+        try:
+            for i in r.get("tcp_issues", [])[:5]:
+                if not i:
+                    continue
+                _sp, _dp = _port_label(i.get("src_port")), _port_label(i.get("dst_port"))
+                _src = i.get("src","") + (f":{_sp}" if _sp else "")
+                _dst = i.get("dst","") + (f":{_dp}" if _dp else "")
+                lines.append("    - " + i.get("type","") + " " + _src + "→" + _dst + " : " + (i.get("description","")[:80] if i.get("description") else ""))
+        except (KeyError, TypeError):
+            pass
 
     # ウィンドウ制御の原因切り分け（受信側rwnd vs 経路上cwnd）
-    _rx_pressure = r.get("tcp_receiver_pressure", [])
-    _path_cong = r.get("tcp_path_congestion", [])
+    _rx_pressure = r.get("tcp_receiver_pressure", []) or []
+    _path_cong = r.get("tcp_path_congestion", []) or []
     if _rx_pressure or _path_cong:
-        lines.append("")
-        lines.append(f"【TCPウィンドウ制御の原因切り分け】受信側逼迫{len(_rx_pressure)}件 / "
-                     f"経路上輻輳{len(_path_cong)}件")
-        for rp in _rx_pressure[:3]:
-            lines.append(f"    - [受信側rwnd] {rp['detail']}")
-        for pc in _path_cong[:3]:
-            lines.append(f"    - [経路上cwnd] {pc['detail']}")
+        try:
+            lines.append("")
+            lines.append(f"【TCPウィンドウ制御の原因切り分け】受信側逼迫{len(_rx_pressure)}件 / "
+                         f"経路上輻輳{len(_path_cong)}件")
+            for rp in _rx_pressure[:3]:
+                if rp and rp.get('detail'):
+                    lines.append(f"    - [受信側rwnd] {rp['detail']}")
+            for pc in _path_cong[:3]:
+                if pc and pc.get('detail'):
+                    lines.append(f"    - [経路上cwnd] {pc['detail']}")
+        except (KeyError, TypeError):
+            pass
         lines.append("    ※TCPのウィンドウ制御には2種類ある。①rwnd(受信ウィンドウ)縮小は"
                      "受信側ホストのNIC/CPU/アプリ処理遅延が原因（対処は受信側の機器を疑う）。"
                      "②重複ACKバースト(cwnd反応)は経路上のパケットロス/速度差を送信側が検知して"
@@ -1263,70 +1286,101 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
                      "どちらの可能性が高いかを述べてください。")
 
     if r.get("scan_patterns"):
-        lines.append("")
-        lines.append("【⚠️ ポートスキャン/DDoS(SYNフラッド)の統計的兆候（機械的に検出・確定情報）】")
-        for sp_item in r["scan_patterns"]:
-            lines.append("    - [" + sp_item.get("severity","") + "] " + sp_item.get("detail",""))
-        lines.append("    ※上記は送信元/宛先の集約から統計的に検出したものです。"
-                     "top_issuesで「ポートスキャンが実行されています」"
-                     "「DDoS(SYNフラッド)を受けています」のように断定的に報告してください。")
+        try:
+            lines.append("")
+            lines.append("【⚠️ ポートスキャン/DDoS(SYNフラッド)の統計的兆候（機械的に検出・確定情報）】")
+            for sp_item in r.get("scan_patterns", []):
+                if sp_item:
+                    lines.append("    - [" + sp_item.get("severity","") + "] " + sp_item.get("detail",""))
+            lines.append("    ※上記は送信元/宛先の集約から統計的に検出したものです。"
+                         "top_issuesで「ポートスキャンが実行されています」"
+                         "「DDoS(SYNフラッド)を受けています」のように断定的に報告してください。")
+        except (KeyError, TypeError):
+            pass
 
     if r.get("ips_alerts"):
-        lines.append("")
-        lines.append("【🛡️ IPSシグネチャ検知（既知の攻撃パターンに一致・確定情報）】")
-        for a in r["ips_alerts"][:10]:
-            lines.append(f"    - [{a.get('severity','')}] {a.get('category','')}: "
-                         f"{a.get('src','')}→{a.get('dst','')}:{a.get('dst_port','')} "
-                         f"({a.get('count',0)}回) 一致=「{a.get('matched','')[:50]}」")
-        lines.append("    ※既知の攻撃シグネチャに一致した通信です。top_issuesで攻撃種別"
-                     "（SQLi/XSS/Log4Shell/リバースシェル等）を明記し、severityを高めに評価して"
-                     "断定的に報告してください。")
+        try:
+            lines.append("")
+            lines.append("【🛡️ IPSシグネチャ検知（既知の攻撃パターンに一致・確定情報）】")
+            for a in r.get("ips_alerts", [])[:10]:
+                if a:
+                    matched = a.get('matched', '')
+                    lines.append(f"    - [{a.get('severity','')}] {a.get('category','')}: "
+                                 f"{a.get('src','')}→{a.get('dst','')}:{a.get('dst_port','')} "
+                                 f"({a.get('count',0)}回) 一致=「{matched[:50] if matched else ''}」")
+            lines.append("    ※既知の攻撃シグネチャに一致した通信です。top_issuesで攻撃種別"
+                         "（SQLi/XSS/Log4Shell/リバースシェル等）を明記し、severityを高めに評価して"
+                         "断定的に報告してください。")
+        except (KeyError, TypeError):
+            pass
 
-    _behav = (r.get("worm_propagation", []) + r.get("beaconing", [])
-              + r.get("suspicious_destinations", []) + r.get("data_exfil", []))
+    try:
+        _behav = (r.get("worm_propagation", []) or [] + r.get("beaconing", []) or []
+                  + r.get("suspicious_destinations", []) or [] + r.get("data_exfil", []) or [])
+    except TypeError:
+        _behav = []
     if _behav:
-        lines.append("")
-        lines.append("【🦠 振る舞い型検知（ワーム拡散/C2/持ち出し等の挙動・確定情報）】")
-        for wp in r.get("worm_propagation", [])[:3]:
-            lines.append(f"    - [ワーム横展開] {wp.get('detail','')}")
-        for bc in r.get("beaconing", [])[:3]:
-            lines.append(f"    - [C2ビーコニング] {bc.get('detail','')}")
-        for de in r.get("data_exfil", [])[:3]:
-            lines.append(f"    - [大容量持ち出し] {de.get('detail','')}")
-        for sd in r.get("suspicious_destinations", [])[:3]:
-            lines.append(f"    - [怪しい外部アクセス] {sd.get('detail','')}")
-        lines.append("    ※シグネチャに現れない挙動ベースの検知です（新型/AI生成マルウェアも捕捉）。")
+        try:
+            lines.append("")
+            lines.append("【🦠 振る舞い型検知（ワーム拡散/C2/持ち出し等の挙動・確定情報）】")
+            for wp in (r.get("worm_propagation", []) or [])[:3]:
+                if wp and wp.get('detail'):
+                    lines.append(f"    - [ワーム横展開] {wp.get('detail','')}")
+            for bc in (r.get("beaconing", []) or [])[:3]:
+                if bc and bc.get('detail'):
+                    lines.append(f"    - [C2ビーコニング] {bc.get('detail','')}")
+            for de in (r.get("data_exfil", []) or [])[:3]:
+                if de and de.get('detail'):
+                    lines.append(f"    - [大容量持ち出し] {de.get('detail','')}")
+            for sd in (r.get("suspicious_destinations", []) or [])[:3]:
+                if sd and sd.get('detail'):
+                    lines.append(f"    - [怪しい外部アクセス] {sd.get('detail','')}")
+            lines.append("    ※シグネチャに現れない挙動ベースの検知です（新型/AI生成マルウェアも捕捉）。")
+        except (KeyError, TypeError):
+            pass
 
     if r.get("host_risk"):
-        _hr_top = [h for h in r["host_risk"] if h.get("risk_score", 0) >= 40]
-        if _hr_top:
-            lines.append("")
-            lines.append("【⚠️ ホスト別リスクスコア（複数挙動を束ねた危険度・確定情報）】")
-            for h in _hr_top[:5]:
-                lines.append(f"    - {h.get('host','')}: リスク{h.get('risk_score',0)}/100"
-                             f"（{h.get('risk_level','')}）要因: {' + '.join(h.get('factors', []))}")
-            lines.append("    ※複数の怪しい挙動が同一ホストに集中しています。top_issuesで"
-                         "「感染/侵害の可能性が高いホスト」として最優先で報告してください。")
+        try:
+            _hr_top = [h for h in r.get("host_risk", []) if h and h.get("risk_score", 0) >= 40]
+            if _hr_top:
+                lines.append("")
+                lines.append("【⚠️ ホスト別リスクスコア（複数挙動を束ねた危険度・確定情報）】")
+                for h in _hr_top[:5]:
+                    if h:
+                        lines.append(f"    - {h.get('host','')}: リスク{h.get('risk_score',0)}/100"
+                                     f"（{h.get('risk_level','')}）要因: {' + '.join(h.get('factors', []))}")
+                lines.append("    ※複数の怪しい挙動が同一ホストに集中しています。top_issuesで"
+                             "「感染/侵害の可能性が高いホスト」として最優先で報告してください。")
+        except (KeyError, TypeError):
+            pass
 
     if r.get("threat_intel_hits"):
-        lines.append("")
-        lines.append("【🌐 脅威インテリジェンス一致（既知の悪性IP/ドメイン・確定情報）】")
-        for th in r["threat_intel_hits"][:8]:
-            lines.append(f"    - {th.get('detail','')}")
-        lines.append("    ※既知の脅威フィード(abuse.ch等)に一致した通信先です。severityを最高レベルで"
-                     "評価し、感染/C2通信として断定的に報告してください。")
+        try:
+            lines.append("")
+            lines.append("【🌐 脅威インテリジェンス一致（既知の悪性IP/ドメイン・確定情報）】")
+            for th in (r.get("threat_intel_hits", []) or [])[:8]:
+                if th and th.get('detail'):
+                    lines.append(f"    - {th.get('detail','')}")
+            lines.append("    ※既知の脅威フィード(abuse.ch等)に一致した通信先です。severityを最高レベルで"
+                         "評価し、感染/C2通信として断定的に報告してください。")
+        except (KeyError, TypeError):
+            pass
 
     if r.get("geo_alerts"):
-        _gs = r.get("geo_summary", {})
-        _cty = "・".join(f"{k}{v}件" for k, v in _gs.get("countries", {}).items())
-        lines.append("")
-        lines.append(f"【🌏 監視対象国からの通信（中国/北朝鮮/香港/マカオ・確定情報）: {_cty}】")
-        for g in r["geo_alerts"][:10]:
-            lines.append(f"    - {g.get('detail','')}")
-        lines.append("    ※RIR由来の国別IP割当と照合した確定情報です。特に北朝鮮(KP)との通信、"
-                     "および中国/香港/マカオからの受信(inbound)は業務上の想定有無を確認し、"
-                     "不審であればseverityを高く評価してください。送信元ブロック推奨のIPは"
-                     "対策案として明示してください。")
+        try:
+            _gs = r.get("geo_summary", {}) or {}
+            _cty = "・".join(f"{k}{v}件" for k, v in _gs.get("countries", {}).items())
+            lines.append("")
+            lines.append(f"【🌏 監視対象国からの通信（中国/北朝鮮/香港/マカオ・確定情報）: {_cty}】")
+            for g in (r.get("geo_alerts", []) or [])[:10]:
+                if g and g.get('detail'):
+                    lines.append(f"    - {g.get('detail','')}")
+            lines.append("    ※RIR由来の国別IP割当と照合した確定情報です。特に北朝鮮(KP)との通信、"
+                         "および中国/香港/マカオからの受信(inbound)は業務上の想定有無を確認し、"
+                         "不審であればseverityを高く評価してください。送信元ブロック推奨のIPは"
+                         "対策案として明示してください。")
+        except (KeyError, TypeError):
+            pass
 
     lines += [
         "",
@@ -1336,8 +1390,12 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
         f"  応答遅延: {dns_s.get('slow',0)} 件",
     ]
     if r.get("dns_issues"):
-        for i in r["dns_issues"][:5]:
-            lines.append("    - [" + i.get("type","") + "] " + i.get("name","") + " " + i.get("detail","")[:60])
+        try:
+            for i in (r.get("dns_issues", []) or [])[:5]:
+                if i:
+                    lines.append("    - [" + i.get("type","") + "] " + i.get("name","") + " " + (i.get("detail","")[:60] if i.get("detail") else ""))
+        except (KeyError, TypeError):
+            pass
 
     lines += [
         "",
@@ -1345,8 +1403,12 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
         f"  メッセージタイプ別: {dhcp_types}",
         f"  問題: {len(r.get('dhcp_issues', []))} 件",
     ]
-    for i in r.get("dhcp_issues", [])[:3]:
-        lines.append("    - [" + i.get("event","") + "] " + i.get("issue","")[:80])
+    for i in (r.get("dhcp_issues", []) or [])[:3]:
+        try:
+            if i:
+                lines.append("    - [" + i.get("event","") + "] " + (i.get("issue","")[:80] if i.get("issue") else ""))
+        except (KeyError, TypeError):
+            pass
 
     lines += [
         "",
@@ -1354,8 +1416,12 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
         f"  ステータス別: {http_status}",
         f"  4xx/5xxエラー: {len(r.get('http_errors', []))} 件",
     ]
-    for e in r.get("http_errors", [])[:3]:
-        lines.append(f"    - {e.get('method','')} {e.get('host','')} → HTTP {e.get('status_code','')}")
+    for e in (r.get("http_errors", []) or [])[:3]:
+        try:
+            if e:
+                lines.append(f"    - {e.get('method','')} {e.get('host','')} → HTTP {e.get('status_code','')}")
+        except (KeyError, TypeError):
+            pass
 
     lines += [
         "",
@@ -1364,26 +1430,37 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
         f"  Fatal Alert: {tls_s.get('fatal_alerts',0)} 件",
         f"  非推奨TLS（1.0/1.1）: {tls_s.get('deprecated_tls',0)} 件",
     ]
-    for a in r.get("tls_alerts", [])[:3]:
-        lines.append(f"    - [{a.get('alert_type','')}] {a.get('src','')}→{a.get('dst','')} : {a.get('description','')[:60]}")
+    for a in (r.get("tls_alerts", []) or [])[:3]:
+        try:
+            if a:
+                desc = a.get('description','')
+                lines.append(f"    - [{a.get('alert_type','')}] {a.get('src','')}→{a.get('dst','')} : {desc[:60] if desc else ''}")
+        except (KeyError, TypeError):
+            pass
 
     # TLSハンドシェイク(鍵交換)の成否
-    _hs_sum = r.get("tls_handshake_summary", {})
+    _hs_sum = r.get("tls_handshake_summary", {}) or {}
     if _hs_sum:
-        lines.append("")
-        lines.append(f"【TLSハンドシェイク(鍵交換)】成功{_hs_sum.get('success',0)} / "
-                     f"失敗{_hs_sum.get('failed',0)} / 未完了{_hs_sum.get('incomplete',0)} / "
-                     f"弱い暗号スイート{_hs_sum.get('weak_cipher',0)}件 / "
-                     f"証明書の問題{_hs_sum.get('cert_issues',0)}件")
-        for h in r.get("tls_handshakes", [])[:5]:
-            if h.get("status") != "成功" or h.get("weak_cipher") or h.get("cert_issues"):
-                _extra = []
-                if h.get("weak_cipher"): _extra.append(f"弱い暗号:{h['weak_cipher']}")
-                if h.get("cert_issues"): _extra.append(f"証明書:{'/'.join(h['cert_issues'])}")
-                lines.append(f"    - [{h.get('status','')}] {h.get('client','')}→"
-                             f"{h.get('server','')}:{h.get('server_port','')}"
-                             f"({h.get('sni','')}) : {h.get('reason','')}"
-                             + (" | " + " ".join(_extra) if _extra else ""))
+        try:
+            lines.append("")
+            lines.append(f"【TLSハンドシェイク(鍵交換)】成功{_hs_sum.get('success',0)} / "
+                         f"失敗{_hs_sum.get('failed',0)} / 未完了{_hs_sum.get('incomplete',0)} / "
+                         f"弱い暗号スイート{_hs_sum.get('weak_cipher',0)}件 / "
+                         f"証明書の問題{_hs_sum.get('cert_issues',0)}件")
+            for h in (r.get("tls_handshakes", []) or [])[:5]:
+                if h and (h.get("status") != "成功" or h.get("weak_cipher") or h.get("cert_issues")):
+                    _extra = []
+                    if h.get("weak_cipher"): _extra.append(f"弱い暗号:{h.get('weak_cipher','')}")
+                    if h.get("cert_issues"):
+                        cert_issues = h.get('cert_issues', [])
+                        if cert_issues:
+                            _extra.append(f"証明書:{'/'.join(cert_issues)}")
+                    lines.append(f"    - [{h.get('status','')}] {h.get('client','')}→"
+                                 f"{h.get('server','')}:{h.get('server_port','')}"
+                                 f"({h.get('sni','')}) : {h.get('reason','')}"
+                                 + (" | " + " ".join(_extra) if _extra else ""))
+        except (KeyError, TypeError):
+            pass
         lines.append("    ※鍵交換の失敗/未完了は、暗号スイート不一致・証明書エラー・"
                      "MTU/経路障害・遮断などが原因のことが多い。弱い暗号スイート"
                      "（前方秘匿性なし・RC4・DES・NULL等）や証明書の問題（期限切れ・"
@@ -1391,26 +1468,33 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
                      "セキュリティリスクとして報告してください。")
 
     # IPsec(IKE鍵交換/ESP)の成否
-    _ipsec = r.get("ipsec", {})
-    _ike = _ipsec.get("ike_sas", [])
-    _ip_sum = _ipsec.get("summary", {})
+    _ipsec = r.get("ipsec", {}) or {}
+    _ike = _ipsec.get("ike_sas", []) or []
+    _ip_sum = _ipsec.get("summary", {}) or {}
     if _ike or _ipsec.get("esp_flows"):
-        lines.append("")
-        lines.append(f"【IPsec(VPN)】IKE SA {_ip_sum.get('ike_total',0)}件 "
-                     f"(成功{_ip_sum.get('ike_success',0)}/失敗{_ip_sum.get('ike_failed',0)}) / "
-                     f"弱い暗号/DHグループ{_ip_sum.get('ike_weak_crypto',0)}件 / "
-                     f"ESP・AHフロー {_ip_sum.get('esp_flows',0)}件")
-        for s in _ike[:5]:
-            _wk = f" | 弱点:{'/'.join(s['weak_crypto'])}" if s.get("weak_crypto") else ""
-            _rv = ""
-            if s.get("remedy"):
-                _rv += f" | 対処:{s['remedy']}"
-            if s.get("verify"):
-                _rv += f" | 確認:{s['verify']}"
-            lines.append(f"    - [{s.get('status','')}] {s.get('version','')} "
-                         f"{s.get('initiator','')}→{s.get('responder','')} "
-                         f"[{s.get('exchanges','')}] 暗号:{s.get('encr','')} DH:{s.get('dh_group','')} "
-                         f": {s.get('reason','')}{_wk}{_rv}")
+        try:
+            lines.append("")
+            lines.append(f"【IPsec(VPN)】IKE SA {_ip_sum.get('ike_total',0)}件 "
+                         f"(成功{_ip_sum.get('ike_success',0)}/失敗{_ip_sum.get('ike_failed',0)}) / "
+                         f"弱い暗号/DHグループ{_ip_sum.get('ike_weak_crypto',0)}件 / "
+                         f"ESP・AHフロー {_ip_sum.get('esp_flows',0)}件")
+            for s in _ike[:5]:
+                if s:
+                    _wk = ""
+                    weak_crypto = s.get("weak_crypto", [])
+                    if weak_crypto:
+                        _wk = f" | 弱点:{'/'.join(weak_crypto)}"
+                    _rv = ""
+                    if s.get("remedy"):
+                        _rv += f" | 対処:{s['remedy']}"
+                    if s.get("verify"):
+                        _rv += f" | 確認:{s['verify']}"
+                    lines.append(f"    - [{s.get('status','')}] {s.get('version','')} "
+                                 f"{s.get('initiator','')}→{s.get('responder','')} "
+                                 f"[{s.get('exchanges','')}] 暗号:{s.get('encr','')} DH:{s.get('dh_group','')} "
+                                 f": {s.get('reason','')}{_wk}{_rv}")
+        except (KeyError, TypeError):
+            pass
         lines.append("    ※IKE鍵交換の失敗/未完了は、事前共有鍵(PSK)不一致・"
                      "Phase1/Phase2の提案(暗号/DHグループ)不一致・NAT-T・"
                      "ピア未応答などが典型。DHグループ1536bit以下やDES/3DES/NULL暗号は"
@@ -1432,42 +1516,53 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
                      "これらは一般的な傾向であり、断定はせず「〜の可能性がある」という表現で提示してください。")
 
     # 既知の類似不具合パターン（実在するJunosリリースノート記載事例と類似の挙動）
-    _known_issues = _ipsec.get("known_issues", [])
+    _known_issues = _ipsec.get("known_issues", []) or []
     if _known_issues:
-        lines.append("")
-        lines.append(f"【既知の類似不具合パターン】{len(_known_issues)}件")
-        for _ki in _known_issues:
-            lines.append(f"    - {_ki['pattern']}（{_ki['similar_to']}）: {_ki['detail']}")
-            lines.append(f"      補足: {_ki['note']} | 確認:{_ki['verify']} | 対処:{_ki['remedy']}")
+        try:
+            lines.append("")
+            lines.append(f"【既知の類似不具合パターン】{len(_known_issues)}件")
+            for _ki in _known_issues:
+                if _ki:
+                    lines.append(f"    - {_ki.get('pattern','')}（{_ki.get('similar_to','')}）: {_ki.get('detail','')}")
+                    lines.append(f"      補足: {_ki.get('note','')} | 確認:{_ki.get('verify','')} | 対処:{_ki.get('remedy','')}")
+        except (KeyError, TypeError):
+            pass
         lines.append("    ※これはJunos 21.2R1リリースノート「未解決の問題」に実際に記載されている"
                      "既知動作と類似したパケットパターンの検出結果（実測ベース）。断定はできないため"
                      "「〜に類似したパターンが見られる」という表現で報告し、確認コマンドの実行を促してください。")
 
     # OSPF隣接不一致（タイマー/エリア/認証）
-    _ospf_issues = r.get("ospf_issues", [])
+    _ospf_issues = r.get("ospf_issues", []) or []
     if _ospf_issues:
-        lines.append("")
-        lines.append(f"【OSPF隣接不一致】{len(_ospf_issues)}件")
-        for o in _ospf_issues[:5]:
-            lines.append(f"    - [{o.get('category','')}] {o.get('router1','')}⇔{o.get('router2','')}: "
-                         f"{o.get('detail','')} | 対処:{o.get('remedy','')} | 確認:{o.get('verify','')}")
+        try:
+            lines.append("")
+            lines.append(f"【OSPF隣接不一致】{len(_ospf_issues)}件")
+            for o in _ospf_issues[:5]:
+                if o:
+                    lines.append(f"    - [{o.get('category','')}] {o.get('router1','')}⇔{o.get('router2','')}: "
+                                 f"{o.get('detail','')} | 対処:{o.get('remedy','')} | 確認:{o.get('verify','')}")
+        except (KeyError, TypeError):
+            pass
         lines.append("    ※OSPF Helloのタイマー(Hello/Dead間隔)・エリアID・認証方式は"
                      "リンク上の双方で完全一致していないと隣接(Adjacency)が形成されない。"
                      "この不一致は実測値の突き合わせによる確定情報であり、ルーティングが"
                      "貼れない/経路が学習されない根本原因として最優先で報告してください。")
 
     # SSH鍵交換の成否
-    _ssh = r.get("ssh_handshakes", [])
+    _ssh = r.get("ssh_handshakes", []) or []
     if _ssh:
-        _ssh_ok = sum(1 for s in _ssh if s.get("status") == "成功")
-        _ssh_fail = sum(1 for s in _ssh if s.get("status") == "失敗")
-        lines.append("")
-        lines.append(f"【SSH鍵交換】成功{_ssh_ok} / 失敗{_ssh_fail} / "
-                     f"未完了{len(_ssh)-_ssh_ok-_ssh_fail}")
-        for s in _ssh[:5]:
-            if s.get("status") != "成功":
-                lines.append(f"    - [{s.get('status','')}] {s.get('client','')}→"
-                             f"{s.get('server','')}:{s.get('server_port','')} : {s.get('reason','')}")
+        try:
+            _ssh_ok = sum(1 for s in _ssh if s and s.get("status") == "成功")
+            _ssh_fail = sum(1 for s in _ssh if s and s.get("status") == "失敗")
+            lines.append("")
+            lines.append(f"【SSH鍵交換】成功{_ssh_ok} / 失敗{_ssh_fail} / "
+                         f"未完了{len(_ssh)-_ssh_ok-_ssh_fail}")
+            for s in _ssh[:5]:
+                if s and s.get("status") != "成功":
+                    lines.append(f"    - [{s.get('status','')}] {s.get('client','')}→"
+                                 f"{s.get('server','')}:{s.get('server_port','')} : {s.get('reason','')}")
+        except (KeyError, TypeError):
+            pass
         lines.append("    ※SSH鍵交換の失敗は、鍵アルゴリズム不一致・切断・タイムアウト等が典型。")
 
     lines += [
@@ -1475,8 +1570,13 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
         "【IPフラグメント】",
         f"  フラグメント発生フロー: {len(r.get('ip_fragments', []))} 件",
     ]
-    for f in r.get("ip_fragments", [])[:3]:
-        lines.append(f"    - {f.get('src','')}→{f.get('dst','')} {f.get('fragment_count',0)}パケット : {f.get('description','')[:60]}")
+    for f in (r.get("ip_fragments", []) or [])[:3]:
+        try:
+            if f:
+                desc = f.get('description', '')
+                lines.append(f"    - {f.get('src','')}→{f.get('dst','')} {f.get('fragment_count',0)}パケット : {desc[:60] if desc else ''}")
+        except (KeyError, TypeError):
+            pass
 
     lines += [
         "",
@@ -1484,49 +1584,62 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
         f"  異常（スプーフィング疑い）: {len(r.get('arp_anomalies', []))} 件",
     ]
 
-    _unk_hints = r.get("unknown_proto_hints", [])
+    _unk_hints = r.get("unknown_proto_hints", []) or []
     if _unk_hints:
-        lines += [
-            "",
-            "【プロトコル不明の通信（ID/sessionキーワード検出）】",
-            f"  該当フロー: {len(_unk_hints)} 件",
-        ]
-        for u in _unk_hints[:5]:
-            _usp, _udp = _port_label(u.get("src_port")), _port_label(u.get("dst_port"))
-            lines.append(f"    - {u.get('protocol','')} {u.get('src','')}:{_usp}→{u.get('dst','')}:{_udp} "
-                         f"({u.get('count',0)}パケット, 検出語:{u.get('keywords','')}) : "
-                         f"サンプル「{u.get('sample','')[:60]}」")
+        try:
+            lines += [
+                "",
+                "【プロトコル不明の通信（ID/sessionキーワード検出）】",
+                f"  該当フロー: {len(_unk_hints)} 件",
+            ]
+            for u in _unk_hints[:5]:
+                if u:
+                    _usp, _udp = _port_label(u.get("src_port")), _port_label(u.get("dst_port"))
+                    sample = u.get('sample', '')
+                    lines.append(f"    - {u.get('protocol','')} {u.get('src','')}:{_usp}→{u.get('dst','')}:{_udp} "
+                                 f"({u.get('count',0)}パケット, 検出語:{u.get('keywords','')}) : "
+                                 f"サンプル「{sample[:60] if sample else ''}」")
+        except (KeyError, TypeError):
+            pass
         lines.append("    ※既知プロトコルとして解析できなかった通信です。認証・セッション管理を"
                      "行う独自/未対応プロトコルの可能性があるため、top_issuesで"
                      "「手動でのパケット確認を推奨」と言及してください。")
 
-    _sid_corr = r.get("session_id_correlations", [])
+    _sid_corr = r.get("session_id_correlations", []) or []
     if _sid_corr:
-        lines += [
-            "",
-            "【⚠️ ID/session値の突き合わせ結果（機械的に検出・確定情報）】",
-            f"  複数フローにまたがって出現したID/session値: {len(_sid_corr)} 件",
-        ]
-        for c in _sid_corr[:5]:
-            lines.append(f"    - ID値「{c.get('id_value','')}」: {c.get('distinct_flows',0)}フローに"
-                         f"計{c.get('total_occurrences',0)}回出現"
-                         f"（送信元IP種類数={c.get('distinct_src_ips',0)}）"
-                         + ("【複数送信元IPにまたがる要確認事項】" if c.get("anomaly_multi_src") else ""))
+        try:
+            lines += [
+                "",
+                "【⚠️ ID/session値の突き合わせ結果（機械的に検出・確定情報）】",
+                f"  複数フローにまたがって出現したID/session値: {len(_sid_corr)} 件",
+            ]
+            for c in _sid_corr[:5]:
+                if c:
+                    lines.append(f"    - ID値「{c.get('id_value','')}」: {c.get('distinct_flows',0)}フローに"
+                                 f"計{c.get('total_occurrences',0)}回出現"
+                                 f"（送信元IP種類数={c.get('distinct_src_ips',0)}）"
+                                 + ("【複数送信元IPにまたがる要確認事項】" if c.get("anomaly_multi_src") else ""))
+        except (KeyError, TypeError):
+            pass
         lines.append("    ※これは人手では現実的に不可能な、パケット横断でのID値の完全突き合わせ結果です。"
                      "送信元IPが複数にまたがるものは、セッションの使い回し・共有・乗っ取りの可能性として"
                      "top_issuesで具体的に言及し、正常な負荷分散/NAT配下の可能性にも触れつつ要確認と報告してください。")
 
     # VoIP
-    vc = r.get("voip_stream_count", 0)
+    vc = r.get("voip_stream_count", 0) or 0
     if vc > 0:
-        lines += [
-            "",
-            "【VoIP/RTP】",
-            f"  ストリーム数: {vc} / 平均MOS: {r.get('voip_avg_mos', 0)} / 品質不良: {r.get('voip_poor_streams', 0)} ストリーム",
-        ]
-        for s in r.get("voip_streams", [])[:3]:
-            lines.append(f"    - {s.get('src_ip','')}→{s.get('dst_ip','')} MOS={s.get('mos','')} "
-                         f"ジッター={s.get('jitter_ms','')}ms ロス={s.get('loss_pct','')}%")
+        try:
+            lines += [
+                "",
+                "【VoIP/RTP】",
+                f"  ストリーム数: {vc} / 平均MOS: {r.get('voip_avg_mos', 0)} / 品質不良: {r.get('voip_poor_streams', 0)} ストリーム",
+            ]
+            for s in (r.get("voip_streams", []) or [])[:3]:
+                if s:
+                    lines.append(f"    - {s.get('src_ip','')}→{s.get('dst_ip','')} MOS={s.get('mos','')} "
+                                 f"ジッター={s.get('jitter_ms','')}ms ロス={s.get('loss_pct','')}%")
+        except (KeyError, TypeError):
+            pass
 
     # 出力言語: アクセス先ドメインの地域に合わせる（アジア圏=日本語 / それ以外=英語）
     if r.get("suggested_lang") == "en":
@@ -1543,7 +1656,10 @@ def _build_pcap_prompt(pcap_result: dict) -> str:
 
 def build_pcap_chat_context(pcap_result: dict) -> str:
     """pcap解析結果を、チャットQ&Aで使うコンテキスト文字列に変換する。"""
-    return _build_pcap_prompt(pcap_result)
+    try:
+        return _build_pcap_prompt(pcap_result)
+    except Exception as e:
+        return f"（pcap解析結果の処理でエラーが発生しました: {str(e)}）"
 
 
 CHAT_SYSTEM_PROMPT = """あなたはネットワーク解析アシスタントです。

@@ -6434,8 +6434,13 @@ with tab_chat:
             st.info("まだパケット解析結果がありません。「📦 パケット解析」タブでpcapを"
                     "アップロードしてから質問してください。")
         else:
-            _chat_context = analyzer.build_pcap_chat_context(_chat_pcap_res)
-            _chat_context_label = "pcap"
+            try:
+                _chat_context = analyzer.build_pcap_chat_context(_chat_pcap_res)
+                _chat_context_label = "pcap"
+            except Exception as e:
+                st.error(f"pcap解析結果の処理でエラーが発生しました: {str(e)}")
+                _chat_context = None
+                _chat_context_label = ""
     else:
         import netflow_collector as _nfc3
         import sflow_collector as _sfc3
