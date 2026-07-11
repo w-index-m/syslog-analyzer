@@ -65,6 +65,13 @@ def analyze_pcap(file_path: str, max_items_per_category: int = 20) -> str:
     ワーム横展開/ビーコニング等の振る舞い検知・DNS/DHCP/TLS/IPsec/OSPF・
     脅威インテリジェンス照合・GeoIP・生成AIサービス宛通信検知など）。
 
+    「このpcapにウイルス/マルウェアが入っていそうか」「不審な通信はないか」
+    「侵害の痕跡(IoC)はあるか」といった曖昧な質問にもこのツールで答えられる:
+    ワーム横展開(worm_propagation)・C2ビーコニング(beaconing)・既知の悪性
+    IP/ドメイン照合(threat_intel_hits)・データ持ち出し(data_exfil)・
+    不審な持ち出し先アクセス(suspicious_destinations)・ホストリスクスコア
+    (host_risk)・シグネチャ型IPS検知(ips_alerts)を全て含む。
+
     Args:
         file_path: ローカルのpcap/pcapng/zip/gzファイルへの絶対パス
         max_items_per_category: 各検知カテゴリごとに返す件数の上限（デフォルト20件）
