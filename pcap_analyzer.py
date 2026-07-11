@@ -1309,6 +1309,7 @@ def analyze_pcap(data: bytes) -> dict:
         "http_errors": [],    "http_summary": {},
         "tls_sessions": [],   "tls_alerts": [],
         "ai_service_sessions": [],
+        "side_channel_exposure": [],
         "tls_summary": {"sessions": 0, "unique_sites": 0, "fatal_alerts": 0,
                         "deprecated_tls": 0},
         "tls_handshakes": [], "tls_handshake_summary": {},
@@ -1371,6 +1372,9 @@ def analyze_pcap(data: bytes) -> dict:
     tls_unique_sites: set = set()
     # TLSフローの継続時間追跡（AIサービス宛の長時間接続＝張りっぱなし検知用）
     tls_flow_duration: dict[tuple, dict] = {}
+    # TLS ApplicationDataレコードのサイズ列（Whisper Leak型サイドチャネル
+    # 露出検知用）: ck -> [(ts, record_size, is_server_to_client), ...]
+    tls_app_data_records: dict[tuple, list] = {}
     # TLSハンドシェイク状態: ck -> {client_hello,server_hello,cert,server_ccs,
     #   client_ccs,app_data,fatal_alert,alert_desc,sni,version,client,server,port,ts}
     tls_hs: dict[tuple, dict] = {}
@@ -1729,6 +1733,8 @@ def analyze_pcap(data: bytes) -> dict:
                                         _hs["server_ccs"] = True
                                 elif _ct == 23:   # ApplicationData（暗号化完了後）
                                     _hs["app_data"] = True
+                                    tls_app_data_records.setdefault(ck, []).append(
+                                        (ts, len(_rec) - 5, not _to_server))
                                 elif _ct == 21 and alert and alert["level"] == "fatal":
                                     _hs["fatal_alert"] = True
                                     _hs["alert_desc"] = alert["desc"]
@@ -2205,6 +2211,45 @@ def analyze_pcap(data: bytes) -> dict:
             "long_lived":  _dur_sec >= _AI_SESSION_LONGLIVED_SEC,
         })
     result["ai_service_sessions"].sort(key=lambda x: x["duration_sec"], reverse=True)
+
+    # ── Whisper Leak型サイドチャネル露出検知 ──
+    # 暗号化されたAIストリーミング応答は中身を復号できないが、トークン単位で
+    # 逐次送信されるSSEチャンクは「小さいレコードが不規則な間隔で多数届く」
+    # という特徴的なパケットサイズ/タイミングパターンを外側から観測できて
+    # しまう（Whisper Leak, 2025年報告のサイドチャネル攻撃手法）。
+    # ここでは会話内容の推測・復号は一切行わず、「この通信がその種の
+    # サイドチャネル解析に理論上さらされているパターンかどうか」だけを
+    # 構造的に判定する（攻撃の実行ではなく露出の検知）。
+    for _ck2, _info2 in tls_flow_info.items():
+        _sni2 = _info2.get("sni") or ""
+        _service2 = _match_ai_service(_sni2)
+        if not _service2:
+            continue
+        _records = tls_app_data_records.get(_ck2, [])
+        _s2c_sizes = [size for (_t, size, is_s2c) in _records if is_s2c and size > 0]
+        if len(_s2c_sizes) < 15:
+            continue
+        _sorted = sorted(_s2c_sizes)
+        _median = _sorted[len(_sorted) // 2]
+        _distinct_sizes = len(set(_s2c_sizes))
+        # トークン単位ストリーミングの典型像: チャンクが小さく(数百byte以下)、
+        # かつサイズにばらつきがある（固定長パディング等の対策が無い）。
+        if _median <= 400 and _distinct_sizes >= 5:
+            result["side_channel_exposure"].append({
+                "service": _service2, "sni": _sni2,
+                "client": _ck2[0], "server": _ck2[1], "server_port": _ck2[3],
+                "chunk_count": len(_s2c_sizes),
+                "median_chunk_size": _median,
+                "distinct_sizes": _distinct_sizes,
+                "detail": f"{_service2}（{_sni2}）宛のストリーミング応答が、"
+                          f"{len(_s2c_sizes)}個の小さな暗号化チャンク（中央値{_median}バイト、"
+                          f"サイズの種類{_distinct_sizes}通り）に分かれて送信されています — "
+                          "内容は暗号化されていて読めませんが、Whisper Leak型のサイドチャネル"
+                          "解析（パケットサイズ・タイミングパターンからの会話内容推測）に"
+                          "理論上さらされているパターンです。対策: 固定長パディング/"
+                          "チャンク結合等のミティゲーション導入を検討してください。",
+            })
+    result["side_channel_exposure"].sort(key=lambda x: x["chunk_count"], reverse=True)
 
     # ICMP summary 変換
     result["icmp_summary"] = [

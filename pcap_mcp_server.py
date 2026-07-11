@@ -51,6 +51,7 @@ _TRIM_FIELDS = [
     "worm_propagation", "beaconing", "suspicious_destinations", "data_exfil",
     "host_risk", "threat_intel_hits", "geo_alerts", "ssh_handshakes", "ospf_issues",
     "ip_fragments", "http_errors", "tls_sessions", "tls_alerts", "ai_service_sessions",
+    "side_channel_exposure",
     "tls_handshakes", "dhcp_issues", "dns_issues", "syslog_packets",
     "unknown_proto_hints", "session_id_correlations", "voip_streams",
     "icmp_redirects", "rip_packets", "arp_anomalies", "quic_sessions",

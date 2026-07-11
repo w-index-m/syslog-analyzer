@@ -5441,6 +5441,20 @@ with tab_pcap:
                                "AIチャットのタブを開きっぱなし、またはエージェント/常時接続的な"
                                "利用をしている可能性があります。")
 
+                _side_channel = res.get("side_channel_exposure", [])
+                if _side_channel:
+                    st.markdown("**🕵️ Whisper Leak型サイドチャネル露出検知**")
+                    st.caption(
+                        "暗号化されたAIストリーミング応答の**内容は一切読めません**が、"
+                        "トークン単位で逐次送信される特有のパケットサイズ/タイミングパターン"
+                        "（小さな暗号化チャンクが多数・サイズにばらつき）が観測できてしまう"
+                        "ケースを検知します。この構造自体が、会話内容を外部から推測される"
+                        "サイドチャネル攻撃（Whisper Leak, 2025年報告）に理論上さらされている"
+                        "ことを意味します。"
+                    )
+                    for _sc in _side_channel:
+                        st.warning(f"🕵️ {_sc['detail']}")
+
             # ── 🦈 llmshark連携（LLMストリーミング性能: TTFT/ITL） ──
             st.markdown("---")
             st.markdown("### 🦈 LLMストリーミング性能解析（llmshark連携）")
