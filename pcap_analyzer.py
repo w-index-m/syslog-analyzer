@@ -6,6 +6,7 @@ IPフラグメント / フロー解析 / pcap内syslog を抽出する。
 import base64
 import binascii
 import gzip
+import hashlib
 import io
 import re
 import struct
@@ -846,6 +847,105 @@ def _parse_tls_server_hello(payload: bytes) -> dict | None:
         return None
 
 
+# RFC 8701 GREASE値。JA3/JA3S計算時はこれらを除外する（仕様通り）。
+_GREASE_VALUES = frozenset({
+    0x0a0a, 0x1a1a, 0x2a2a, 0x3a3a, 0x4a4a, 0x5a5a, 0x6a6a, 0x7a7a,
+    0x8a8a, 0x9a9a, 0xaaaa, 0xbaba, 0xcaca, 0xdada, 0xeaea, 0xfafa,
+})
+
+
+def _compute_ja3(payload: bytes) -> dict | None:
+    """
+    TLS ClientHello から JA3 フィンガープリントを計算する。
+    JA3 = MD5("TLSVersion,Ciphers,Extensions,Curves,PointFormats")
+    （John Althouse et al., Salesforce Engineering, 2017年発表の仕様）
+    GREASE値(RFC8701)は仕様通り除外する。
+    """
+    try:
+        if len(payload) < 6 or payload[0] != 22: return None  # Handshake record
+        hs_data = payload[5:]
+        if not hs_data or hs_data[0] != 1: return None  # ClientHello
+        offset = 4
+        if offset + 2 > len(hs_data): return None
+        client_version = int.from_bytes(hs_data[offset:offset + 2], "big")
+        offset += 2 + 32  # client_version + random
+        if offset >= len(hs_data): return None
+        sid_len = hs_data[offset]; offset += 1 + sid_len
+        if offset + 2 > len(hs_data): return None
+        cs_len = int.from_bytes(hs_data[offset:offset + 2], "big"); offset += 2
+        cs_bytes = hs_data[offset:offset + cs_len]; offset += cs_len
+        ciphers = [v for i in range(0, len(cs_bytes) - 1, 2)
+                   if (v := int.from_bytes(cs_bytes[i:i + 2], "big")) not in _GREASE_VALUES]
+        if offset + 1 > len(hs_data): return None
+        cm_len = hs_data[offset]; offset += 1 + cm_len
+        extensions, curves, point_formats = [], [], []
+        if offset + 2 <= len(hs_data):
+            ext_total = int.from_bytes(hs_data[offset:offset + 2], "big"); offset += 2
+            ext_end = offset + ext_total
+            while offset + 4 <= ext_end and offset + 4 <= len(hs_data):
+                ext_type = int.from_bytes(hs_data[offset:offset + 2], "big")
+                ext_len  = int.from_bytes(hs_data[offset + 2:offset + 4], "big")
+                body_off = offset + 4
+                if ext_type not in _GREASE_VALUES:
+                    extensions.append(ext_type)
+                if ext_type == 10 and body_off + 2 <= len(hs_data):        # supported_groups
+                    gl = int.from_bytes(hs_data[body_off:body_off + 2], "big")
+                    gbytes = hs_data[body_off + 2:body_off + 2 + gl]
+                    curves = [v for i in range(0, len(gbytes) - 1, 2)
+                              if (v := int.from_bytes(gbytes[i:i + 2], "big")) not in _GREASE_VALUES]
+                elif ext_type == 11 and body_off + 1 <= len(hs_data):      # ec_point_formats
+                    pl = hs_data[body_off]
+                    point_formats = list(hs_data[body_off + 1:body_off + 1 + pl])
+                offset = body_off + ext_len
+        ja3_str = "%d,%s,%s,%s,%s" % (
+            client_version,
+            "-".join(str(c) for c in ciphers),
+            "-".join(str(e) for e in extensions),
+            "-".join(str(c) for c in curves),
+            "-".join(str(p) for p in point_formats),
+        )
+        return {"ja3": hashlib.md5(ja3_str.encode()).hexdigest(), "ja3_str": ja3_str}
+    except Exception:
+        return None
+
+
+def _compute_ja3s(payload: bytes) -> dict | None:
+    """
+    TLS ServerHello から JA3S フィンガープリントを計算する。
+    JA3S = MD5("TLSVersion,CipherSuite,Extensions")
+    サーバー側の実装（アプライアンス/マルウェアC2フレームワーク等）の識別に使う。
+    """
+    try:
+        if len(payload) < 6 or payload[0] != 22: return None  # Handshake record
+        hs_data = payload[5:]
+        if not hs_data or hs_data[0] != 2: return None  # ServerHello
+        offset = 4
+        if offset + 2 > len(hs_data): return None
+        server_version = int.from_bytes(hs_data[offset:offset + 2], "big")
+        offset += 2 + 32
+        if offset >= len(hs_data): return None
+        sid_len = hs_data[offset]; offset += 1 + sid_len
+        if offset + 2 > len(hs_data): return None
+        cipher_suite = int.from_bytes(hs_data[offset:offset + 2], "big"); offset += 2
+        offset += 1  # compression_method
+        extensions = []
+        if offset + 2 <= len(hs_data):
+            ext_total = int.from_bytes(hs_data[offset:offset + 2], "big"); offset += 2
+            ext_end = offset + ext_total
+            while offset + 4 <= ext_end and offset + 4 <= len(hs_data):
+                ext_type = int.from_bytes(hs_data[offset:offset + 2], "big")
+                ext_len  = int.from_bytes(hs_data[offset + 2:offset + 4], "big")
+                if ext_type not in _GREASE_VALUES:
+                    extensions.append(ext_type)
+                offset += 4 + ext_len
+        ja3s_str = "%d,%d,%s" % (
+            server_version, cipher_suite, "-".join(str(e) for e in extensions),
+        )
+        return {"ja3s": hashlib.md5(ja3s_str.encode()).hexdigest(), "ja3s_str": ja3s_str}
+    except Exception:
+        return None
+
+
 def _parse_tls_certificate(payload: bytes) -> bytes | None:
     """TLS Certificateメッセージから最初(leaf)証明書のDERバイト列を取り出す。"""
     try:
@@ -1312,7 +1412,7 @@ def analyze_pcap(data: bytes) -> dict:
         "side_channel_exposure": [],
         "tls_summary": {"sessions": 0, "unique_sites": 0, "fatal_alerts": 0,
                         "deprecated_tls": 0},
-        "tls_handshakes": [], "tls_handshake_summary": {},
+        "tls_handshakes": [], "tls_handshake_summary": {}, "ja3_reuse": [],
         "ipsec": {"ike_sas": [], "esp_flows": [], "summary": {}, "known_issues": []},
         "dhcp_issues": [],
         "dhcp_summary": {},
@@ -1708,11 +1808,16 @@ def analyze_pcap(data: bytes) -> dict:
                                 "client_hello": False, "server_hello": False, "cert": False,
                                 "server_ccs": False, "client_ccs": False, "app_data": False,
                                 "fatal_alert": False, "alert_desc": "", "version": "", "ts": _ts_str(ts),
-                                "cipher_suite": None, "cert_der": None})
+                                "cipher_suite": None, "cert_der": None,
+                                "ja3": None, "ja3_str": "", "ja3s": None, "ja3s_str": ""})
                             _to_server = dport in TLS_PORTS   # クライアント→サーバ方向か
                             for _ct, _ht, _rv, _rec in _iter_tls_records(payload_b):
                                 if _ct == 22 and _ht == 1:
                                     _hs["client_hello"] = True
+                                    if _hs["ja3"] is None:
+                                        _j3 = _compute_ja3(_rec)
+                                        if _j3:
+                                            _hs["ja3"], _hs["ja3_str"] = _j3["ja3"], _j3["ja3_str"]
                                 elif _ct == 22 and _ht == 2:
                                     _hs["server_hello"] = True
                                     if _rv in TLS_VERSIONS:
@@ -1720,6 +1825,10 @@ def analyze_pcap(data: bytes) -> dict:
                                     _sh = _parse_tls_server_hello(_rec)
                                     if _sh:
                                         _hs["cipher_suite"] = _sh["cipher_suite"]
+                                    if _hs["ja3s"] is None:
+                                        _j3s = _compute_ja3s(_rec)
+                                        if _j3s:
+                                            _hs["ja3s"], _hs["ja3s_str"] = _j3s["ja3s"], _j3s["ja3s_str"]
                                 elif _ct == 22 and _ht == 11:
                                     _hs["cert"] = True
                                     if _hs["cert_der"] is None:
@@ -2736,7 +2845,25 @@ def analyze_pcap(data: bytes) -> dict:
             "cert": _h["cert"], "change_cipher_spec": _h["server_ccs"] or _h["client_ccs"],
             "app_data": _h["app_data"],
             "weak_cipher": _weak_cs, "cert_issues": _cert_check["issues"] if _cert_check else [],
+            "ja3": _h.get("ja3") or "", "ja3s": _h.get("ja3s") or "",
         })
+
+    # ── JA3使い回し検知: 同一クライアントフィンガープリントで複数の異なる宛先へ接続 ──
+    # ブラウザ等の一般的なTLSクライアントは通常JA3が安定して同じ値になるため単独では
+    # 異常ではないが、スクリプト化されたマルウェア/C2フレームワーク特有の固定TLS
+    # スタックを見分ける手掛かりとして、宛先の多さを併せて参考情報にする。
+    _ja3_dest_map: dict[str, set] = defaultdict(set)
+    _ja3_client_map: dict[str, set] = defaultdict(set)
+    for _h in result["tls_handshakes"]:
+        if _h["ja3"]:
+            _ja3_dest_map[_h["ja3"]].add(_h["sni"] or _h["server"])
+            _ja3_client_map[_h["ja3"]].add(_h["client"])
+    result["ja3_reuse"] = sorted((
+        {"ja3": _j, "client_count": len(_ja3_client_map[_j]), "dest_count": len(_dests),
+         "destinations": sorted(_dests)[:10]}
+        for _j, _dests in _ja3_dest_map.items() if len(_dests) >= 5
+    ), key=lambda x: x["dest_count"], reverse=True)
+
     _order = {"失敗": 0, "未完了": 1, "成功": 2}
     result["tls_handshakes"].sort(key=lambda x: _order.get(x["status"], 3))
     if result["tls_handshakes"]:

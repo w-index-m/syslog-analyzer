@@ -5759,11 +5759,19 @@ with tab_pcap:
                         "判定": f"{_hs_icon.get(h['status'],'')} {h['status']}",
                         "クライアント": h["client"], "サーバー": f"{h['server']}:{h['server_port']}",
                         "SNI": h.get("sni", ""), "TLS": h.get("version", ""),
+                        "JA3": h.get("ja3", "") or "", "JA3S": h.get("ja3s", "") or "",
                         "弱い暗号スイート": h.get("weak_cipher") or "",
                         "証明書の問題": " / ".join(h.get("cert_issues") or []),
                         "理由": h["reason"],
                     } for h in _tls_hs])
                     st.dataframe(df_hs, width='stretch', hide_index=True)
+                    st.caption("**JA3/JA3S**: TLSクライアント/サーバーの実装（暗号スイート・拡張の"
+                               "並び順）からMD5フィンガープリントを算出したものです。同一の値は"
+                               "同一のTLSライブラリ/バージョン/設定を示唆します。既知マルウェアの"
+                               "JA3値と照合する場合は、算出された値を"
+                               "[abuse.ch SSLBL](https://sslbl.abuse.ch/ja3-fingerprints/)等の"
+                               "公開データベースで手動照合してください（本ツールに既知不正リストは"
+                               "内蔵していません）。")
                     if _tls_hs_sum.get("weak_cipher"):
                         st.warning("⚠️ 前方秘匿性のない鍵交換・RC4・DES・NULL暗号など、"
                                    "脆弱な暗号スイートでの接続を検出しました。"
@@ -5772,6 +5780,20 @@ with tab_pcap:
                         st.warning("⚠️ 証明書に問題（有効期限切れ・自己署名・ホスト名不一致等）を"
                                    "検出しました。中間者攻撃(MITM)の可能性、または証明書の"
                                    "更新漏れ・設定ミスを確認してください。")
+
+                    _ja3_reuse = res.get("ja3_reuse", [])
+                    if _ja3_reuse:
+                        st.markdown("**🔁 同一JA3で複数宛先へ接続（非ブラウザ/スクリプト化クライアントの可能性）**")
+                        st.caption("同じJA3フィンガープリント（＝同じTLSクライアント実装）が"
+                                   "5件以上の異なる宛先へ接続しています。ブラウザ経由の通常利用でも"
+                                   "起こり得ますが、固定のTLSスタックを使うマルウェア/C2フレームワークや"
+                                   "自動化ツールの兆候である可能性があります。")
+                        df_ja3r = pd.DataFrame([{
+                            "JA3": r["ja3"], "クライアント数": r["client_count"],
+                            "宛先数": r["dest_count"],
+                            "宛先（最大10件）": ", ".join(r["destinations"]),
+                        } for r in _ja3_reuse])
+                        st.dataframe(df_ja3r, width='stretch', hide_index=True)
 
             # ── 🤖 生成AI/LLMサービス宛通信の検知（SNIベース） ──
             _ai_sessions = res.get("ai_service_sessions", [])
