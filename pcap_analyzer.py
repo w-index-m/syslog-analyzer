@@ -3183,8 +3183,6 @@ def get_tcp_streams(data: bytes) -> list:
         if not isinstance(ip.data, dpkt.tcp.TCP):
             continue
         tcp = ip.data
-        if not tcp.data:
-            continue
         src, dst = _ip_str(ip.src), _ip_str(ip.dst)
         sport, dport = tcp.sport, tcp.dport
 
@@ -3197,10 +3195,19 @@ def get_tcp_streams(data: bytes) -> list:
             "src": ckey[0], "dst": ckey[1], "src_port": ckey[2], "dst_port": ckey[3],
             "c2s_segments": [], "s2c_segments": [], "packets": 0,
             "start_ts": ts, "end_ts": ts,
+            "has_syn": False, "has_fin": False, "has_rst": False,
         })
         f["packets"] += 1
         f["start_ts"] = min(f["start_ts"], ts)
         f["end_ts"] = max(f["end_ts"], ts)
+        if tcp.flags & dpkt.tcp.TH_SYN:
+            f["has_syn"] = True
+        if tcp.flags & dpkt.tcp.TH_FIN:
+            f["has_fin"] = True
+        if tcp.flags & dpkt.tcp.TH_RST:
+            f["has_rst"] = True
+        if not tcp.data:
+            continue
         (f["c2s_segments"] if is_c2s else f["s2c_segments"]).append((tcp.seq, bytes(tcp.data)))
 
     result = []
@@ -3215,6 +3222,7 @@ def get_tcp_streams(data: bytes) -> list:
             "start_ts": _ts_str(f["start_ts"]), "end_ts": _ts_str(f["end_ts"]),
             "client_to_server": c2s_bytes, "server_to_client": s2c_bytes,
             "c2s_bytes": len(c2s_bytes), "s2c_bytes": len(s2c_bytes),
+            "has_syn": f["has_syn"], "has_fin": f["has_fin"], "has_rst": f["has_rst"],
         })
     result.sort(key=lambda x: x["c2s_bytes"] + x["s2c_bytes"], reverse=True)
     return result
@@ -4011,4 +4019,176 @@ def grep_pcap(data: bytes, pattern: str, mode: str = "text",
                 "src": src, "dst": dst, "sport": sport, "dport": dport}
         if not _search(payload, meta):
             break
-    return result
+
+
+def get_packet_timeline(data: bytes, interval_ms: int = 100) -> dict:
+    """
+    パケットの時系列分布を取得する（時間別にパケット数を集計）。
+
+    Args:
+        data: pcap/pcapng バイト列
+        interval_ms: 集計間隔（ミリ秒）デフォルト100ms
+
+    Returns dict:
+        timeline: [{timestamp, total, tcp, udp, icmp, other}, ...]
+        protocols: {protocol: count, ...}
+        capture_start / capture_end: str
+    """
+    try:
+        reader, _ = _open_capture(data)
+    except Exception as e:
+        return {"error": str(e), "timeline": [], "protocols": {}}
+
+    timeline_dict = {}  # {時刻（ミリ秒）: {tcp: 0, udp: 0, ...}}
+    protocols = {"TCP": 0, "UDP": 0, "ICMP": 0, "Other": 0}
+
+    start_ts = None
+    end_ts = None
+
+    try:
+        for ts, raw_pkt in reader:
+            if start_ts is None:
+                start_ts = ts
+            end_ts = ts
+
+            # 時刻をミリ秒単位の整数にして集計間隔でグループ化
+            ts_ms = int(ts * 1000)
+            bucket = (ts_ms // interval_ms) * interval_ms
+
+            if bucket not in timeline_dict:
+                timeline_dict[bucket] = {"tcp": 0, "udp": 0, "icmp": 0, "other": 0}
+
+            proto = "other"
+            try:
+                eth = dpkt.ethernet.Ethernet(raw_pkt)
+                if isinstance(eth.data, dpkt.ip.IP):
+                    pip = eth.data
+                    if isinstance(pip.data, dpkt.tcp.TCP):
+                        proto = "tcp"
+                        protocols["TCP"] += 1
+                    elif isinstance(pip.data, dpkt.udp.UDP):
+                        proto = "udp"
+                        protocols["UDP"] += 1
+                    elif isinstance(pip.data, dpkt.icmp.ICMP):
+                        proto = "icmp"
+                        protocols["ICMP"] += 1
+                    else:
+                        protocols["Other"] += 1
+                else:
+                    protocols["Other"] += 1
+            except Exception:
+                protocols["Other"] += 1
+
+            timeline_dict[bucket][proto] += 1
+    except Exception as e:
+        pass
+
+    # 時系列データを時刻順にソート
+    timeline = []
+    for bucket in sorted(timeline_dict.keys()):
+        data_point = {
+            "timestamp": bucket / 1000.0,  # 秒に変換
+            "total": sum(timeline_dict[bucket].values()),
+            "tcp": timeline_dict[bucket]["tcp"],
+            "udp": timeline_dict[bucket]["udp"],
+            "icmp": timeline_dict[bucket]["icmp"],
+            "other": timeline_dict[bucket]["other"]
+        }
+        timeline.append(data_point)
+
+    return {
+        "timeline": timeline,
+        "protocols": protocols,
+        "capture_start": _ts_str(start_ts) if start_ts else "",
+        "capture_end": _ts_str(end_ts) if end_ts else "",
+        "error": None
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Palo Alto風ダッシュボード用分析関数
+# ═══════════════════════════════════════════════════════════════════
+
+PORT_APPLICATION_MAP = {
+    80: 'HTTP', 443: 'HTTPS/TLS', 8080: 'HTTP-Alt', 8443: 'HTTPS-Alt',
+    25: 'SMTP', 110: 'POP3', 143: 'IMAP', 465: 'SMTPS', 587: 'SMTP-Submit',
+    53: 'DNS', 22: 'SSH', 3389: 'RDP', 23: 'Telnet',
+    20: 'FTP-Data', 21: 'FTP-Control', 69: 'TFTP', 445: 'SMB',
+    1433: 'MSSQL', 3306: 'MySQL', 5432: 'PostgreSQL', 5984: 'CouchDB',
+    6379: 'Redis', 27017: 'MongoDB', 9200: 'Elasticsearch',
+    161: 'SNMP', 162: 'SNMP-Trap', 123: 'NTP', 389: 'LDAP', 636: 'LDAPS', 88: 'Kerberos',
+}
+
+def classify_port_to_app(port: int) -> str:
+    if port in PORT_APPLICATION_MAP:
+        return PORT_APPLICATION_MAP[port]
+    elif port < 1024:
+        return 'System/Reserved'
+    elif port < 49152:
+        return 'Registered'
+    else:
+        return 'Dynamic/Private'
+
+def get_application_distribution(conversations: list) -> dict:
+    app_dist = {}
+    for conv in conversations:
+        src_port = conv.get('src_port', 0)
+        dst_port = conv.get('dst_port', 0)
+        app = classify_port_to_app(dst_port) if dst_port else classify_port_to_app(src_port)
+        packets = conv.get('packets', 0)
+        if app not in app_dist:
+            app_dist[app] = 0
+        app_dist[app] += packets
+    return dict(sorted(app_dist.items(), key=lambda x: x[1], reverse=True))
+
+def get_threat_category_distribution(ips_alerts: list, analysis_result: dict) -> dict:
+    threat_dist = {}
+    for alert in ips_alerts:
+        category = alert.get('category', 'Unknown')
+        if category not in threat_dist:
+            threat_dist[category] = 0
+        threat_dist[category] += 1
+    behavior_types = {
+        'ワーム検知': analysis_result.get('worm_propagation', []),
+        'C2/ビーコニング': analysis_result.get('beaconing', []),
+        'データ流出': analysis_result.get('data_exfil', []),
+        '怪しい宛先': analysis_result.get('suspicious_destinations', []),
+    }
+    for category, items in behavior_types.items():
+        if items:
+            threat_dist[category] = len(items)
+    anomaly_types = {
+        'ポートスキャン': analysis_result.get('scan_patterns', []),
+        'DNS異常': analysis_result.get('dns_tunneling', []),
+        'ICMP異常': analysis_result.get('icmp_exfil', []),
+    }
+    for category, items in anomaly_types.items():
+        if items:
+            if category in threat_dist:
+                threat_dist[category] += len(items)
+            else:
+                threat_dist[category] = len(items)
+    return dict(sorted(threat_dist.items(), key=lambda x: x[1], reverse=True))
+
+def get_session_state_distribution(tcp_streams: list) -> dict:
+    state_dist = {
+        '確立（ESTABLISHED）': 0,
+        '接続中（SYN_SENT）': 0,
+        'リセット（RST）': 0,
+        'グレースフル終了（FIN）': 0,
+        '異常終了': 0,
+    }
+    for stream in tcp_streams:
+        packets = stream.get('packets', 0)
+        if stream.get('has_fin'):
+            if packets >= 3:
+                state_dist['グレースフル終了（FIN）'] += 1
+            else:
+                state_dist['接続中（SYN_SENT）'] += 1
+        elif stream.get('has_rst'):
+            state_dist['リセット（RST）'] += 1
+        elif packets >= 3:
+            state_dist['確立（ESTABLISHED）'] += 1
+        else:
+            state_dist['接続中（SYN_SENT）'] += 1
+    return {k: v for k, v in state_dist.items() if v > 0}

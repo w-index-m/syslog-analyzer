@@ -4322,6 +4322,303 @@ with tab_pcap:
                           delta="⚠️ 要確認" if res.get("dhcp_issues") else None)
             st.caption(f"📅 キャプチャ範囲: {res['capture_start']} 〜 {res['capture_end']}")
 
+            # ── 📈 パケット時系列グラフ ──────────────────────
+            st.markdown("---")
+            st.markdown("### 📈 パケット時系列分布")
+            st.caption("時間経過に伴うパケット数の推移（TCP/UDP/ICMP/その他）を表示します。DDoS攻撃やトラフィック異常の可視化に便利です。")
+
+            _raw_bytes = st.session_state.get("_pcap_bytes")
+            if _raw_bytes:
+                with st.spinner("時系列データを集計中..."):
+                    try:
+                        _timeline_data = pcap_analyzer.get_packet_timeline(_raw_bytes, interval_ms=100)
+                        if _timeline_data.get("timeline"):
+                            _df_timeline = pd.DataFrame(_timeline_data["timeline"])
+                            # タイムスタンプを秒単位から相対秒に変換（キャプチャ開始=0秒）
+                            if len(_df_timeline) > 0:
+                                _start_ts = _df_timeline["timestamp"].iloc[0]
+                                _df_timeline["経過秒"] = _df_timeline["timestamp"] - _start_ts
+
+                                # Plotlyで複合折れ線グラフ表示
+                                import plotly.graph_objects as go
+                                _fig = go.Figure()
+                                _fig.add_trace(go.Scatter(
+                                    x=_df_timeline["経過秒"], y=_df_timeline["tcp"],
+                                    mode='lines', name='TCP',
+                                    line=dict(color='#FF6B6B', width=2)
+                                ))
+                                _fig.add_trace(go.Scatter(
+                                    x=_df_timeline["経過秒"], y=_df_timeline["udp"],
+                                    mode='lines', name='UDP',
+                                    line=dict(color='#4ECDC4', width=2)
+                                ))
+                                _fig.add_trace(go.Scatter(
+                                    x=_df_timeline["経過秒"], y=_df_timeline["icmp"],
+                                    mode='lines', name='ICMP',
+                                    line=dict(color='#FFE66D', width=2)
+                                ))
+                                _fig.add_trace(go.Scatter(
+                                    x=_df_timeline["経過秒"], y=_df_timeline["other"],
+                                    mode='lines', name='その他',
+                                    line=dict(color='#95A5A6', width=1)
+                                ))
+                                _fig.update_layout(
+                                    title="パケット時系列分布（100ms単位の集計）",
+                                    xaxis_title="キャプチャ開始からの経過秒",
+                                    yaxis_title="パケット数",
+                                    hovermode='x unified',
+                                    height=400,
+                                    margin=dict(l=0, r=0, t=40, b=0)
+                                )
+                                st.plotly_chart(_fig, width='stretch')
+
+                                # プロトコル別集計
+                                _pcol1, _pcol2, _pcol3, _pcol4 = st.columns(4)
+                                with _pcol1:
+                                    st.metric("TCP合計", f"{_timeline_data['protocols'].get('TCP', 0):,}")
+                                with _pcol2:
+                                    st.metric("UDP合計", f"{_timeline_data['protocols'].get('UDP', 0):,}")
+                                with _pcol3:
+                                    st.metric("ICMP合計", f"{_timeline_data['protocols'].get('ICMP', 0):,}")
+                                with _pcol4:
+                                    st.metric("その他", f"{_timeline_data['protocols'].get('Other', 0):,}")
+                        else:
+                            st.caption("時系列データが取得できませんでした")
+                    except Exception as e:
+                        st.warning(f"時系列グラフの生成に失敗しました: {e}")
+            else:
+                st.caption("pcapデータがまだ読み込まれていません")
+
+            # ── 📡 送信元・宛先・プロトコル分布 ──────────────────────
+            st.markdown("---")
+            st.markdown("### 📡 フロー分析（送信元・宛先・プロトコル）")
+            st.caption("ネットワークの主要な通信パターンと、プロトコル別の分布を表示します。")
+
+            try:
+                import plotly.graph_objects as go
+                # 会話データとトーカーデータを取得
+                _conv_data = convs if convs else []
+                _talkers = talkers if talkers else []
+
+                if _conv_data or _talkers:
+                    _dist_col1, _dist_col2 = st.columns(2)
+
+                    # プロトコル別分布
+                    with _dist_col1:
+                        st.markdown("**プロトコル分布**")
+                        if _conv_data:
+                            _proto_dist = {}
+                            for _c in _conv_data:
+                                _p = _c.get('protocol', 'Other').upper()
+                                _label = _p if _p in ("TCP", "UDP", "ICMP") else "その他"
+                                _proto_dist[_label] = _proto_dist.get(_label, 0) + _c.get('packets', 0)
+                            _proto_dist = {k: v for k, v in _proto_dist.items() if v > 0}
+
+                            if _proto_dist:
+                                _proto_fig = go.Figure(data=[go.Pie(
+                                    labels=list(_proto_dist.keys()),
+                                    values=list(_proto_dist.values()),
+                                    marker=dict(colors=['#FF6B6B', '#4ECDC4', '#FFE66D', '#95A5A6'][:len(_proto_dist)]),
+                                    textposition='inside',
+                                    textinfo='label+percent',
+                                    hovertemplate='%{label}: %{value} packets<extra></extra>'
+                                )])
+                                _proto_fig.update_layout(height=350, margin=dict(l=0, r=0, t=0, b=0))
+                                st.plotly_chart(_proto_fig, width='stretch')
+                            else:
+                                st.caption("プロトコル分布データなし")
+                        else:
+                            st.caption("解析結果がありません")
+
+                    # トップ送信元・宛先フロー
+                    with _dist_col2:
+                        st.markdown("**トップ通信フロー**")
+                        if _conv_data and len(_conv_data) > 0:
+                            # 上位10件の会話を表示
+                            _top_convs = _conv_data[:10]
+                            _flow_labels = [f"{c['src_ip']}→{c['dst_ip']}" for c in _top_convs]
+                            _flow_packets = [c.get('packets', 0) for c in _top_convs]
+                            _flow_protos = [c.get('protocol', 'Unknown').upper() for c in _top_convs]
+
+                            # プロトコルごとに色分け
+                            _proto_colors_map = {
+                                'TCP': '#FF6B6B',
+                                'UDP': '#4ECDC4',
+                                'ICMP': '#FFE66D',
+                                'OTHER': '#95A5A6'
+                            }
+                            _flow_colors = [_proto_colors_map.get(p, '#95A5A6') for p in _flow_protos]
+
+                            _flow_fig = go.Figure(data=[
+                                go.Bar(
+                                    y=_flow_labels,
+                                    x=_flow_packets,
+                                    orientation='h',
+                                    marker=dict(color=_flow_colors),
+                                    text=[f"{p} - {n} pkt" for p, n in zip(_flow_protos, _flow_packets)],
+                                    textposition='outside',
+                                    hovertemplate='%{y}: %{x} packets<extra></extra>'
+                                )
+                            ])
+                            _flow_fig.update_layout(
+                                height=350,
+                                yaxis=dict(autorange='reversed'),
+                                xaxis_title="パケット数",
+                                margin=dict(l=200, r=0, t=0, b=0)
+                            )
+                            st.plotly_chart(_flow_fig, width='stretch')
+                        else:
+                            st.caption("会話フロー情報なし")
+
+                    # 送信元・宛先のマトリックス表示
+                    st.markdown("**通信マトリックス（送信元→宛先のトップ20）**")
+                    if _conv_data and len(_conv_data) > 0:
+                        _matrix_df = pd.DataFrame([
+                            {
+                                "送信元": c['src_ip'],
+                                "宛先": c['dst_ip'],
+                                "プロトコル": c.get('protocol', 'Unknown').upper(),
+                                "パケット数": c.get('packets', 0),
+                                "バイト数": c.get('bytes', 0),
+                                "期間(秒)": round(c.get('duration_sec', 0), 2),
+                            }
+                            for c in _conv_data[:20]
+                        ])
+                        st.dataframe(_matrix_df, width='stretch', hide_index=True)
+                    else:
+                        st.caption("マトリックスデータなし")
+
+                else:
+                    st.caption("フロー分析データが利用できません")
+
+            except Exception as e:
+                st.warning(f"フロー分析の表示に失敗しました: {e}")
+                import traceback
+                st.error(traceback.format_exc()[:500])
+
+            # ── 🔥 Palo Alto風ダッシュボード（脅威・アプリ・セッション分布） ──
+            st.markdown("---")
+            st.markdown("### 🔥 セキュリティダッシュボード（Palo Alto風）")
+            st.caption("脅威タイプ・アプリケーション・セッション状態を多次元で可視化します。")
+
+            try:
+                # Palo Alto風分析関数を実行
+                _app_dist = pcap_analyzer.get_application_distribution(convs) if convs else {}
+                _threat_dist = pcap_analyzer.get_threat_category_distribution(
+                    res.get("ips_alerts", []), res) if res else {}
+                _session_dist = pcap_analyzer.get_session_state_distribution(streams) if streams else {}
+
+                if _app_dist or _threat_dist or _session_dist:
+                    # 3列レイアウト：アプリ・脅威・セッション
+                    _sec_col1, _sec_col2, _sec_col3 = st.columns(3)
+
+                    # 左：アプリケーション分布
+                    with _sec_col1:
+                        st.markdown("**アプリケーション分布**")
+                        if _app_dist:
+                            _app_fig = go.Figure(data=[go.Pie(
+                                labels=list(_app_dist.keys())[:10],
+                                values=list(_app_dist.values())[:10],
+                                marker=dict(colors=[
+                                    '#FF6B6B', '#4ECDC4', '#FFE66D', '#A8E6CF', '#FFD93D',
+                                    '#6BCB77', '#4D96FF', '#FF6B9D', '#C780FA', '#95A5A6'
+                                ][:len(list(_app_dist.keys())[:10])]),
+                                textposition='inside',
+                                textinfo='label+percent',
+                                hovertemplate='%{label}: %{value} packets<extra></extra>'
+                            )])
+                            _app_fig.update_layout(
+                                height=350,
+                                margin=dict(l=0, r=0, t=0, b=0),
+                                showlegend=False
+                            )
+                            st.plotly_chart(_app_fig, width='stretch')
+                        else:
+                            st.caption("アプリケーション分布データなし")
+
+                    # 中：脅威タイプ分布
+                    with _sec_col2:
+                        st.markdown("**脅威タイプ分布**")
+                        if _threat_dist:
+                            _threat_fig = go.Figure(data=[go.Pie(
+                                labels=list(_threat_dist.keys())[:10],
+                                values=list(_threat_dist.values())[:10],
+                                marker=dict(colors=[
+                                    '#E74C3C', '#E67E22', '#F39C12', '#C0392B', '#D35400',
+                                    '#A93226', '#922B21', '#7B241C', '#5B2C6F', '#9A59B5'
+                                ][:len(list(_threat_dist.keys())[:10])]),
+                                textposition='inside',
+                                textinfo='label+percent',
+                                hovertemplate='%{label}: %{value} alerts<extra></extra>'
+                            )])
+                            _threat_fig.update_layout(
+                                height=350,
+                                margin=dict(l=0, r=0, t=0, b=0),
+                                showlegend=False
+                            )
+                            st.plotly_chart(_threat_fig, width='stretch')
+                        else:
+                            st.caption("脅威検知なし")
+
+                    # 右：セッション状態分布
+                    with _sec_col3:
+                        st.markdown("**セッション状態分布**")
+                        if _session_dist:
+                            _session_fig = go.Figure(data=[go.Pie(
+                                labels=list(_session_dist.keys()),
+                                values=list(_session_dist.values()),
+                                marker=dict(colors=['#27AE60', '#3498DB', '#E74C3C', '#F39C12', '#95A5A6']),
+                                textposition='inside',
+                                textinfo='label+percent',
+                                hovertemplate='%{label}: %{value} sessions<extra></extra>'
+                            )])
+                            _session_fig.update_layout(
+                                height=350,
+                                margin=dict(l=0, r=0, t=0, b=0),
+                                showlegend=False
+                            )
+                            st.plotly_chart(_session_fig, width='stretch')
+                        else:
+                            st.caption("セッション状態データなし")
+
+                    # 詳細テーブル：トップアプリ×トップ脅威
+                    st.markdown("**詳細分析：トップアプリケーションとトップ脅威**")
+                    _detail_col1, _detail_col2 = st.columns(2)
+
+                    with _detail_col1:
+                        if _app_dist:
+                            _app_detail_df = pd.DataFrame([
+                                {
+                                    "アプリケーション": app,
+                                    "パケット数": count,
+                                    "割合(%)": f"{(count/sum(_app_dist.values())*100):.1f}%"
+                                }
+                                for app, count in list(_app_dist.items())[:10]
+                            ])
+                            st.dataframe(_app_detail_df, width='stretch', hide_index=True)
+                        else:
+                            st.caption("アプリケーション詳細なし")
+
+                    with _detail_col2:
+                        if _threat_dist:
+                            _threat_detail_df = pd.DataFrame([
+                                {
+                                    "脅威タイプ": threat,
+                                    "検知数": count,
+                                    "割合(%)": f"{(count/sum(_threat_dist.values())*100):.1f}%"
+                                }
+                                for threat, count in list(_threat_dist.items())[:10]
+                            ])
+                            st.dataframe(_threat_detail_df, width='stretch', hide_index=True)
+                        else:
+                            st.caption("脅威詳細なし")
+
+                else:
+                    st.caption("セキュリティダッシュボードデータが利用できません")
+
+            except Exception as e:
+                st.warning(f"セキュリティダッシュボードの生成に失敗しました: {e}")
+
             # ── 🛡️ IPS検査（シグネチャ型 + アノマリ型 + 振る舞い型） ──
             _ips_alerts = res.get("ips_alerts", [])
             _behavior_items = (res.get("worm_propagation", []) + res.get("beaconing", [])
