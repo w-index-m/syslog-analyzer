@@ -5301,7 +5301,9 @@ with tab_pcap:
             if _sid_corr:
                 st.markdown("---")
                 st.markdown("### 🔗 ID/session値による通信の突き合わせ")
-                st.caption("同じID/session値が複数の通信フローにまたがって出現しているものです。"
+                st.caption("同じID/session値が複数の通信フローにまたがって出現しているものです"
+                           "（プロトコル不明の通信に加えて、HTTPのCookie/Set-Cookie・"
+                           "X-Session-Id/X-Request-Id・Authorizationヘッダーも対象）。"
                            "人手での突き合わせは現実的に困難なため機械的に検出しています。"
                            "送信元IPが複数にまたがる場合はセッションの使い回し・乗っ取りの疑いもあるため要確認です。")
                 for _c in _sid_corr:

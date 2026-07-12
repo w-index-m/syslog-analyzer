@@ -310,6 +310,57 @@ def _extract_id_values(payload: bytes) -> list:
     return _ID_VALUE_RE.findall(text)
 
 
+# HTTPヘッダーからセッション相関に使える値を抜き出すための定義。
+# Cookie/Set-Cookieは複数のname=valueペアを含むため、ID/セッションらしい名前の
+# ペアだけを選び、それ以外(customヘッダー)は値をそのまま使う。
+_HTTP_HEADER_LINE_RE = re.compile(r"(?im)^([A-Za-z][A-Za-z0-9\-]*)\s*:\s*([^\r\n]*)")
+_HTTP_ID_HEADER_NAMES = {
+    "cookie", "set-cookie", "x-session-id", "x-request-id", "x-correlation-id",
+    "x-trace-id", "session-id", "authorization",
+}
+_COOKIE_PAIR_RE = re.compile(r"([A-Za-z0-9_\-\.]+)\s*=\s*([^;]+)")
+_ID_LOOKING_COOKIE_NAME_RE = re.compile(r"(?i)sess|token|sid|(?:^|_|-)id$|auth")
+_HTTP_METHODS = {"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT", "TRACE"}
+
+
+def _extract_http_session_ids(payload: bytes) -> list:
+    """
+    HTTPリクエスト/レスポンスのヘッダー（Cookie/Set-Cookie/X-Session-Id等）から
+    セッション相関に使えそうな値を抽出する。プロトコル不明通信のID抽出
+    （_extract_id_values）と同じ突き合わせ機構（session_id_index）に流し込み、
+    HTTPのセッションIDも他フローと横断的に突き合わせできるようにする。
+    """
+    if not payload:
+        return []
+    try:
+        head = payload.split(b"\r\n\r\n", 1)[0][:4000]
+        text = head.decode("ascii", errors="ignore")
+    except Exception:
+        return []
+    values = []
+    for name, val in _HTTP_HEADER_LINE_RE.findall(text):
+        lname = name.lower()
+        if lname not in _HTTP_ID_HEADER_NAMES:
+            continue
+        val = val.strip()
+        if not val:
+            continue
+        if lname in ("cookie", "set-cookie"):
+            for cname, cval in _COOKIE_PAIR_RE.findall(val):
+                if _ID_LOOKING_COOKIE_NAME_RE.search(cname):
+                    cval = cval.strip()
+                    if 2 <= len(cval) <= 64:
+                        values.append(cval)
+        else:
+            if lname == "authorization":
+                m = re.match(r"(?i)bearer\s+(.+)", val)
+                if m:
+                    val = m.group(1).strip()
+            if 2 <= len(val) <= 64:
+                values.append(val)
+    return values
+
+
 # ── CTF問題向け: flag{...}パターン / Base64らしき文字列の検出 ────────
 # ネットワークフォレンジック系CTF問題で頻出する「flagがパケット内の
 # どこかに平文/Base64で埋まっている」ケースをハントするヒューリスティック。
@@ -1376,6 +1427,7 @@ def analyze_pcap(data: bytes) -> dict:
         syslog_packets      pcap内syslog
         unknown_proto_hints プロトコル不明な通信でID/sessionキーワードを検出したフロー
         session_id_correlations  同一ID値が複数フローにまたがって出現した突き合わせ結果
+                            （プロトコル不明通信 + HTTPのCookie/ヘッダーの両方が対象）
         ctf_flag_hits       flag{...}パターン/Base64らしき文字列の検出結果（CTF向け）
         total_packets       int
         capture_start / capture_end  str
@@ -1531,6 +1583,16 @@ def analyze_pcap(data: bytes) -> dict:
     # ICMPエクスフィル検出用: echo(type 0/8)のペイロード収集
     icmp_echo_payloads: list = []
 
+    def _record_session_id_hits(key, id_values, ts):
+        # 未知プロトコル/HTTP等、複数のソースから共通のsession_id_indexへ
+        # 突き合わせ用データを流し込むための共通処理。
+        for id_val in id_values:
+            idx = session_id_index.setdefault(id_val, {"count": 0, "flows": {}, "events": []})
+            idx["count"] += 1
+            fl = idx["flows"].setdefault(key, 0)
+            idx["flows"][key] = fl + 1
+            idx["events"].append({"ts": ts, "flow": key})
+
     def _record_unknown_hint(proto_name, src, dst, sp, dp, payload, ts):
         kw = _find_unknown_proto_keywords(payload)
         if not kw:
@@ -1542,12 +1604,14 @@ def analyze_pcap(data: bytes) -> dict:
         if not entry["sample"]:
             entry["sample"] = payload[:120].decode("utf-8", errors="replace")
 
-        for id_val in _extract_id_values(payload):
-            idx = session_id_index.setdefault(id_val, {"count": 0, "flows": {}, "events": []})
-            idx["count"] += 1
-            fl = idx["flows"].setdefault(key, 0)
-            idx["flows"][key] = fl + 1
-            idx["events"].append({"ts": ts, "flow": key})
+        _record_session_id_hits(key, _extract_id_values(payload), ts)
+
+    def _record_http_session_hint(src, dst, sp, dp, payload, ts):
+        # HTTPヘッダー(Cookie/Set-Cookie/X-Session-Id等)のIDも同じ突き合わせ機構に流す。
+        # unknown_proto_hints（プロトコル不明の通信一覧）には追加しない
+        # （HTTPは既知プロトコルのため、そちらの表には出さない）。
+        key = ("HTTP", src, dst, sp, dp)
+        _record_session_id_hits(key, _extract_http_session_ids(payload), ts)
 
     try:
         for ts, raw_pkt in reader:
@@ -1744,6 +1808,11 @@ def analyze_pcap(data: bytes) -> dict:
                                             "reason":      reason[:60],
                                             "category":    "クライアントエラー" if code < 500 else "サーバーエラー",
                                         })
+                                # レスポンス（Set-Cookie等）からセッションIDを抽出
+                                _record_http_session_hint(src, dst, sport, dport, bytes(tcp.data), ts)
+                            elif preview.split(" ", 1)[0] in _HTTP_METHODS:
+                                # リクエスト（Cookie/Authorization/X-Session-Id等）からセッションIDを抽出
+                                _record_http_session_hint(src, dst, sport, dport, bytes(tcp.data), ts)
                         except Exception: pass
 
                     # ── TLS / HTTPS ──────────────────────
