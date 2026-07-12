@@ -1504,10 +1504,10 @@ _process_queue()
 # メインUI - タブメニュー
 # ─────────────────────────────────────────
 (tab_health, tab1, tab_showlog, tab_prtg, tab2, tab3,
- tab_netflow, tab_pcap, tab_topo, tab_probe, tab_cloud, tab4, tab5, tab_chat) = st.tabs([
+ tab_netflow, tab_pcap, tab_topo, tab_probe, tab_webdiag, tab_cloud, tab4, tab5, tab_chat) = st.tabs([
     "📊 品質ルーブリック", "📋 ログビューア", "📥 show log解析", "📟 MRTG風",
     "📊 テレメトリダッシュボード", "📡 SNMPモニター",
-    "🌊 NetFlow", "📦 パケット解析", "🗺️ トポロジー", "⏱️ 応答時間",
+    "🌊 NetFlow", "📦 パケット解析", "🗺️ トポロジー", "⏱️ 応答時間", "🎯 Web診断",
     "☁️ クラウド監査ログ", "🗂️ 機器コンフィグ", "📖 セットアップガイド", "💬 AIチャット"
 ])
 
@@ -6694,6 +6694,134 @@ ip sla schedule 2 life forever start-time now""", language="text")
                 st.warning("IP SLA データが取得できませんでした。\n"
                            "- ip sla が設定・スケジュール済みか確認してください\n"
                            "- RESTCONF デバイスが登録済みか確認してください")
+
+# ═══════════════════════════════════════════
+# TAB: Web診断（アクティブスキャン）
+# ═══════════════════════════════════════════
+with tab_webdiag:
+    import web_scanner as _wds
+
+    st.markdown("## 🎯 Web診断（軽量アクティブスキャン）")
+    st.caption("対象URLへ実際にHTTPリクエストを送信し、セキュリティヘッダー・機密パスの露出・"
+               "反射型XSS・SQLインジェクションの兆候・オープンリダイレクト・CORS誤設定を確認します。"
+               "**破壊的な操作（データの作成/変更/削除・認証情報の総当たり・大量リクエスト）は行いません**"
+               "が、対象へ実通信が発生する点は「📦 パケット解析」タブ等の受動解析と異なります。")
+
+    st.error(
+        "⚠️ **重要 — 実行前に必ず確認してください**\n\n"
+        "本機能は入力されたURLへ**実際にリクエストを送信**します。"
+        "自分が管理する対象、または対象の管理者から**書面等で明示的な許可**を得た対象以外へは"
+        "**絶対に実行しないでください**。無許可の対象への実行は、不正アクセス禁止法等の"
+        "法令に抵触する可能性があります。"
+    )
+
+    _webdiag_url = st.text_input(
+        "対象URL", placeholder="https://example.com/search?q=test",
+        help="クエリパラメータを含むURLを指定すると、そのパラメータに対する"
+             "XSS/SQLi/オープンリダイレクトの確認も行います。",
+        key="webdiag_url")
+
+    _webdiag_authorized = st.checkbox(
+        "私はこの対象に対してテストを行う正当な権限を持っています"
+        "（自分の管理下にある、または対象の管理者から書面等で明示的な許可を得ています）",
+        key="webdiag_authorized")
+
+    _webdiag_checks = st.multiselect(
+        "実行するチェック",
+        options=["headers", "sensitive_paths", "xss", "sqli", "open_redirect", "cors"],
+        default=["headers", "sensitive_paths", "xss", "sqli", "open_redirect", "cors"],
+        format_func=lambda k: {
+            "headers": "🔒 セキュリティヘッダー/Cookie属性",
+            "sensitive_paths": "📂 機密パス/管理画面の露出確認",
+            "xss": "💉 反射型XSSの兆候",
+            "sqli": "🗄️ SQLインジェクションの兆候（エラーベースのみ）",
+            "open_redirect": "🔀 オープンリダイレクト",
+            "cors": "🌐 CORS誤設定",
+        }.get(k, k),
+        key="webdiag_checks")
+
+    _webdiag_can_run = bool(_webdiag_url) and _webdiag_authorized and bool(_webdiag_checks)
+    if st.button("🚀 スキャン開始", type="primary", disabled=not _webdiag_can_run,
+                 key="webdiag_run_btn"):
+        with st.spinner(f"{_webdiag_url} を診断中...（対象への配慮のためリクエスト間隔を空けています）"):
+            try:
+                _webdiag_report = _wds.run_basic_web_diagnostics(_webdiag_url, checks=_webdiag_checks)
+                st.session_state["_webdiag_report"] = _webdiag_report
+            except Exception as _wd_err:
+                st.error(f"❌ 診断中にエラーが発生しました: {type(_wd_err).__name__}: {_wd_err}")
+                st.session_state["_webdiag_report"] = None
+    if not _webdiag_url:
+        st.caption("対象URLを入力してください。")
+    elif not _webdiag_authorized:
+        st.caption("⚠️ 上記のチェックボックスに同意しないとスキャンは実行できません。")
+
+    _webdiag_report = st.session_state.get("_webdiag_report")
+    if _webdiag_report:
+        st.markdown("---")
+        st.markdown(f"### 📋 診断結果: `{_webdiag_report['url']}`")
+        st.caption(f"実行時刻: {_webdiag_report['started_at']} 〜 {_webdiag_report['finished_at']}")
+
+        _hd = _webdiag_report.get("headers")
+        if _hd:
+            st.markdown("#### 🔒 セキュリティヘッダー / Cookie属性")
+            if _hd.get("error"):
+                st.warning(f"⚠️ {_hd['error']}")
+            else:
+                st.caption(f"HTTPステータス: {_hd['status_code']}"
+                           + (f" / Server: {_hd['server_banner']}" if _hd.get("server_banner") else ""))
+                if _hd["issues"]:
+                    for _iss in _hd["issues"]:
+                        _icon = {"high": "🔴", "medium": "🟠", "low": "🟡"}.get(_iss["severity"], "ℹ️")
+                        st.markdown(f"{_icon} {_iss['detail']}")
+                else:
+                    st.success("✅ 主要なセキュリティヘッダーは設定されています")
+                for _ci in _hd.get("cookie_issues", []):
+                    st.warning(f"🍪 {_ci['detail']}")
+
+        _sp = _webdiag_report.get("sensitive_paths")
+        if _sp:
+            st.markdown("#### 📂 機密パス/管理画面の露出確認")
+            st.caption(f"{_sp['checked']}件のパスを確認しました。")
+            if _sp["exposed"]:
+                df_sp = pd.DataFrame([{
+                    "パス": e["path"], "ステータス": e["status_code"],
+                    "サイズ(bytes)": e["content_length"],
+                } for e in _sp["exposed"]])
+                st.error(f"🔴 {len(_sp['exposed'])}件のパスが公開されています")
+                st.dataframe(df_sp, width='stretch', hide_index=True)
+            else:
+                st.success("✅ 確認した範囲では機密パスの露出は見つかりませんでした")
+
+        for _key, _title, _icon_sev in [
+            ("xss", "💉 反射型XSSの兆候", "high"),
+            ("sqli", "🗄️ SQLインジェクションの兆候", "high"),
+            ("open_redirect", "🔀 オープンリダイレクト", "medium"),
+        ]:
+            _chk = _webdiag_report.get(_key)
+            if _chk:
+                st.markdown(f"#### {_title}")
+                if _chk.get("note"):
+                    st.caption(_chk["note"])
+                elif _chk["findings"]:
+                    for _f in _chk["findings"]:
+                        st.error(f"🔴 {_f['detail']}")
+                else:
+                    st.success(f"✅ テストしたパラメータ（{', '.join(_chk['tested_params'])}）では"
+                               "兆候は見つかりませんでした")
+                if _chk.get("errors"):
+                    st.caption(f"⚠️ {len(_chk['errors'])}件のリクエストでエラーが発生しました")
+
+        _cors = _webdiag_report.get("cors")
+        if _cors:
+            st.markdown("#### 🌐 CORS誤設定")
+            if _cors.get("error"):
+                st.warning(f"⚠️ {_cors['error']}")
+            elif _cors["issues"]:
+                for _iss in _cors["issues"]:
+                    _icon = {"high": "🔴", "medium": "🟠", "low": "🟡"}.get(_iss["severity"], "ℹ️")
+                    st.markdown(f"{_icon} {_iss['detail']}")
+            else:
+                st.success("✅ Origin反射等のCORS誤設定は見つかりませんでした")
 
 with tab_cloud:
     import cloud_audit_collector as _cac
