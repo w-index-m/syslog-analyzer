@@ -4496,13 +4496,13 @@ with tab_pcap:
                 import traceback
                 st.error(traceback.format_exc()[:500])
 
-            # ── 🔥 Palo Alto風ダッシュボード（脅威・アプリ・セッション分布） ──
+            # ── 🔥 パケット分布ダッシュボード（脅威・アプリ・セッション分布） ──
             st.markdown("---")
-            st.markdown("### 🔥 セキュリティダッシュボード（Palo Alto風）")
+            st.markdown("### 🔥 パケット分布ダッシュボード")
             st.caption("脅威タイプ・アプリケーション・セッション状態を多次元で可視化します。")
 
             try:
-                # Palo Alto風分析関数を実行
+                # パケット分布の多次元分析を実行
                 _app_dist = pcap_analyzer.get_application_distribution(convs) if convs else {}
                 _threat_dist = pcap_analyzer.get_threat_category_distribution(
                     res.get("ips_alerts", []), res) if res else {}
