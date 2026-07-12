@@ -4095,3 +4095,92 @@ def get_packet_timeline(data: bytes, interval_ms: int = 100) -> dict:
         "capture_end": _ts_str(end_ts) if end_ts else "",
         "error": None
     }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Palo Alto風ダッシュボード用分析関数
+# ═══════════════════════════════════════════════════════════════════
+
+PORT_APPLICATION_MAP = {
+    80: 'HTTP', 443: 'HTTPS/TLS', 8080: 'HTTP-Alt', 8443: 'HTTPS-Alt',
+    25: 'SMTP', 110: 'POP3', 143: 'IMAP', 465: 'SMTPS', 587: 'SMTP-Submit',
+    53: 'DNS', 22: 'SSH', 3389: 'RDP', 23: 'Telnet',
+    20: 'FTP-Data', 21: 'FTP-Control', 69: 'TFTP', 445: 'SMB',
+    1433: 'MSSQL', 3306: 'MySQL', 5432: 'PostgreSQL', 5984: 'CouchDB',
+    6379: 'Redis', 27017: 'MongoDB', 9200: 'Elasticsearch',
+    161: 'SNMP', 162: 'SNMP-Trap', 123: 'NTP', 389: 'LDAP', 636: 'LDAPS', 88: 'Kerberos',
+}
+
+def classify_port_to_app(port: int) -> str:
+    if port in PORT_APPLICATION_MAP:
+        return PORT_APPLICATION_MAP[port]
+    elif port < 1024:
+        return 'System/Reserved'
+    elif port < 49152:
+        return 'Registered'
+    else:
+        return 'Dynamic/Private'
+
+def get_application_distribution(conversations: list) -> dict:
+    app_dist = {}
+    for conv in conversations:
+        src_port = conv.get('src_port', 0)
+        dst_port = conv.get('dst_port', 0)
+        app = classify_port_to_app(dst_port) if dst_port else classify_port_to_app(src_port)
+        packets = conv.get('packets', 0)
+        if app not in app_dist:
+            app_dist[app] = 0
+        app_dist[app] += packets
+    return dict(sorted(app_dist.items(), key=lambda x: x[1], reverse=True))
+
+def get_threat_category_distribution(ips_alerts: list, analysis_result: dict) -> dict:
+    threat_dist = {}
+    for alert in ips_alerts:
+        category = alert.get('category', 'Unknown')
+        if category not in threat_dist:
+            threat_dist[category] = 0
+        threat_dist[category] += 1
+    behavior_types = {
+        'ワーム検知': analysis_result.get('worm_propagation', []),
+        'C2/ビーコニング': analysis_result.get('beaconing', []),
+        'データ流出': analysis_result.get('data_exfil', []),
+        '怪しい宛先': analysis_result.get('suspicious_destinations', []),
+    }
+    for category, items in behavior_types.items():
+        if items:
+            threat_dist[category] = len(items)
+    anomaly_types = {
+        'ポートスキャン': analysis_result.get('scan_patterns', []),
+        'DNS異常': analysis_result.get('dns_tunneling', []),
+        'ICMP異常': analysis_result.get('icmp_exfil', []),
+    }
+    for category, items in anomaly_types.items():
+        if items:
+            if category in threat_dist:
+                threat_dist[category] += len(items)
+            else:
+                threat_dist[category] = len(items)
+    return dict(sorted(threat_dist.items(), key=lambda x: x[1], reverse=True))
+
+def get_session_state_distribution(tcp_streams: list) -> dict:
+    state_dist = {
+        '確立（ESTABLISHED）': 0,
+        '接続中（SYN_SENT）': 0,
+        'リセット（RST）': 0,
+        'グレースフル終了（FIN）': 0,
+        '異常終了': 0,
+    }
+    for stream in tcp_streams:
+        packets = stream.get('packets', 0)
+        if 'FIN' in stream.get('flags', ''):
+            if packets >= 3:
+                state_dist['グレースフル終了（FIN）'] += 1
+            else:
+                state_dist['接続中（SYN_SENT）'] += 1
+        elif 'RST' in stream.get('flags', ''):
+            state_dist['リセット（RST）'] += 1
+        elif packets >= 3:
+            state_dist['確立（ESTABLISHED）'] += 1
+        else:
+            state_dist['接続中（SYN_SENT）'] += 1
+    return {k: v for k, v in state_dist.items() if v > 0}

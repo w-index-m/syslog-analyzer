@@ -4530,6 +4530,129 @@ if tab5 is not None:
                 import traceback
                 st.error(traceback.format_exc()[:500])
 
+            # ── 🔥 Palo Alto風ダッシュボード（脅威・アプリ・セッション分布） ──
+            st.markdown("---")
+            st.markdown("### 🔥 セキュリティダッシュボード（Palo Alto風）")
+            st.caption("脅威タイプ・アプリケーション・セッション状態を多次元で可視化します。")
+
+            try:
+                # Palo Alto風分析関数を実行
+                _app_dist = pcap_analyzer.get_application_distribution(convs) if convs else {}
+                _threat_dist = pcap_analyzer.get_threat_category_distribution(
+                    res.get("ips_alerts", []), res) if res else {}
+                _session_dist = pcap_analyzer.get_session_state_distribution(streams) if streams else {}
+
+                if _app_dist or _threat_dist or _session_dist:
+                    # 3列レイアウト：アプリ・脅威・セッション
+                    _sec_col1, _sec_col2, _sec_col3 = st.columns(3)
+
+                    # 左：アプリケーション分布
+                    with _sec_col1:
+                        st.markdown("**アプリケーション分布**")
+                        if _app_dist:
+                            _app_fig = go.Figure(data=[go.Pie(
+                                labels=list(_app_dist.keys())[:10],
+                                values=list(_app_dist.values())[:10],
+                                marker=dict(colors=[
+                                    '#FF6B6B', '#4ECDC4', '#FFE66D', '#A8E6CF', '#FFD93D',
+                                    '#6BCB77', '#4D96FF', '#FF6B9D', '#C780FA', '#95A5A6'
+                                ][:len(list(_app_dist.keys())[:10])]),
+                                textposition='inside',
+                                textinfo='label+percent',
+                                hovertemplate='%{label}: %{value} packets<extra></extra>'
+                            )])
+                            _app_fig.update_layout(
+                                height=350,
+                                margin=dict(l=0, r=0, t=0, b=0),
+                                showlegend=False
+                            )
+                            st.plotly_chart(_app_fig, use_container_width=True)
+                        else:
+                            st.caption("アプリケーション分布データなし")
+
+                    # 中：脅威タイプ分布
+                    with _sec_col2:
+                        st.markdown("**脅威タイプ分布**")
+                        if _threat_dist:
+                            _threat_fig = go.Figure(data=[go.Pie(
+                                labels=list(_threat_dist.keys())[:10],
+                                values=list(_threat_dist.values())[:10],
+                                marker=dict(colors=[
+                                    '#E74C3C', '#E67E22', '#F39C12', '#C0392B', '#D35400',
+                                    '#A93226', '#922B21', '#7B241C', '#5B2C6F', '#9A59B5'
+                                ][:len(list(_threat_dist.keys())[:10])]),
+                                textposition='inside',
+                                textinfo='label+percent',
+                                hovertemplate='%{label}: %{value} alerts<extra></extra>'
+                            )])
+                            _threat_fig.update_layout(
+                                height=350,
+                                margin=dict(l=0, r=0, t=0, b=0),
+                                showlegend=False
+                            )
+                            st.plotly_chart(_threat_fig, use_container_width=True)
+                        else:
+                            st.caption("脅威検知なし")
+
+                    # 右：セッション状態分布
+                    with _sec_col3:
+                        st.markdown("**セッション状態分布**")
+                        if _session_dist:
+                            _session_fig = go.Figure(data=[go.Pie(
+                                labels=list(_session_dist.keys()),
+                                values=list(_session_dist.values()),
+                                marker=dict(colors=['#27AE60', '#3498DB', '#E74C3C', '#F39C12', '#95A5A6']),
+                                textposition='inside',
+                                textinfo='label+percent',
+                                hovertemplate='%{label}: %{value} sessions<extra></extra>'
+                            )])
+                            _session_fig.update_layout(
+                                height=350,
+                                margin=dict(l=0, r=0, t=0, b=0),
+                                showlegend=False
+                            )
+                            st.plotly_chart(_session_fig, use_container_width=True)
+                        else:
+                            st.caption("セッション状態データなし")
+
+                    # 詳細テーブル：トップアプリ×トップ脅威
+                    st.markdown("**詳細分析：トップアプリケーションとトップ脅威**")
+                    _detail_col1, _detail_col2 = st.columns(2)
+
+                    with _detail_col1:
+                        if _app_dist:
+                            _app_detail_df = pd.DataFrame([
+                                {
+                                    "アプリケーション": app,
+                                    "パケット数": count,
+                                    "割合(%)": f"{(count/sum(_app_dist.values())*100):.1f}%"
+                                }
+                                for app, count in list(_app_dist.items())[:10]
+                            ])
+                            st.dataframe(_app_detail_df, width='stretch', hide_index=True)
+                        else:
+                            st.caption("アプリケーション詳細なし")
+
+                    with _detail_col2:
+                        if _threat_dist:
+                            _threat_detail_df = pd.DataFrame([
+                                {
+                                    "脅威タイプ": threat,
+                                    "検知数": count,
+                                    "割合(%)": f"{(count/sum(_threat_dist.values())*100):.1f}%"
+                                }
+                                for threat, count in list(_threat_dist.items())[:10]
+                            ])
+                            st.dataframe(_threat_detail_df, width='stretch', hide_index=True)
+                        else:
+                            st.caption("脅威詳細なし")
+
+                else:
+                    st.caption("セキュリティダッシュボードデータが利用できません")
+
+            except Exception as e:
+                st.warning(f"セキュリティダッシュボードの生成に失敗しました: {e}")
+
                 # ── 🛡️ IPS検査（シグネチャ型 + アノマリ型 + 振る舞い型） ──
                 _ips_alerts = res.get("ips_alerts", [])
                 _behavior_items = (res.get("worm_propagation", []) + res.get("beaconing", [])
