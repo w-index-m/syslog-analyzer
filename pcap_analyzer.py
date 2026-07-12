@@ -320,7 +320,12 @@ _HTTP_ID_HEADER_NAMES = {
 }
 _COOKIE_PAIR_RE = re.compile(r"([A-Za-z0-9_\-\.]+)\s*=\s*([^;]+)")
 _ID_LOOKING_COOKIE_NAME_RE = re.compile(r"(?i)sess|token|sid|(?:^|_|-)id$|auth")
-_HTTP_METHODS = {"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT", "TRACE"}
+_HTTP_METHODS = {"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT", "TRACE",
+                  "TRACK", "PROPFIND", "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK", "UNLOCK", "DEBUG"}
+# 通常のREST用途ではまず使われず、WebDAV探索/verb tampering(認可回避)/古いIIS脆弱性の
+# 調査でよく使われるメソッド。ペネトレーション試験・偵察活動の兆候として参考情報にする。
+_RARE_HTTP_METHODS = {"TRACE", "TRACK", "PROPFIND", "PROPPATCH", "MKCOL", "COPY", "MOVE",
+                       "LOCK", "UNLOCK", "DEBUG", "CONNECT"}
 
 
 def _extract_http_session_ids(payload: bytes) -> list:
@@ -1459,6 +1464,7 @@ def analyze_pcap(data: bytes) -> dict:
         "ospf_issues": [],
         "ip_fragments": [],
         "http_errors": [],    "http_summary": {},
+        "auth_bruteforce": [], "http_rare_methods": [],
         "tls_sessions": [],   "tls_alerts": [],
         "ai_service_sessions": [],
         "side_channel_exposure": [],
@@ -1552,6 +1558,12 @@ def analyze_pcap(data: bytes) -> dict:
     # 人手では困難な「同じID値が複数フローにまたがって出現していないか」の突き合わせと、
     # 出現順（シーケンス）チェックに使う。
     session_id_index: dict[str, dict] = {}
+
+    # 認証ブルートフォース検知用: (client, server, server_port) -> {count401, count403, first_ts, last_ts}
+    auth_fail_count: dict[tuple, dict] = defaultdict(
+        lambda: {"count401": 0, "count403": 0, "first_ts": None, "last_ts": None})
+    # HTTPメソッド使用状況: (client, server, server_port) -> {method: count}
+    http_methods_seen: dict[tuple, dict] = defaultdict(lambda: defaultdict(int))
 
     # CTF問題向け flag{...}/Base64候補の検出結果
     ctf_flag_hits: list = []
@@ -1808,11 +1820,20 @@ def analyze_pcap(data: bytes) -> dict:
                                             "reason":      reason[:60],
                                             "category":    "クライアントエラー" if code < 500 else "サーバーエラー",
                                         })
+                                    if code in (401, 403):
+                                        _afk = (dst, src, sport)  # (client, server, server_port)
+                                        _af = auth_fail_count[_afk]
+                                        _af[f"count{code}"] += 1
+                                        _af["first_ts"] = ts if _af["first_ts"] is None else min(_af["first_ts"], ts)
+                                        _af["last_ts"] = ts if _af["last_ts"] is None else max(_af["last_ts"], ts)
                                 # レスポンス（Set-Cookie等）からセッションIDを抽出
                                 _record_http_session_hint(src, dst, sport, dport, bytes(tcp.data), ts)
-                            elif preview.split(" ", 1)[0] in _HTTP_METHODS:
-                                # リクエスト（Cookie/Authorization/X-Session-Id等）からセッションIDを抽出
-                                _record_http_session_hint(src, dst, sport, dport, bytes(tcp.data), ts)
+                            else:
+                                _method = preview.split(" ", 1)[0]
+                                if _method in _HTTP_METHODS:
+                                    # リクエスト（Cookie/Authorization/X-Session-Id等）からセッションIDを抽出
+                                    _record_http_session_hint(src, dst, sport, dport, bytes(tcp.data), ts)
+                                    http_methods_seen[(src, dst, dport)][_method] += 1
                         except Exception: pass
 
                     # ── TLS / HTTPS ──────────────────────
@@ -2513,6 +2534,39 @@ def analyze_pcap(data: bytes) -> dict:
         })
     result["session_id_correlations"].sort(
         key=lambda x: (x["anomaly_multi_src"], x["total_occurrences"]), reverse=True)
+
+    # ── 認証ブルートフォース検知(401/403の多発) ──
+    # 短時間に同一クライアント→同一サーバーへ401/403が多発 = パスワード/IDスプレー攻撃の兆候。
+    for (client, server, server_port), _af in auth_fail_count.items():
+        _total = _af["count401"] + _af["count403"]
+        if _total < 5:
+            continue
+        _dur = max((_af["last_ts"] or 0) - (_af["first_ts"] or 0), 0.001)
+        _rate = _total / _dur
+        result["auth_bruteforce"].append({
+            "client": client, "server": server, "server_port": server_port,
+            "count_401": _af["count401"], "count_403": _af["count403"],
+            "total": _total, "duration_sec": round(_dur, 3),
+            "rate_per_sec": round(_rate, 2),
+            "detail": f"{client} → {server}:{server_port} へ401/403が{_total}回発生"
+                      f"（{round(_dur, 1)}秒間、{round(_rate, 2)}回/秒）"
+                      " — パスワード/IDスプレー攻撃の可能性",
+        })
+    result["auth_bruteforce"].sort(key=lambda x: x["total"], reverse=True)
+
+    # ── 珍しいHTTPメソッドの使用(WebDAV探索・verb tampering等) ──
+    for (client, server, server_port), _methods in http_methods_seen.items():
+        _rare = {m: n for m, n in _methods.items() if m in _RARE_HTTP_METHODS}
+        if not _rare:
+            continue
+        result["http_rare_methods"].append({
+            "client": client, "server": server, "server_port": server_port,
+            "methods": _rare,
+            "detail": f"{client} → {server}:{server_port} で珍しいHTTPメソッド"
+                      f"（{', '.join(f'{m}×{n}' for m, n in _rare.items())}）を検出"
+                      " — WebDAV探索/verb tamperingによる認可回避調査の可能性",
+        })
+    result["http_rare_methods"].sort(key=lambda x: sum(x["methods"].values()), reverse=True)
 
     # CTF flag / Base64候補（重複排除: 同一フロー・種別・文字列は1件にまとめる）
     _seen_ctf = set()

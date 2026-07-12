@@ -5696,6 +5696,65 @@ with tab_pcap:
                 else:
                     st.success("✅ HTTP 4xx/5xx エラーは検出されませんでした")
 
+            # ── 🎯 Web診断/ペネトレーション試験アクティビティ ──
+            _web_ips = [a for a in res.get("ips_alerts", [])
+                        if a.get("category") in (
+                            "SQLインジェクション", "クロスサイトスクリプティング(XSS)",
+                            "ディレクトリトラバーサル", "コマンドインジェクション",
+                            "Webシェル/コード実行", "スキャナー/攻撃ツール",
+                            "SSRF(サーバーサイドリクエストフォージェリ)", "XXE(XML外部実体参照)",
+                            "NoSQLインジェクション", "LDAPインジェクション", "オープンリダイレクト",
+                            "安全でないデシリアライゼーション", "認証回避/デフォルト認証情報",
+                        )]
+            _auth_bf = res.get("auth_bruteforce", [])
+            _rare_methods = res.get("http_rare_methods", [])
+            _scan_patterns = res.get("scan_patterns", [])
+            if _web_ips or _auth_bf or _rare_methods:
+                st.markdown("---")
+                st.markdown("### 🎯 Web診断/ペネトレーション試験アクティビティ")
+                st.caption("OWASP Top 10系の攻撃パターン・既知スキャナ/ペネトレーションテストツール・"
+                           "認証ブルートフォース・WebDAV探索やverb tamperingに使われる珍しいHTTPメソッドを"
+                           "統合表示します。許可されたペネトレーション試験中のキャプチャであれば"
+                           "「想定通りの検知」として扱ってください。")
+                _wc1, _wc2, _wc3, _wc4 = st.columns(4)
+                _wc1.metric("Web攻撃シグネチャ", len(_web_ips))
+                _wc2.metric("認証ブルートフォース", len(_auth_bf),
+                            delta="⚠️" if _auth_bf else None)
+                _wc3.metric("珍しいHTTPメソッド", len(_rare_methods),
+                            delta="⚠️" if _rare_methods else None)
+                _wc4.metric("ポートスキャン兆候", len(_scan_patterns),
+                            delta="⚠️" if _scan_patterns else None)
+
+                if _web_ips:
+                    st.markdown("**Web攻撃シグネチャ検出**")
+                    df_web_ips = pd.DataFrame([{
+                        "カテゴリ": a["category"], "重大度": a["severity"],
+                        "送信元": a["src"], "宛先": f"{a['dst']}:{a['dst_port']}",
+                        "検知回数": a["count"], "一致内容": a["matched"][:80],
+                    } for a in _web_ips])
+                    st.dataframe(df_web_ips, width='stretch', hide_index=True)
+
+                if _auth_bf:
+                    st.markdown("**🔑 認証ブルートフォース（401/403多発）**")
+                    for _bf in _auth_bf:
+                        st.warning(f"⚠️ {_bf['detail']}")
+                    df_bf = pd.DataFrame([{
+                        "クライアント": b["client"], "サーバー": f"{b['server']}:{b['server_port']}",
+                        "401回数": b["count_401"], "403回数": b["count_403"],
+                        "期間(秒)": b["duration_sec"], "頻度(回/秒)": b["rate_per_sec"],
+                    } for b in _auth_bf])
+                    st.dataframe(df_bf, width='stretch', hide_index=True)
+
+                if _rare_methods:
+                    st.markdown("**🛠️ 珍しいHTTPメソッドの使用**")
+                    for _rm in _rare_methods:
+                        st.info(f"🔍 {_rm['detail']}")
+                    df_rm = pd.DataFrame([{
+                        "クライアント": r["client"], "サーバー": f"{r['server']}:{r['server_port']}",
+                        "メソッド内訳": ", ".join(f"{m}×{n}" for m, n in r["methods"].items()),
+                    } for r in _rare_methods])
+                    st.dataframe(df_rm, width='stretch', hide_index=True)
+
             # ── TLS / HTTPS 解析 ─────────────────────────
             _tls_sum      = res.get("tls_summary", {})
             _tls_sessions = res.get("tls_sessions", [])
