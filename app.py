@@ -4422,6 +4422,114 @@ if tab5 is not None:
                 else:
                     st.caption("pcapデータがまだ読み込まれていません")
 
+            # ── 📡 送信元・宛先・プロトコル分布 ──────────────────────
+            st.markdown("---")
+            st.markdown("### 📡 フロー分析（送信元・宛先・プロトコル）")
+            st.caption("ネットワークの主要な通信パターンと、プロトコル別の分布を表示します。")
+
+            try:
+                import plotly.graph_objects as go
+                # 会話データとトーカーデータを取得
+                _conv_data = convs if convs else []
+                _talkers = talkers if talkers else []
+
+                if _conv_data or _talkers:
+                    _dist_col1, _dist_col2 = st.columns(2)
+
+                    # プロトコル別分布
+                    with _dist_col1:
+                        st.markdown("**プロトコル分布**")
+                        if res:
+                            _proto_dist = {
+                                "TCP": res["protocol_summary"].get("tcp", 0),
+                                "UDP": res["protocol_summary"].get("udp", 0),
+                                "ICMP": res["protocol_summary"].get("icmp", 0),
+                                "その他": res["protocol_summary"].get("other", 0),
+                            }
+                            _proto_dist = {k: v for k, v in _proto_dist.items() if v > 0}
+
+                            if _proto_dist:
+                                _proto_fig = go.Figure(data=[go.Pie(
+                                    labels=list(_proto_dist.keys()),
+                                    values=list(_proto_dist.values()),
+                                    marker=dict(colors=['#FF6B6B', '#4ECDC4', '#FFE66D', '#95A5A6'][:len(_proto_dist)]),
+                                    textposition='inside',
+                                    textinfo='label+percent',
+                                    hovertemplate='%{label}: %{value} packets<extra></extra>'
+                                )])
+                                _proto_fig.update_layout(height=350, margin=dict(l=0, r=0, t=0, b=0))
+                                st.plotly_chart(_proto_fig, use_container_width=True)
+                            else:
+                                st.caption("プロトコル分布データなし")
+                        else:
+                            st.caption("解析結果がありません")
+
+                    # トップ送信元・宛先フロー
+                    with _dist_col2:
+                        st.markdown("**トップ通信フロー**")
+                        if _conv_data and len(_conv_data) > 0:
+                            # 上位10件の会話を表示
+                            _top_convs = _conv_data[:10]
+                            _flow_labels = [f"{c['src']}→{c['dst']}" for c in _top_convs]
+                            _flow_packets = [c.get('packets', 0) for c in _top_convs]
+                            _flow_protos = [c.get('protocol', 'Unknown').upper() for c in _top_convs]
+
+                            # プロトコルごとに色分け
+                            _proto_colors_map = {
+                                'TCP': '#FF6B6B',
+                                'UDP': '#4ECDC4',
+                                'ICMP': '#FFE66D',
+                                'OTHER': '#95A5A6'
+                            }
+                            _flow_colors = [_proto_colors_map.get(p, '#95A5A6') for p in _flow_protos]
+
+                            _flow_fig = go.Figure(data=[
+                                go.Bar(
+                                    y=_flow_labels,
+                                    x=_flow_packets,
+                                    orientation='h',
+                                    marker=dict(color=_flow_colors),
+                                    text=[f"{p} - {n} pkt" for p, n in zip(_flow_protos, _flow_packets)],
+                                    textposition='outside',
+                                    hovertemplate='%{y}: %{x} packets<extra></extra>'
+                                )
+                            ])
+                            _flow_fig.update_layout(
+                                height=350,
+                                yaxis=dict(autorange='reversed'),
+                                xaxis_title="パケット数",
+                                margin=dict(l=200, r=0, t=0, b=0)
+                            )
+                            st.plotly_chart(_flow_fig, use_container_width=True)
+                        else:
+                            st.caption("会話フロー情報なし")
+
+                    # 送信元・宛先のマトリックス表示
+                    st.markdown("**通信マトリックス（送信元→宛先のトップ20）**")
+                    if _conv_data and len(_conv_data) > 0:
+                        _matrix_df = pd.DataFrame([
+                            {
+                                "送信元": c['src'],
+                                "宛先": c['dst'],
+                                "プロトコル": c.get('protocol', 'Unknown').upper(),
+                                "パケット数": c.get('packets', 0),
+                                "バイト数": c.get('bytes', 0),
+                                "期間(秒)": round(c.get('duration', 0), 2),
+                            }
+                            for c in _conv_data[:20]
+                        ])
+                        st.dataframe(_matrix_df, width='stretch', hide_index=True, use_container_width=True)
+                    else:
+                        st.caption("マトリックスデータなし")
+
+                else:
+                    st.caption("フロー分析データが利用できません")
+
+            except Exception as e:
+                st.warning(f"フロー分析の表示に失敗しました: {e}")
+                import traceback
+                st.error(traceback.format_exc()[:500])
+
                 # ── 🛡️ IPS検査（シグネチャ型 + アノマリ型 + 振る舞い型） ──
                 _ips_alerts = res.get("ips_alerts", [])
                 _behavior_items = (res.get("worm_propagation", []) + res.get("beaconing", [])
