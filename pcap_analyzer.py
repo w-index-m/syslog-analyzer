@@ -4011,4 +4011,87 @@ def grep_pcap(data: bytes, pattern: str, mode: str = "text",
                 "src": src, "dst": dst, "sport": sport, "dport": dport}
         if not _search(payload, meta):
             break
-    return result
+
+
+def get_packet_timeline(data: bytes, interval_ms: int = 100) -> dict:
+    """
+    パケットの時系列分布を取得する（時間別にパケット数を集計）。
+
+    Args:
+        data: pcap/pcapng バイト列
+        interval_ms: 集計間隔（ミリ秒）デフォルト100ms
+
+    Returns dict:
+        timeline: [{timestamp, total, tcp, udp, icmp, other}, ...]
+        protocols: {protocol: count, ...}
+        capture_start / capture_end: str
+    """
+    try:
+        reader, _ = _open_capture(data)
+    except Exception as e:
+        return {"error": str(e), "timeline": [], "protocols": {}}
+
+    timeline_dict = {}  # {時刻（ミリ秒）: {tcp: 0, udp: 0, ...}}
+    protocols = {"TCP": 0, "UDP": 0, "ICMP": 0, "Other": 0}
+
+    start_ts = None
+    end_ts = None
+
+    try:
+        for ts, raw_pkt in reader:
+            if start_ts is None:
+                start_ts = ts
+            end_ts = ts
+
+            # 時刻をミリ秒単位の整数にして集計間隔でグループ化
+            ts_ms = int(ts * 1000)
+            bucket = (ts_ms // interval_ms) * interval_ms
+
+            if bucket not in timeline_dict:
+                timeline_dict[bucket] = {"tcp": 0, "udp": 0, "icmp": 0, "other": 0}
+
+            proto = "other"
+            try:
+                eth = dpkt.ethernet.Ethernet(raw_pkt)
+                if isinstance(eth.data, dpkt.ip.IP):
+                    pip = eth.data
+                    if isinstance(pip.data, dpkt.tcp.TCP):
+                        proto = "tcp"
+                        protocols["TCP"] += 1
+                    elif isinstance(pip.data, dpkt.udp.UDP):
+                        proto = "udp"
+                        protocols["UDP"] += 1
+                    elif isinstance(pip.data, dpkt.icmp.ICMP):
+                        proto = "icmp"
+                        protocols["ICMP"] += 1
+                    else:
+                        protocols["Other"] += 1
+                else:
+                    protocols["Other"] += 1
+            except Exception:
+                protocols["Other"] += 1
+
+            timeline_dict[bucket][proto] += 1
+    except Exception as e:
+        pass
+
+    # 時系列データを時刻順にソート
+    timeline = []
+    for bucket in sorted(timeline_dict.keys()):
+        data_point = {
+            "timestamp": bucket / 1000.0,  # 秒に変換
+            "total": sum(timeline_dict[bucket].values()),
+            "tcp": timeline_dict[bucket]["tcp"],
+            "udp": timeline_dict[bucket]["udp"],
+            "icmp": timeline_dict[bucket]["icmp"],
+            "other": timeline_dict[bucket]["other"]
+        }
+        timeline.append(data_point)
+
+    return {
+        "timeline": timeline,
+        "protocols": protocols,
+        "capture_start": _ts_str(start_ts) if start_ts else "",
+        "capture_end": _ts_str(end_ts) if end_ts else "",
+        "error": None
+    }

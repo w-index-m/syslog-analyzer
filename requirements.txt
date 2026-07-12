@@ -8,3 +8,4 @@ uvicorn[standard]>=0.29.0
 paramiko>=3.0.0
 scp>=0.14.0
 cryptography>=41.0.0
+plotly>=5.0.0

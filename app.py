@@ -4353,6 +4353,73 @@ with tab_pcap:
                           delta="⚠️ 要確認" if res.get("dhcp_issues") else None)
             st.caption(f"📅 キャプチャ範囲: {res['capture_start']} 〜 {res['capture_end']}")
 
+            # ── 📈 パケット時系列グラフ ──────────────────────
+            st.markdown("---")
+            st.markdown("### 📈 パケット時系列分布")
+            st.caption("時間経過に伴うパケット数の推移（TCP/UDP/ICMP/その他）を表示します。DDoS攻撃やトラフィック異常の可視化に便利です。")
+
+            _raw_bytes = st.session_state.get("_pcap_bytes")
+            if _raw_bytes:
+                with st.spinner("時系列データを集計中..."):
+                    try:
+                        _timeline_data = pcap_analyzer.get_packet_timeline(_raw_bytes, interval_ms=100)
+                        if _timeline_data.get("timeline"):
+                            _df_timeline = pd.DataFrame(_timeline_data["timeline"])
+                            # タイムスタンプを秒単位から相対秒に変換（キャプチャ開始=0秒）
+                            if len(_df_timeline) > 0:
+                                _start_ts = _df_timeline["timestamp"].iloc[0]
+                                _df_timeline["経過秒"] = _df_timeline["timestamp"] - _start_ts
+
+                                # Plotlyで複合折れ線グラフ表示
+                                import plotly.graph_objects as go
+                                _fig = go.Figure()
+                                _fig.add_trace(go.Scatter(
+                                    x=_df_timeline["経過秒"], y=_df_timeline["tcp"],
+                                    mode='lines', name='TCP',
+                                    line=dict(color='#FF6B6B', width=2)
+                                ))
+                                _fig.add_trace(go.Scatter(
+                                    x=_df_timeline["経過秒"], y=_df_timeline["udp"],
+                                    mode='lines', name='UDP',
+                                    line=dict(color='#4ECDC4', width=2)
+                                ))
+                                _fig.add_trace(go.Scatter(
+                                    x=_df_timeline["経過秒"], y=_df_timeline["icmp"],
+                                    mode='lines', name='ICMP',
+                                    line=dict(color='#FFE66D', width=2)
+                                ))
+                                _fig.add_trace(go.Scatter(
+                                    x=_df_timeline["経過秒"], y=_df_timeline["other"],
+                                    mode='lines', name='その他',
+                                    line=dict(color='#95A5A6', width=1)
+                                ))
+                                _fig.update_layout(
+                                    title="パケット時系列分布（100ms単位の集計）",
+                                    xaxis_title="キャプチャ開始からの経過秒",
+                                    yaxis_title="パケット数",
+                                    hovermode='x unified',
+                                    height=400,
+                                    margin=dict(l=0, r=0, t=40, b=0)
+                                )
+                                st.plotly_chart(_fig, use_container_width=True)
+
+                                # プロトコル別集計
+                                _pcol1, _pcol2, _pcol3, _pcol4 = st.columns(4)
+                                with _pcol1:
+                                    st.metric("TCP合計", f"{_timeline_data['protocols'].get('TCP', 0):,}")
+                                with _pcol2:
+                                    st.metric("UDP合計", f"{_timeline_data['protocols'].get('UDP', 0):,}")
+                                with _pcol3:
+                                    st.metric("ICMP合計", f"{_timeline_data['protocols'].get('ICMP', 0):,}")
+                                with _pcol4:
+                                    st.metric("その他", f"{_timeline_data['protocols'].get('Other', 0):,}")
+                        else:
+                            st.caption("時系列データが取得できませんでした")
+                    except Exception as e:
+                        st.warning(f"時系列グラフの生成に失敗しました: {e}")
+            else:
+                st.caption("pcapデータがまだ読み込まれていません")
+
             # ── 🛡️ IPS検査（シグネチャ型 + アノマリ型 + 振る舞い型） ──
             _ips_alerts = res.get("ips_alerts", [])
             _behavior_items = (res.get("worm_propagation", []) + res.get("beaconing", [])
