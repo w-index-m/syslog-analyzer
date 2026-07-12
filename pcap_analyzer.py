@@ -3082,13 +3082,72 @@ def _reassemble_segments(segments: list) -> bytes:
     return bytes(buf)
 
 
+def _parse_eapol_key(eapol_buf: bytes) -> dict | None:
+    """
+    EAPOLヘッダ（0x888eマーカーの直後）から始まるバイト列を解析する。
+    EAPOL-Key（type=3）でなければNoneを返す。
+
+    Returns dict:
+        message_number: 1〜4（4-wayハンドシェイクの何番目か。判定不能なら0）
+        has_pmkid: PMKID KDE（OUI 00:0F:AC, type=4）をKey Data内に検出したか
+        pmkid_hex: 検出したPMKIDの16進文字列（無ければ空文字）
+    """
+    if len(eapol_buf) < 4:
+        return None
+    _version, eapol_type, length = eapol_buf[0], eapol_buf[1], int.from_bytes(eapol_buf[2:4], "big")
+    if eapol_type != 3:  # 3 = EAPOL-Key
+        return None
+    body = eapol_buf[4:4 + length] if length else eapol_buf[4:]
+    # descriptor_type(1) key_info(2) key_length(2) replay_counter(8) key_nonce(32)
+    # key_iv(16) key_rsc(8) key_id(8) key_mic(16) key_data_length(2) = 95 bytes
+    if len(body) < 95:
+        return None
+    key_info = int.from_bytes(body[1:3], "big")
+    key_data_length = int.from_bytes(body[93:95], "big")
+    key_data = body[95:95 + key_data_length]
+
+    install     = bool(key_info & 0x0040)
+    key_ack     = bool(key_info & 0x0080)
+    key_mic_bit = bool(key_info & 0x0100)
+    secure      = bool(key_info & 0x0200)
+    encrypted_key_data = bool(key_info & 0x1000)
+
+    if key_ack and not key_mic_bit and not install and not secure:
+        msg_num = 1
+    elif not key_ack and key_mic_bit and not install and not secure:
+        msg_num = 2
+    elif key_ack and key_mic_bit and install and secure:
+        msg_num = 3
+    elif not key_ack and key_mic_bit and not install and secure:
+        msg_num = 4
+    else:
+        msg_num = 0
+
+    has_pmkid, pmkid_hex = False, ""
+    # PMKIDはMessage1でKey Dataが平文の場合のみ解釈できる（暗号化時は復号鍵が無く判定不能）
+    if not encrypted_key_data:
+        i = 0
+        while i + 2 <= len(key_data):
+            kde_type, kde_len = key_data[i], key_data[i + 1]
+            if kde_type != 0xdd:
+                break  # 未対応のIE形式（可変長タグ）。安全側に倒して以降の走査を打ち切る
+            kde_body = key_data[i + 2:i + 2 + kde_len]
+            if len(kde_body) >= 20 and kde_body[0:3] == b"\x00\x0f\xac" and kde_body[3] == 4:
+                pmkid = kde_body[4:20]
+                has_pmkid, pmkid_hex = True, pmkid.hex()
+                break
+            i += 2 + kde_len
+
+    return {"message_number": msg_num, "has_pmkid": has_pmkid, "pmkid_hex": pmkid_hex}
+
+
 def analyze_wireless(data: bytes) -> dict:
     """
     無線(802.11)キャプチャを解析する。ビーコン(SSID列挙)・deauth攻撃・
-    WPAハンドシェイク(EAPOL)取得を検出する。Ethernetキャプチャでは
-    is_wireless=False を返す（何もしない）。
+    WPAハンドシェイク(EAPOL)取得・PMKID窃取（deauth不要のより危険な鍵取得手口）
+    を検出する。Ethernetキャプチャでは is_wireless=False を返す（何もしない）。
     """
-    result = {"is_wireless": False, "ssids": [], "deauth": [], "eapol": [], "summary": {}}
+    result = {"is_wireless": False, "ssids": [], "deauth": [], "eapol": [], "pmkid": [], "summary": {}}
     try:
         reader = dpkt.pcap.Reader(io.BytesIO(data))
         dlt = reader.datalink()
@@ -3101,7 +3160,7 @@ def analyze_wireless(data: bytes) -> dict:
 
     ssid_seen = {}
     deauth_count = defaultdict(int)
-    eapol_pairs = defaultdict(int)
+    pmkid_seen: dict[str, dict] = {}
     beacon_n = deauth_n = eapol_n = 0
 
     for ts, buf in reader:
@@ -3135,8 +3194,20 @@ def analyze_wireless(data: bytes) -> dict:
                         dst = "broadcast"
                     deauth_count[dst] += 1
             # EAPOL(WPAハンドシェイク) は data フレームの LLC/SNAP 0x888e
-            if b"\x88\x8e" in bytes(buf)[:64]:
+            raw = bytes(buf)
+            eapol_idx = raw[:64].find(b"\x88\x8e")
+            if eapol_idx != -1:
                 eapol_n += 1
+                parsed = _parse_eapol_key(raw[eapol_idx + 2:])
+                if parsed and parsed["has_pmkid"]:
+                    try:
+                        bssid = ":".join("%02x" % b for b in wlan.data_frame.bssid)
+                    except Exception:
+                        bssid = "?"
+                    key = f"{bssid}:{parsed['pmkid_hex']}"
+                    if key not in pmkid_seen:
+                        pmkid_seen[key] = {"bssid": bssid, "pmkid": parsed["pmkid_hex"], "count": 0}
+                    pmkid_seen[key]["count"] += 1
         except Exception:
             continue
 
@@ -3154,8 +3225,16 @@ def analyze_wireless(data: bytes) -> dict:
             "detail": f"EAPOL(WPAハンドシェイク)フレーム {eapol_n}個を検出 "
                       "— WPA/WPA2ハンドシェイクの取得（パスワード解析の前段）の可能性",
         })
+    for p in pmkid_seen.values():
+        result["pmkid"].append({
+            "bssid": p["bssid"], "pmkid": p["pmkid"], "count": p["count"], "severity": "critical",
+            "detail": f"BSSID {p['bssid']} からPMKIDを検出 — "
+                      "deauth(切断)攻撃を伴わずに取得可能な、より危険な鍵取得手口"
+                      "（クライアントの接続を待たずAPへの関連付け要求だけでPMKIDが漏洩する）の可能性",
+        })
+    result["pmkid"].sort(key=lambda x: x["count"], reverse=True)
     result["summary"] = {"beacons": beacon_n, "deauth": deauth_n, "eapol": eapol_n,
-                         "ssid_count": len(ssid_seen)}
+                         "pmkid": len(pmkid_seen), "ssid_count": len(ssid_seen)}
     return result
 
 

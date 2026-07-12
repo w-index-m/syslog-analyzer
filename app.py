@@ -4812,10 +4812,14 @@ with tab_pcap:
                 st.caption(f"ビーコン {_wl_sum.get('beacons',0)} / "
                            f"SSID {_wl_sum.get('ssid_count',0)} / "
                            f"deauth {_wl_sum.get('deauth',0)} / "
-                           f"EAPOL {_wl_sum.get('eapol',0)}")
+                           f"EAPOL {_wl_sum.get('eapol',0)} / "
+                           f"PMKID {_wl_sum.get('pmkid',0)}")
                 if _wl.get("ssids"):
                     st.markdown("**検出SSID（アクセスポイント）**: "
                                 + ", ".join(f"`{s['ssid']}`" for s in _wl["ssids"][:20]))
+                for _pm in _wl.get("pmkid", []):
+                    st.error(f"🔴 **PMKID窃取の疑い**: {_pm['detail']}"
+                             f"（検出回数: {_pm['count']}、PMKID: `{_pm['pmkid']}`）")
                 for _da in _wl.get("deauth", []):
                     st.error(f"🔴 **Deauth（認証解除）攻撃の疑い**: {_da['detail']}")
                 for _ep in _wl.get("eapol", []):
