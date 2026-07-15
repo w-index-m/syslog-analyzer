@@ -4622,7 +4622,8 @@ with tab_pcap:
             # ── 🛡️ IPS検査（シグネチャ型 + アノマリ型 + 振る舞い型） ──
             _ips_alerts = res.get("ips_alerts", [])
             _behavior_items = (res.get("worm_propagation", []) + res.get("beaconing", [])
-                               + res.get("suspicious_destinations", []) + res.get("data_exfil", []))
+                               + res.get("suspicious_destinations", []) + res.get("data_exfil", [])
+                               + res.get("lateral_movement_techniques", []))
             _anomaly_items = (res.get("scan_patterns", []) + res.get("dns_tunneling", [])
                               + res.get("icmp_exfil", []))
             _host_risk = res.get("host_risk", [])
@@ -4752,6 +4753,13 @@ with tab_pcap:
                     for _sd in res.get("suspicious_destinations", []):
                         _ic = "🔴" if _sd["severity"] == "high" else "🟡"
                         st.markdown(f"- {_ic} **怪しい外部アクセス**: {_sd['detail']}")
+                    _lm_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "⚪"}
+                    for _lm in res.get("lateral_movement_techniques", []):
+                        _ic = _lm_icon.get(_lm["severity"], "🔴")
+                        st.markdown(f"- {_ic} **{_lm['technique']}**: {_lm['detail']}")
+                    if res.get("lateral_movement_techniques"):
+                        st.caption("PsExec(SMB)/WinRM/PowerShell Remotingは正規の運用でも使われるため、"
+                                   "検知＝即侵害ではありません。実施した覚えのない操作でないか確認してください。")
 
                 # アノマリ型（統計検出）
                 if _anomaly_items:

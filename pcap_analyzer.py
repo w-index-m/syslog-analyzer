@@ -164,6 +164,8 @@ TLS_PORTS    = {443, 8443, 465, 993, 995, 636, 5061}
 MODBUS_PORT  = 502      # Modbus TCP（産業/OT制御系）
 DNP3_PORT    = 20000    # DNP3（電力/水道等のSCADA）
 QUIC_PORTS   = {443, 80}  # QUIC/HTTP3 は主にUDP 443
+SMB_PORT     = 445      # SMB（PsExec等の横展開でよく使われる）
+WINRM_PORTS  = {5985, 5986}  # WinRM(HTTP/HTTPS) — PowerShell Remotingも同一ポート
 
 # Modbus 書き込み系ファンクションコード（不正な制御コマンドの可能性）
 _MODBUS_WRITE_FC = {
@@ -1127,6 +1129,95 @@ def _iter_tls_records(payload: bytes):
         off += 5 + rlen
 
 
+# ── SMB2パーサー（PsExec型横展開検知用） ────────────────────────
+# dpktはSMB1(\xffSMB)のみ対応でSMB2/3(\xfeSMB)は未対応のため自前で解析する。
+# 直接TCP(ポート445)では、SMB2メッセージの前に4バイトの長さプレフィックス
+# (1バイト予約 + 3バイトのビッグエンディアン長)が付く(MS-SMB2 2.1)。
+_SMB2_CMD_TREE_CONNECT = 0x0003
+_SMB2_CMD_CREATE       = 0x0005
+_SMB_ADMIN_SHARES      = ("ADMIN$", "C$", "D$")
+_SMB_SVCCTL_PIPES      = ("svcctl", "atsvc", "winreg")
+_SMB_SUSPICIOUS_CREATE_EXT = (".exe", ".dll", ".bat", ".ps1", ".vbs")
+
+
+def _parse_smb2_header(payload: bytes) -> dict | None:
+    """
+    SMB2ヘッダ(4バイト長プレフィックス込み)を解析する。SMB2でなければNoneを返す。
+    戻り値: {command, is_response, message_id, tree_id, header_start, body}
+        header_start: SMB2ヘッダ先頭のpayload内オフセット（Offset系フィールドの起点）
+        body: SMB2ヘッダ(64バイト)以降のコマンド固有部分
+    """
+    if len(payload) < 4 + 64 or payload[4:8] != b"\xfeSMB":
+        return None
+    header_start = 4
+    hdr = payload[header_start:header_start + 64]
+    command = int.from_bytes(hdr[12:14], "little")
+    flags = int.from_bytes(hdr[16:20], "little")
+    is_response = bool(flags & 0x00000001)
+    message_id = int.from_bytes(hdr[24:32], "little")
+    tree_id = int.from_bytes(hdr[36:40], "little")
+    return {
+        "command": command, "is_response": is_response,
+        "message_id": message_id, "tree_id": tree_id,
+        "header_start": header_start, "body": payload[header_start + 64:],
+    }
+
+
+def _parse_smb2_tree_connect_path(payload: bytes, header_start: int, body: bytes) -> str | None:
+    """TREE_CONNECTリクエストからパス(\\\\host\\share)を取り出す。"""
+    if len(body) < 8:
+        return None
+    path_offset = int.from_bytes(body[4:6], "little")
+    path_length = int.from_bytes(body[6:8], "little")
+    try:
+        raw = payload[header_start + path_offset: header_start + path_offset + path_length]
+        return raw.decode("utf-16-le", errors="ignore")
+    except Exception:
+        return None
+
+
+def _parse_smb2_create_filename(payload: bytes, header_start: int, body: bytes) -> str | None:
+    """CREATEリクエストから作成/オープン対象のファイル名/パイプ名を取り出す。"""
+    if len(body) < 48:
+        return None
+    name_offset = int.from_bytes(body[44:46], "little")
+    name_length = int.from_bytes(body[46:48], "little")
+    if name_length == 0:
+        return ""
+    try:
+        raw = payload[header_start + name_offset: header_start + name_offset + name_length]
+        return raw.decode("utf-16-le", errors="ignore")
+    except Exception:
+        return None
+
+
+# ── WinRM(WS-Management)パーサー（リモートコマンド実行検知用） ──────
+# WinRM/PowerShell RemotingはHTTP(S)のSOAP(WS-Man)で動作する。平文HTTP(5985)
+# の場合はSOAP Actionヘッダに含まれるURIから操作種別を判別できる。
+# 注意: シェル作成は汎用のWS-Transfer「Create」アクション＋ResourceURIが
+# windows/shellを指す、という組み合わせで表現され、"windows/shell/Create"という
+# 文字列自体はプロトコル上存在しないため、他の操作とは別扱いで判定する。
+_WINRM_ACTIONS = (
+    (re.compile(rb"windows/shell/Command"), "コマンド実行(Command)"),
+    (re.compile(rb"windows/shell/Send"), "標準入力送信(Send) — 実行コマンド本体の送信の可能性"),
+    (re.compile(rb"windows/shell/Signal"), "シグナル送信(Signal、終了/Ctrl+C等)"),
+    (re.compile(rb"windows/shell/Receive"), "出力受信(Receive)"),
+)
+_WINRM_SHELL_RESOURCE_RE = re.compile(rb"windows/shell")
+_WINRM_TRANSFER_CREATE_RE = re.compile(rb"transfer/Create")
+
+
+def _detect_winrm_actions(payload: bytes) -> list:
+    """WinRM(平文HTTP)ペイロードからSOAP Actionを検出する。"""
+    found = []
+    if _WINRM_TRANSFER_CREATE_RE.search(payload) and _WINRM_SHELL_RESOURCE_RE.search(payload):
+        found.append("シェル作成(Create) — リモートシェルセッション開始")
+    for pattern, label in _WINRM_ACTIONS:
+        if pattern.search(payload):
+            found.append(label)
+    return found
+
+
 # OSPF Hello パケットの認証タイプ（RFC2328）
 _OSPF_AUTH_TYPES = {0: "認証なし", 1: "簡易パスワード", 2: "MD5等(暗号学的認証)"}
 
@@ -1450,6 +1541,7 @@ def analyze_pcap(data: bytes) -> dict:
         "icmp_exfil": [],
         "ips_alerts": [],
         "worm_propagation": [],
+        "lateral_movement_techniques": [],
         "beaconing": [],
         "suspicious_destinations": [],
         "data_exfil": [],
@@ -1513,6 +1605,21 @@ def analyze_pcap(data: bytes) -> dict:
     outbound_bytes: dict[tuple, int] = defaultdict(int)  # (src, dst) -> 送信バイト数 大容量エクスフィル用
     modbus_ops: dict[tuple, dict] = {}                   # (src,dst) -> {read, write, write_fc:set}
     quic_conns: dict[tuple, dict] = {}                   # (src,dst) -> {count, versions:set, initial:bool}
+    # PsExec型横展開(SMB)検知用
+    smb_admin_tree: dict[tuple, bool] = {}               # (src,dst,sport,dport) -> ADMIN$等へのTreeConnectがあったか
+    smb_lateral_hits: dict[tuple, dict] = {}             # (src,dst,technique) -> {severity,count,first_seen,samples}
+    # WinRM/PowerShell Remoting検知用
+    winrm_hits: dict[tuple, dict] = {}                   # (src,dst) -> {actions:set, count, first_seen, encrypted}
+
+    def _record_smb_finding(src, dst, technique, severity, ts, sample=""):
+        key = (src, dst, technique)
+        entry = smb_lateral_hits.setdefault(key, {
+            "src": src, "dst": dst, "technique": technique, "severity": severity,
+            "count": 0, "first_seen": _ts_str(ts), "samples": set(),
+        })
+        entry["count"] += 1
+        if sample:
+            entry["samples"].add(sample)
     # GeoIP: 監視対象国(CN/KP/HK/MO)の外部IP出現を集約
     # ip -> {"as_src": bool, "as_dst": bool, "peers": set, "packets": int}
     geo_seen: dict[str, dict] = {}
@@ -1788,6 +1895,59 @@ def analyze_pcap(data: bytes) -> dict:
                                     _e["read"] += 1
                         except Exception:
                             pass
+
+                    # ── SMB(445)経由のPsExec型横展開検知 ──
+                    # クライアント→サーバのリクエストのみ対象(dport==445)。
+                    # ①ADMIN$/C$等の管理共有へのTreeConnect
+                    # ②その共有上での実行ファイル(.exe/.dll/.bat/.ps1/.vbs)作成
+                    # ③svcctl/atsvc等のリモートサービス制御パイプへのアクセス
+                    # ④PsExec既定のサービス/パイプ名「PSEXESVC」の直接検出
+                    if data_len > 0 and dport == SMB_PORT:
+                        try:
+                            _smb = _parse_smb2_header(bytes(tcp.data))
+                        except Exception:
+                            _smb = None
+                        if _smb and not _smb["is_response"]:
+                            _fk = (src, dst, sport, dport)
+                            if _smb["command"] == _SMB2_CMD_TREE_CONNECT:
+                                _path = _parse_smb2_tree_connect_path(
+                                    bytes(tcp.data), _smb["header_start"], _smb["body"])
+                                if _path:
+                                    _share = _path.upper().rstrip("\\").split("\\")[-1]
+                                    if _share in _SMB_ADMIN_SHARES:
+                                        smb_admin_tree[_fk] = True
+                                        _record_smb_finding(src, dst, "SMB管理共有アクセス", "medium",
+                                                            ts, sample=_path)
+                            elif _smb["command"] == _SMB2_CMD_CREATE:
+                                _fname = _parse_smb2_create_filename(
+                                    bytes(tcp.data), _smb["header_start"], _smb["body"])
+                                if _fname:
+                                    _lname = _fname.lower()
+                                    if "psexesvc" in _lname:
+                                        _record_smb_finding(src, dst, "PsExec標準サービス名を検出", "critical",
+                                                            ts, sample=_fname)
+                                    elif any(p in _lname for p in _SMB_SVCCTL_PIPES):
+                                        _record_smb_finding(src, dst, "リモートサービス制御(SVCCTL)アクセス",
+                                                            "high", ts, sample=_fname)
+                                    elif (any(_lname.endswith(e) for e in _SMB_SUSPICIOUS_CREATE_EXT)
+                                          and smb_admin_tree.get(_fk)):
+                                        _record_smb_finding(src, dst, "PsExec型サービスバイナリ配置",
+                                                            "critical", ts, sample=_fname)
+
+                    # ── WinRM/PowerShell Remoting（ポート5985/5986）検知 ──
+                    if data_len > 0 and (dport in WINRM_PORTS or sport in WINRM_PORTS):
+                        _wk = (src, dst) if dport in WINRM_PORTS else (dst, src)
+                        _we = winrm_hits.setdefault(_wk, {
+                            "count": 0, "actions": set(), "first_seen": _ts_str(ts), "encrypted_port": False})
+                        _we["count"] += 1
+                        if 5986 in (sport, dport):
+                            _we["encrypted_port"] = True
+                        else:
+                            try:
+                                for _act in _detect_winrm_actions(bytes(tcp.data)):
+                                    _we["actions"].add(_act)
+                            except Exception:
+                                pass
 
                     # CTF flag{...}/Base64候補の検出（暗号化されたTLSポートは除く）
                     if data_len > 0 and not (sport in TLS_PORTS or dport in TLS_PORTS):
@@ -2656,6 +2816,39 @@ def analyze_pcap(data: bytes) -> dict:
             })
     result["worm_propagation"].sort(key=lambda x: x["distinct_dsts"], reverse=True)
 
+    # ── PsExec型横展開(SMB)の検知結果を集約 ──
+    _sev_rank_smb = {"critical": 0, "high": 1, "medium": 2}
+    for (src, dst, technique), info in smb_lateral_hits.items():
+        samples = ", ".join(sorted(info["samples"])[:5])
+        result["lateral_movement_techniques"].append({
+            "src": src, "dst": dst, "technique": f"PsExec/SMB: {technique}",
+            "severity": info["severity"], "count": info["count"], "first_seen": info["first_seen"],
+            "detail": f"{src} → {dst}: {technique}"
+                      + (f"（{samples}）" if samples else "")
+                      + f" [{info['count']}回]",
+        })
+
+    # ── WinRM/PowerShell Remotingの検知結果を集約 ──
+    for (src, dst), info in winrm_hits.items():
+        if info["actions"]:
+            _detail = (f"{src} → {dst}: WinRM/PowerShell Remotingでのコマンド実行を検知"
+                       f"（検出操作: {', '.join(sorted(info['actions']))}）"
+                       " — リモートコマンド実行/横展開の可能性")
+            _sev = "critical" if any("Command" in a or "Send" in a for a in info["actions"]) else "high"
+        elif info.get("encrypted_port"):
+            _detail = (f"{src} → {dst}: WinRM(暗号化・ポート5986)通信を検知"
+                       " — 内容は暗号化されており操作種別は確認できません")
+            _sev = "low"
+        else:
+            continue
+        result["lateral_movement_techniques"].append({
+            "src": src, "dst": dst, "technique": "WinRM/PowerShell Remoting",
+            "severity": _sev, "count": info["count"], "first_seen": info["first_seen"],
+            "detail": _detail,
+        })
+    result["lateral_movement_techniques"].sort(
+        key=lambda x: (_sev_rank_smb.get(x["severity"], 9), -x["count"]))
+
     # ── 振る舞い検知②: ビーコニング（C2への定期コールバック） ──
     # 同一(src,dst,port)への接続が、ほぼ一定間隔で繰り返される = C2ビーコンの典型。
     # AI生成でシグネチャの無いマルウェアも「振る舞い」で捕捉できる。
@@ -2741,6 +2934,9 @@ def analyze_pcap(data: bytes) -> dict:
     for wp in result["worm_propagation"]:
         _pts = {"critical": 35, "high": 25, "medium": 15}.get(wp["severity"], 15)
         _add_risk(wp["src"], _pts, "ワーム横展開")
+    for lm in result["lateral_movement_techniques"]:
+        _pts = {"critical": 35, "high": 22, "medium": 12, "low": 3}.get(lm["severity"], 10)
+        _add_risk(lm["src"], _pts, lm["technique"])
     for b in result["beaconing"]:
         _add_risk(b["src"], 25, "C2ビーコニング")
     for sp_item in result.get("scan_patterns", []):
