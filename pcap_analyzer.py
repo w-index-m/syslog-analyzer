@@ -12,6 +12,7 @@ import re
 import struct
 import socket
 import urllib.parse
+import uuid
 import zlib
 from collections import defaultdict
 from datetime import datetime
@@ -166,6 +167,10 @@ DNP3_PORT    = 20000    # DNP3（電力/水道等のSCADA）
 QUIC_PORTS   = {443, 80}  # QUIC/HTTP3 は主にUDP 443
 SMB_PORT     = 445      # SMB（PsExec等の横展開でよく使われる）
 WINRM_PORTS  = {5985, 5986}  # WinRM(HTTP/HTTPS) — PowerShell Remotingも同一ポート
+RDP_PORT     = 3389     # RDP — ランサムウェアの横展開で最頻出
+VNC_PORTS    = {5900, 5901, 5902, 5903}  # VNC(RFBプロトコル)
+DCERPC_PORT  = 135      # MSRPCエンドポイントマッパー（DCOM/WMIリモート活性化の入口）
+SSH_PORT     = 22
 
 # Modbus 書き込み系ファンクションコード（不正な制御コマンドの可能性）
 _MODBUS_WRITE_FC = {
@@ -1218,6 +1223,88 @@ def _detect_winrm_actions(payload: bytes) -> list:
     return found
 
 
+# ── RDP(3389)パーサー ────────────────────────────────────────
+# X.224 Connection Request(TPKT+COTP)内の"Cookie: mstshash=<識別子>"は
+# TLS/CredSSPネゴシエーション前に平文で送られるため、ユーザー名相当の
+# 識別子とRDPセッションの存在を検知できる。
+_RDP_COOKIE_RE = re.compile(rb"Cookie:\s*mstshash=([\x21-\x7e]+)")
+
+
+def _detect_rdp_cookie(payload: bytes) -> str | None:
+    """X.224 Connection RequestのmstshashクッキーからRDP接続を検知する。"""
+    if len(payload) < 11 or payload[0] != 0x03:  # TPKT version=3
+        return None
+    m = _RDP_COOKIE_RE.search(payload[:256])
+    if m:
+        try:
+            return m.group(1).decode("ascii", errors="replace")
+        except Exception:
+            return ""
+    return None
+
+
+def _is_rdp_connection_request(payload: bytes) -> bool:
+    """TPKT+X.224 CR TPDU(Connection Request)かどうかを判定する（Cookie無しの検知用）。"""
+    if len(payload) < 11 or payload[0] != 0x03:  # TPKTバージョン
+        return False
+    return payload[5] == 0xE0  # X.224 CR CDT
+
+
+# ── VNC(5900系)パーサー ───────────────────────────────────────
+# RFBプロトコルはバージョンハンドシェイクを両者が平文(例: "RFB 003.008\n")で
+# 送るため、接続の存在を確実に検知できる。
+_VNC_BANNER_RE = re.compile(rb"^RFB \d{3}\.\d{3}\n")
+
+
+def _is_vnc_banner(payload: bytes) -> bool:
+    return bool(_VNC_BANNER_RE.match(payload[:12]))
+
+
+# ── DCERPC(MSRPC, ポート135)パーサー ─────────────────────────
+# DCOM/WMIのリモート活性化はエンドポイントマッパー(135)経由のBind PDUで
+# インターフェースUUIDを指定する。既知のUUID(横展開でよく悪用されるもの)を
+# 突き合わせて手口を識別する。UUIDのワイヤ形式(先頭3フィールドLE)は
+# uuid.UUID(bytes_le=...)でそのまま文字列化できる。
+_DCERPC_PTYPE_BIND = 11
+_DCERPC_LATERAL_UUIDS = {
+    "000001a0-0000-0000-c000-000000000046":
+        ("DCOMリモート活性化(ISystemActivator/IRemoteSCMActivator)", "high"),
+    "99fcfec4-5260-101b-bbcb-00aa0021347a":
+        ("DCOM OXIDResolver（活性化されたオブジェクトの解決）", "medium"),
+    "f309ad18-d1d0-11d2-9998-00a0c9310fea":
+        ("WMIリモート接続(IWbemLevel1Login) — wmic/Invoke-WmiMethod等の可能性", "high"),
+}
+
+
+def _parse_dcerpc_bind_uuid(payload: bytes) -> str | None:
+    """DCERPC Bind PDUの最初のプレゼンテーションコンテキストのabstract_syntax UUIDを返す。"""
+    if len(payload) < 28:
+        return None
+    if payload[0] != 5:  # rpc_vers
+        return None
+    ptype = payload[2]
+    if ptype != _DCERPC_PTYPE_BIND:
+        return None
+    # Bindボディ: max_xmit_frag(2) max_recv_frag(2) assoc_group_id(4) num_ctx_items(1) pad(3)
+    # -> ヘッダ16バイトの後
+    body = payload[16:]
+    if len(body) < 8 + 1:
+        return None
+    num_ctx_items = body[8]
+    if num_ctx_items < 1:
+        return None
+    # 最初のプレゼンテーションコンテキスト: context_id(2) num_trans_items(1) pad(1)
+    # abstract_syntax UUID(16) version(2) version_minor(2)
+    ctx_off = 12
+    if len(body) < ctx_off + 4 + 16:
+        return None
+    uuid_bytes = body[ctx_off + 4: ctx_off + 4 + 16]
+    try:
+        return str(uuid.UUID(bytes_le=uuid_bytes))
+    except Exception:
+        return None
+
+
 # OSPF Hello パケットの認証タイプ（RFC2328）
 _OSPF_AUTH_TYPES = {0: "認証なし", 1: "簡易パスワード", 2: "MD5等(暗号学的認証)"}
 
@@ -1610,6 +1697,14 @@ def analyze_pcap(data: bytes) -> dict:
     smb_lateral_hits: dict[tuple, dict] = {}             # (src,dst,technique) -> {severity,count,first_seen,samples}
     # WinRM/PowerShell Remoting検知用
     winrm_hits: dict[tuple, dict] = {}                   # (src,dst) -> {actions:set, count, first_seen, encrypted}
+    # RDP(3389)検知用
+    rdp_hits: dict[tuple, dict] = {}                     # (src,dst) -> {count, first_seen, cookies:set}
+    # VNC(5900系)検知用
+    vnc_hits: dict[tuple, dict] = {}                     # (src,dst) -> {count, first_seen}
+    # DCOM/WMI(DCERPC, ポート135)検知用
+    dcerpc_hits: dict[tuple, dict] = {}                  # (src,dst,uuid) -> {count, first_seen}
+    # SSH内部間セッション（横展開候補としてのタグ付け）
+    ssh_lateral_pairs: dict[tuple, dict] = {}            # (src,dst) -> {count, first_seen}
 
     def _record_smb_finding(src, dst, technique, severity, ts, sample=""):
         key = (src, dst, technique)
@@ -1948,6 +2043,50 @@ def analyze_pcap(data: bytes) -> dict:
                                     _we["actions"].add(_act)
                             except Exception:
                                 pass
+
+                    # ── RDP（ポート3389）検知 ──
+                    # クライアント→サーバのX.224 Connection Requestのみ対象。
+                    if data_len > 0 and dport == RDP_PORT:
+                        try:
+                            _payload = bytes(tcp.data)
+                            if _is_rdp_connection_request(_payload):
+                                _rk = (src, dst)
+                                _re_ = rdp_hits.setdefault(_rk, {
+                                    "count": 0, "first_seen": _ts_str(ts), "cookies": set()})
+                                _re_["count"] += 1
+                                _cookie = _detect_rdp_cookie(_payload)
+                                if _cookie:
+                                    _re_["cookies"].add(_cookie)
+                        except Exception:
+                            pass
+
+                    # ── VNC（ポート5900系）検知 ──
+                    if data_len > 0 and (dport in VNC_PORTS or sport in VNC_PORTS):
+                        try:
+                            if _is_vnc_banner(bytes(tcp.data)):
+                                _vk = (src, dst) if dport in VNC_PORTS else (dst, src)
+                                _ve = vnc_hits.setdefault(_vk, {"count": 0, "first_seen": _ts_str(ts)})
+                                _ve["count"] += 1
+                        except Exception:
+                            pass
+
+                    # ── DCOM/WMI（DCERPC, ポート135）検知 ──
+                    if data_len > 0 and dport == DCERPC_PORT:
+                        try:
+                            _bind_uuid = _parse_dcerpc_bind_uuid(bytes(tcp.data))
+                        except Exception:
+                            _bind_uuid = None
+                        if _bind_uuid and _bind_uuid in _DCERPC_LATERAL_UUIDS:
+                            _dk = (src, dst, _bind_uuid)
+                            _de = dcerpc_hits.setdefault(_dk, {"count": 0, "first_seen": _ts_str(ts)})
+                            _de["count"] += 1
+
+                    # ── SSH内部間セッション（横展開候補としてタグ付け） ──
+                    if data_len > 0 and dport == SSH_PORT and bytes(tcp.data[:4]) == b"SSH-":
+                        if _is_private_ip(src) and _is_private_ip(dst):
+                            _sk = (src, dst)
+                            _se = ssh_lateral_pairs.setdefault(_sk, {"count": 0, "first_seen": _ts_str(ts)})
+                            _se["count"] += 1
 
                     # CTF flag{...}/Base64候補の検出（暗号化されたTLSポートは除く）
                     if data_len > 0 and not (sport in TLS_PORTS or dport in TLS_PORTS):
@@ -2817,7 +2956,7 @@ def analyze_pcap(data: bytes) -> dict:
     result["worm_propagation"].sort(key=lambda x: x["distinct_dsts"], reverse=True)
 
     # ── PsExec型横展開(SMB)の検知結果を集約 ──
-    _sev_rank_smb = {"critical": 0, "high": 1, "medium": 2}
+    _sev_rank_smb = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     for (src, dst, technique), info in smb_lateral_hits.items():
         samples = ", ".join(sorted(info["samples"])[:5])
         result["lateral_movement_techniques"].append({
@@ -2846,6 +2985,51 @@ def analyze_pcap(data: bytes) -> dict:
             "severity": _sev, "count": info["count"], "first_seen": info["first_seen"],
             "detail": _detail,
         })
+
+    # ── RDPの検知結果を集約 ──
+    for (src, dst), info in rdp_hits.items():
+        _internal = _is_private_ip(src) and _is_private_ip(dst)
+        _cookies = ", ".join(sorted(info["cookies"])[:5])
+        _detail = f"{src} → {dst}: RDP接続を検知"
+        if _cookies:
+            _detail += f"（クッキー/ユーザー名相当: {_cookies}）"
+        if _internal:
+            _detail += " — 内部ホスト間のRDP接続は横展開の可能性があります"
+        result["lateral_movement_techniques"].append({
+            "src": src, "dst": dst, "technique": "RDP接続",
+            "severity": "medium" if _internal else "low",
+            "count": info["count"], "first_seen": info["first_seen"], "detail": _detail,
+        })
+
+    # ── VNCの検知結果を集約 ──
+    for (src, dst), info in vnc_hits.items():
+        _internal = _is_private_ip(src) and _is_private_ip(dst)
+        result["lateral_movement_techniques"].append({
+            "src": src, "dst": dst, "technique": "VNC接続",
+            "severity": "medium" if _internal else "low", "count": info["count"],
+            "first_seen": info["first_seen"],
+            "detail": f"{src} → {dst}: VNC(RFB)接続を検知"
+                      + ("（内部ホスト間のVNC接続は横展開の可能性があります）" if _internal else ""),
+        })
+
+    # ── DCOM/WMI(DCERPC)の検知結果を集約 ──
+    for (src, dst, _u), info in dcerpc_hits.items():
+        _label, _sev = _DCERPC_LATERAL_UUIDS[_u]
+        result["lateral_movement_techniques"].append({
+            "src": src, "dst": dst, "technique": f"DCERPC: {_label}",
+            "severity": _sev, "count": info["count"], "first_seen": info["first_seen"],
+            "detail": f"{src} → {dst}: {_label}のBindを検知 [{info['count']}回]",
+        })
+
+    # ── SSH内部間セッションの検知結果を集約 ──
+    for (src, dst), info in ssh_lateral_pairs.items():
+        result["lateral_movement_techniques"].append({
+            "src": src, "dst": dst, "technique": "SSH内部間セッション",
+            "severity": "low", "count": info["count"], "first_seen": info["first_seen"],
+            "detail": f"{src} → {dst}: 内部ホスト間のSSH接続を検知"
+                      " — 正規の運用/自動化(Ansible等)でも一般的なため参考情報です",
+        })
+
     result["lateral_movement_techniques"].sort(
         key=lambda x: (_sev_rank_smb.get(x["severity"], 9), -x["count"]))
 
