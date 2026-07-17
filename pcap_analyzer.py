@@ -1681,6 +1681,7 @@ def analyze_pcap(data: bytes) -> dict:
         "industrial_alerts": [], "industrial_summary": {},
         "quic_sessions": [],
         "geo_alerts": [], "geo_summary": {},
+        "asn_hosts": [], "asn_summary": {},
         "ssh_handshakes": [],
         "ospf_issues": [],
         "ip_fragments": [],
@@ -3410,6 +3411,37 @@ def analyze_pcap(data: bytes) -> dict:
             }
     except Exception as _geo_err:
         print(f"[geoip] 照合スキップ: {_geo_err}")
+
+    # ── ASN/クラウド・ISP判定: 外部IPが主要クラウド/CDN/ISPに属するか ──
+    try:
+        import asn as _asn
+        _org_counts: dict = {}
+        for _ip, _info in geo_seen.items():
+            _org = _asn.lookup_org(_ip)
+            if not _org:
+                continue
+            _org_counts[_org] = _org_counts.get(_org, 0) + 1
+            if _info["as_src"] and _info["as_dst"]:
+                _direction = "双方向"
+            elif _info["as_src"]:
+                _direction = "inbound(アクセス元)"
+            else:
+                _direction = "outbound(通信先)"
+            result["asn_hosts"].append({
+                "ip": _ip, "org": _org, "org_label": _asn.org_label(_org, "ja"),
+                "direction": _direction, "packets": _info["packets"],
+                "peers": sorted(_info["peers"])[:10],
+                "detail": f"{_asn.org_label(_org, 'ja')} のグローバルアドレス {_ip} を検知"
+                          f"（{_direction} / パケット{_info['packets']}）",
+            })
+        result["asn_hosts"].sort(key=lambda x: -x["packets"])
+        if _org_counts:
+            result["asn_summary"] = {
+                "orgs": {_asn.org_label(o, "ja"): n for o, n in _org_counts.items()},
+                "total_ips": sum(_org_counts.values()),
+            }
+    except Exception as _asn_err:
+        print(f"[asn] 照合スキップ: {_asn_err}")
 
     # ── TLSハンドシェイク(鍵交換)の成否判定 ──
     _hs_ok = _hs_fail = _hs_incomplete = 0

@@ -2,6 +2,7 @@ import streamlit as st
 import threading
 import time
 import json
+import statistics
 from datetime import datetime
 import pandas as pd
 
@@ -3977,6 +3978,36 @@ with tab_netflow:
                 "proto_name":   "プロトコル","app":          "アプリ",
                 "packets":      "パケット数","bytes":        "バイト数",
             })
+
+            # ── お気に入りホスト管理・絞り込み ──
+            if "favorite_hosts" not in st.session_state:
+                st.session_state.favorite_hosts = set()
+            _all_hosts = sorted(set(df_fl["送信元IP"]) | set(df_fl["宛先IP"]))
+            _fav_col1, _fav_col2 = st.columns([3, 1])
+            with _fav_col1:
+                _fav_selected = st.multiselect(
+                    "⭐ お気に入りホスト",
+                    options=_all_hosts,
+                    default=sorted(st.session_state.favorite_hosts & set(_all_hosts)),
+                    key="favorite_hosts_multiselect",
+                    help="登録したホストが関わるフローに⭐が付き、絞り込み表示できます。",
+                )
+                st.session_state.favorite_hosts = (
+                    set(_fav_selected) | (st.session_state.favorite_hosts - set(_all_hosts))
+                )
+            with _fav_col2:
+                _fav_only = st.checkbox(
+                    "⭐のみ表示", value=False, key="favorite_hosts_filter",
+                    disabled=not st.session_state.favorite_hosts,
+                )
+
+            df_fl.insert(0, "⭐", df_fl.apply(
+                lambda r: "⭐" if (r["送信元IP"] in st.session_state.favorite_hosts
+                                    or r["宛先IP"] in st.session_state.favorite_hosts) else "",
+                axis=1))
+            if _fav_only and st.session_state.favorite_hosts:
+                df_fl = df_fl[df_fl["⭐"] == "⭐"]
+
             st.dataframe(df_fl, width='stretch', hide_index=True)
         else:
             st.info("まだフローデータがありません。ルーターの flow-export 設定を確認してください。")
@@ -4418,12 +4449,19 @@ with tab_pcap:
                                 _proto_fig = go.Figure(data=[go.Pie(
                                     labels=list(_proto_dist.keys()),
                                     values=list(_proto_dist.values()),
+                                    hole=0.5,
                                     marker=dict(colors=['#FF6B6B', '#4ECDC4', '#FFE66D', '#95A5A6'][:len(_proto_dist)]),
                                     textposition='inside',
                                     textinfo='label+percent',
                                     hovertemplate='%{label}: %{value} packets<extra></extra>'
                                 )])
-                                _proto_fig.update_layout(height=350, margin=dict(l=0, r=0, t=0, b=0))
+                                _proto_fig.update_layout(
+                                    height=350, margin=dict(l=0, r=0, t=0, b=0),
+                                    annotations=[dict(
+                                        text=f"{sum(_proto_dist.values()):,}<br>packets",
+                                        x=0.5, y=0.5, font_size=14, showarrow=False,
+                                    )],
+                                )
                                 st.plotly_chart(_proto_fig, width='stretch')
                             else:
                                 st.caption("プロトコル分布データなし")
@@ -4473,6 +4511,27 @@ with tab_pcap:
                     # 送信元・宛先のマトリックス表示
                     st.markdown("**通信マトリックス（送信元→宛先のトップ20）**")
                     if _conv_data and len(_conv_data) > 0:
+                        # しきい値超過フローの自動フラグ（全フロー対象の統計量: 平均+2σ）
+                        _all_bytes = [c.get('bytes', 0) for c in _conv_data]
+                        _all_packets = [c.get('packets', 0) for c in _conv_data]
+                        _bytes_mean = statistics.fmean(_all_bytes) if _all_bytes else 0
+                        _bytes_std = statistics.pstdev(_all_bytes) if len(_all_bytes) > 1 else 0
+                        _packets_mean = statistics.fmean(_all_packets) if _all_packets else 0
+                        _packets_std = statistics.pstdev(_all_packets) if len(_all_packets) > 1 else 0
+                        _bytes_threshold = _bytes_mean + 2 * _bytes_std
+                        _packets_threshold = _packets_mean + 2 * _packets_std
+
+                        def _flow_flag(c):
+                            _over_bytes = c.get('bytes', 0) > _bytes_threshold and _bytes_std > 0
+                            _over_packets = c.get('packets', 0) > _packets_threshold and _packets_std > 0
+                            if _over_bytes and _over_packets:
+                                return "⚠️ バイト数・パケット数"
+                            if _over_bytes:
+                                return "⚠️ バイト数"
+                            if _over_packets:
+                                return "⚠️ パケット数"
+                            return ""
+
                         _matrix_df = pd.DataFrame([
                             {
                                 "送信元": c['src_ip'],
@@ -4481,10 +4540,17 @@ with tab_pcap:
                                 "パケット数": c.get('packets', 0),
                                 "バイト数": c.get('bytes', 0),
                                 "期間(秒)": round(c.get('duration_sec', 0), 2),
+                                "しきい値超過": _flow_flag(c),
                             }
                             for c in _conv_data[:20]
                         ])
                         st.dataframe(_matrix_df, width='stretch', hide_index=True)
+                        if _bytes_std > 0 or _packets_std > 0:
+                            st.caption(
+                                f"⚠️ は全{len(_conv_data)}フロー中の平均+2σを超えたフローです"
+                                f"（バイト数しきい値: {_bytes_threshold:,.0f}, "
+                                f"パケット数しきい値: {_packets_threshold:,.0f}）"
+                            )
                     else:
                         st.caption("マトリックスデータなし")
 
@@ -4629,8 +4695,9 @@ with tab_pcap:
             _host_risk = res.get("host_risk", [])
             _ti_hits = res.get("threat_intel_hits", [])
             _geo_alerts = res.get("geo_alerts", [])
+            _asn_hosts = res.get("asn_hosts", [])
             if (_ips_alerts or _anomaly_items or _behavior_items or _host_risk
-                    or _ti_hits or _geo_alerts):
+                    or _ti_hits or _geo_alerts or _asn_hosts):
                 st.markdown("---")
                 st.markdown("### 🛡️ IPS検査（不正侵入・マルウェアの兆候）")
                 st.caption("Catalyst等でミラー/インライン取得したパケットを、IPS/IDS的に検査します。"
@@ -4693,6 +4760,25 @@ with tab_pcap:
                             "📥 ブロック候補IP一覧をダウンロード", data=_blocktext,
                             file_name="geo_block_candidates.txt", mime="text/plain",
                             key="dl_geo_block")
+
+                # ── ☁️ ASN/クラウド・ISP判定 ──
+                if _asn_hosts:
+                    _asn_sum = res.get("asn_summary", {})
+                    _orgtxt = "・".join(f"{k}{v}件" for k, v in _asn_sum.get("orgs", {}).items())
+                    st.markdown(f"**☁️ 通信先のクラウド/ISP内訳（{_orgtxt}）**")
+                    st.caption("GeoIP（国名）に加え、主要クラウド/CDN/ISP"
+                               "（AWS・Azure・Google Cloud・Cloudflare・Oracle Cloud・"
+                               "DigitalOcean・GitHub・Linode）の公開IPレンジと照合します。"
+                               "自組織のクラウド利用と一致しない事業者への通信がないか確認してください。")
+                    _asn_df = pd.DataFrame([
+                        {
+                            "IPアドレス": a["ip"], "事業者": a["org_label"],
+                            "方向": a["direction"], "パケット数": a["packets"],
+                            "相手ホスト": ", ".join(a["peers"][:5]),
+                        }
+                        for a in _asn_hosts[:50]
+                    ])
+                    st.dataframe(_asn_df, width='stretch', hide_index=True)
 
                 # ── ⚠️ ホスト別リスクスコア（相関検知の要約・最上部） ──
                 if _host_risk:
