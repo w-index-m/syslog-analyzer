@@ -1305,6 +1305,48 @@ def _parse_dcerpc_bind_uuid(payload: bytes) -> str | None:
         return None
 
 
+# ── NTLM認証パーサー（Pass-the-Hash検知用） ──────────────────────
+# NTLMSSPブロブはSMB/HTTP/RPC等どの上位プロトコルに載っていても
+# "NTLMSSP\x00"シグネチャで自己識別できるため、キャリアプロトコルを
+# 問わずペイロード全体から走査する。Type3(AUTHENTICATE)からdomain\username
+# を取り出し、同一の資格情報が複数の異なる送信元IPから使われていないかを
+# 突き合わせる(＝盗んだハッシュの使い回し=Pass-the-Hashの典型的な痕跡)。
+# 注意: 1回の認証だけではハッシュが正規に導出されたものか盗用かは
+# 判別できないため、「複数送信元からの同一資格情報の使用」という
+# 横断的な突き合わせのみを検知根拠とする。
+_NTLM_SIGNATURE = b"NTLMSSP\x00"
+
+
+def _parse_ntlm_authenticate(payload: bytes) -> tuple | None:
+    """NTLMSSP Type3(AUTHENTICATE)メッセージから(domain, username)を抽出する。"""
+    idx = payload.find(_NTLM_SIGNATURE)
+    if idx == -1:
+        return None
+    base = idx
+    if len(payload) < base + 44:
+        return None
+    msg_type = int.from_bytes(payload[base + 8:base + 12], "little")
+    if msg_type != 3:
+        return None
+
+    def _read_field(field_off):
+        length = int.from_bytes(payload[base + field_off:base + field_off + 2], "little")
+        offset = int.from_bytes(payload[base + field_off + 4:base + field_off + 8], "little")
+        if length == 0 or base + offset + length > len(payload):
+            return ""
+        raw = payload[base + offset: base + offset + length]
+        try:
+            return raw.decode("utf-16-le", errors="ignore")
+        except Exception:
+            return ""
+
+    domain = _read_field(28)
+    username = _read_field(36)
+    if not username:
+        return None
+    return (domain, username)
+
+
 # OSPF Hello パケットの認証タイプ（RFC2328）
 _OSPF_AUTH_TYPES = {0: "認証なし", 1: "簡易パスワード", 2: "MD5等(暗号学的認証)"}
 
@@ -1705,6 +1747,8 @@ def analyze_pcap(data: bytes) -> dict:
     dcerpc_hits: dict[tuple, dict] = {}                  # (src,dst,uuid) -> {count, first_seen}
     # SSH内部間セッション（横展開候補としてのタグ付け）
     ssh_lateral_pairs: dict[tuple, dict] = {}            # (src,dst) -> {count, first_seen}
+    # NTLM認証識別子(domain\username) -> 使用した送信元IP集合（Pass-the-Hash検知用）
+    ntlm_identity_srcs: dict[tuple, dict] = {}           # (domain,username) -> {src_ips:set, count, first_seen}
 
     def _record_smb_finding(src, dst, technique, severity, ts, sample=""):
         key = (src, dst, technique)
@@ -2087,6 +2131,20 @@ def analyze_pcap(data: bytes) -> dict:
                             _sk = (src, dst)
                             _se = ssh_lateral_pairs.setdefault(_sk, {"count": 0, "first_seen": _ts_str(ts)})
                             _se["count"] += 1
+
+                    # ── NTLM認証識別子の横断突き合わせ（Pass-the-Hash検知） ──
+                    # SMB/HTTP/RPC等どの上位プロトコルでもNTLMSSPシグネチャで
+                    # 自己識別できるため、暗号化されないポートで広く走査する。
+                    if data_len > 0 and not (sport in TLS_PORTS or dport in TLS_PORTS):
+                        try:
+                            _ntlm_id = _parse_ntlm_authenticate(bytes(tcp.data))
+                        except Exception:
+                            _ntlm_id = None
+                        if _ntlm_id:
+                            _ne = ntlm_identity_srcs.setdefault(_ntlm_id, {
+                                "src_ips": set(), "count": 0, "first_seen": _ts_str(ts)})
+                            _ne["src_ips"].add(src)
+                            _ne["count"] += 1
 
                     # CTF flag{...}/Base64候補の検出（暗号化されたTLSポートは除く）
                     if data_len > 0 and not (sport in TLS_PORTS or dport in TLS_PORTS):
@@ -3029,6 +3087,55 @@ def analyze_pcap(data: bytes) -> dict:
             "detail": f"{src} → {dst}: 内部ホスト間のSSH接続を検知"
                       " — 正規の運用/自動化(Ansible等)でも一般的なため参考情報です",
         })
+
+    # ── NTLM認証情報の使い回し(Pass-the-Hash疑い)を集約 ──
+    # 同一資格情報(domain\username)が複数の異なる送信元IPから使われている
+    # 場合のみ検知対象とする(単一送信元からの利用は正規ログインの可能性が高い)。
+    # 1回の認証だけでは正規導出か盗用かを判別できないため、あくまで
+    # 「複数送信元からの使い回し」という横断的な状況証拠として扱う。
+    for (domain, username), info in ntlm_identity_srcs.items():
+        if len(info["src_ips"]) < 2:
+            continue
+        identity = f"{domain}\\{username}" if domain else username
+        src_list = ", ".join(sorted(info["src_ips"]))
+        for _src in sorted(info["src_ips"]):
+            result["lateral_movement_techniques"].append({
+                "src": _src, "dst": "",
+                "technique": "NTLM認証情報の使い回し(Pass-the-Hash疑い)",
+                "severity": "high", "count": info["count"], "first_seen": info["first_seen"],
+                "detail": f"資格情報「{identity}」が{len(info['src_ips'])}個の異なる送信元IP"
+                          f"（{src_list}）から使用されています"
+                          " — 盗んだハッシュの使い回し(Pass-the-Hash)の可能性があります",
+            })
+
+    # ── Lateral Tool Transfer（SMB以外の経路での実行ファイル転送）検知 ──
+    # PEヘッダ(MZ + DOSスタブ文字列)を内部ホスト間の非SMB通信で検知する。
+    # SMB経由はPsExec検知(ADMIN$への.exe作成)で別途カバー済みのため対象外。
+    try:
+        _lt_streams = get_tcp_streams(data)
+    except Exception:
+        _lt_streams = []
+    _PE_MARKER = b"This program cannot be run in DOS mode"
+    for _s in _lt_streams:
+        if _s["src_port"] == SMB_PORT or _s["dst_port"] == SMB_PORT:
+            continue
+        if not (_is_private_ip(_s["src"]) and _is_private_ip(_s["dst"])):
+            continue
+        _hit_dir = None
+        if b"MZ" in _s["client_to_server"][:200_000] and _PE_MARKER in _s["client_to_server"][:200_000]:
+            _hit_dir = "client→server"
+        elif b"MZ" in _s["server_to_client"][:200_000] and _PE_MARKER in _s["server_to_client"][:200_000]:
+            _hit_dir = "server→client"
+        if _hit_dir:
+            result["lateral_movement_techniques"].append({
+                "src": _s["src"], "dst": _s["dst"],
+                "technique": "Lateral Tool Transfer（実行ファイル転送）",
+                "severity": "high", "count": 1, "first_seen": _s["start_ts"],
+                "detail": f"{_s['src']} ⇔ {_s['dst']}（port {_s['dst_port']}）: "
+                          f"内部ホスト間でWindows実行ファイル(PEヘッダ)の転送を検知"
+                          f"（{_hit_dir}、SMB以外の経路）"
+                          " — 攻撃ツールの内部配布(Lateral Tool Transfer)の可能性",
+            })
 
     result["lateral_movement_techniques"].sort(
         key=lambda x: (_sev_rank_smb.get(x["severity"], 9), -x["count"]))
