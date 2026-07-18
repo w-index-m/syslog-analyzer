@@ -15,6 +15,7 @@ import socket
 import sqlite3
 import struct
 import time
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -42,6 +43,7 @@ SCENARIOS = {
     "ctf_challenge": "🚩 CTF練習問題（パケットフォレンジック）",
     "ips_attack": "🛡️ Web攻撃/侵入試行（IPSシグネチャ検知）",
     "malware_behavior": "🦠 マルウェア挙動（横展開・C2・怪しい外部・添付ウイルス）",
+    "lateral_movement": "🕵️ 横展開手口カタログ（PsExec/WinRM/RDP/VNC/DCOM/SSH/Pass-the-Hash/ツール転送）",
 }
 
 # ─── サンプル IP ───────────────────────────────────────────────────
@@ -947,6 +949,168 @@ def _pcap_malware_behavior() -> bytes:
     return _write_pcap(pkts)
 
 
+def _smb2_header(command: int, message_id: int = 1, tree_id: int = 0) -> bytes:
+    """SMB2ヘッダ(64バイト、pcap_analyzer._parse_smb2_headerが要求する形式)を組み立てる。"""
+    hdr = bytearray(64)
+    hdr[0:4] = b"\xfeSMB"
+    hdr[12:14] = struct.pack("<H", command)
+    hdr[16:20] = struct.pack("<I", 0)          # flags=0 → リクエスト
+    hdr[24:32] = struct.pack("<Q", message_id)
+    hdr[36:40] = struct.pack("<I", tree_id)
+    return bytes(hdr)
+
+
+def _smb2_tree_connect(path: str) -> bytes:
+    """PsExec型検知が読む TreeConnect リクエストを組み立てる(4バイト長プレフィックス込み)。"""
+    header = _smb2_header(0x0003)  # _SMB2_CMD_TREE_CONNECT
+    path_b = path.encode("utf-16-le")
+    # PathOffset/NameOffset は header_start(=4)起点。固定部8バイトの直後にバッファを置くので
+    # header_start からのオフセットは 64(ヘッダ) + 8(固定部) = 72。
+    body = struct.pack("<HH", 9, 0) + struct.pack("<HH", 72, len(path_b)) + path_b
+    payload = b"\x00\x00\x00\x00" + header + body
+    return payload
+
+
+def _smb2_create(filename: str) -> bytes:
+    """PsExec型検知が読む CREATE リクエスト（パイプ/ファイル名オープン）を組み立てる。"""
+    header = _smb2_header(0x0005)  # _SMB2_CMD_CREATE
+    name_b = filename.encode("utf-16-le")
+    fixed = bytearray(48)
+    # NameOffset は header_start(=4)起点。固定部48バイトの直後にバッファを置くので 64+48=112。
+    struct.pack_into("<H", fixed, 44, 112)          # NameOffset(header_start起点)
+    struct.pack_into("<H", fixed, 46, len(name_b))  # NameLength
+    payload = b"\x00\x00\x00\x00" + header + bytes(fixed) + name_b
+    return payload
+
+
+def _rdp_connection_request(cookie: str) -> bytes:
+    """TPKT+X.224 Connection Request（mstshashクッキー付き）を組み立てる。"""
+    user_data = f"Cookie: mstshash={cookie}\r\n".encode("ascii") + b"\x01\x00\x08\x00\x03\x00\x00\x00"
+    x224 = bytes([0x00, 0xE0, 0x00, 0x00, 0x00, 0x00, 0x00]) + user_data
+    tpkt_len = 4 + len(x224)
+    return bytes([0x03, 0x00]) + struct.pack("!H", tpkt_len) + x224
+
+
+def _dcerpc_bind(iface_uuid: str) -> bytes:
+    """DCOM/WMIリモート活性化の識別に使う DCERPC Bind PDU を組み立てる。"""
+    header16 = bytearray(16)
+    header16[0] = 5    # rpc_vers
+    header16[2] = 11   # ptype = BIND
+    body = struct.pack("<HHI", 4280, 4280, 0)   # max_xmit_frag, max_recv_frag, assoc_group_id
+    body += bytes([1, 0, 0, 0])                  # num_ctx_items=1 + pad(3)
+    body += struct.pack("<H", 0)                 # context_id
+    body += bytes([1, 0])                        # num_trans_items=1 + pad(1)
+    body += uuid.UUID(iface_uuid).bytes_le        # abstract_syntax UUID
+    body += struct.pack("<HH", 0, 0)              # version, version_minor
+    return bytes(header16) + body
+
+
+def _ntlm_authenticate(domain: str, username: str) -> bytes:
+    """Pass-the-Hash検知が読む NTLMSSP Type3(AUTHENTICATE)メッセージを組み立てる。"""
+    domain_b = domain.encode("utf-16-le")
+    user_b = username.encode("utf-16-le")
+    ws_b = "WORKSTATION1".encode("utf-16-le")
+    header_len = 12 + 8 * 6 + 4
+    dom_off = header_len
+    user_off = dom_off + len(domain_b)
+    ws_off = user_off + len(user_b)
+    sesskey_off = ws_off + len(ws_b)
+
+    def field(length, offset):
+        return struct.pack("<HHI", length, length, offset)
+
+    body = (b"NTLMSSP\x00" + struct.pack("<I", 3)
+            + field(0, dom_off) + field(0, dom_off)
+            + field(len(domain_b), dom_off) + field(len(user_b), user_off)
+            + field(len(ws_b), ws_off) + field(0, sesskey_off)
+            + struct.pack("<I", 0))
+    return body + domain_b + user_b + ws_b
+
+
+def _pe_body() -> bytes:
+    """Lateral Tool Transfer検知が読む「PEヘッダらしきバイト列」。"""
+    return (b"MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xff\xff\x00\x00"
+            + b"\x00" * 40 +
+            b"This program cannot be run in DOS mode.\r\r\n$" + b"\x00" * 200)
+
+
+def _pcap_lateral_movement() -> bytes:
+    """
+    横展開(ラテラルムーブメント)の手口カタログ。1台の攻撃端末から、実装済みの
+    検知8種を1つずつ、狙って踏ませるデモ。実際の攻撃で全手口を同時に使うことは
+    稀だが、「検知機能を一通り体験する」ためにあえて1本のpcapにまとめている。
+      ① PsExec(SMB管理共有+PSEXESVCサービス名)
+      ② WinRM/PowerShell Remoting(シェル作成+コマンド実行)
+      ③ RDP接続(mstshashクッキー)
+      ④ VNC接続(RFBバナー)
+      ⑤ DCOM/WMIリモート活性化(DCERPC Bind, WMI UUID)
+      ⑥ SSH内部間セッション
+      ⑦ Pass-the-Hash(同一NTLM資格情報を2台の送信元IPから使用)
+      ⑧ Lateral Tool Transfer(SMB以外の経路でのPE転送)
+    """
+    pkts = []
+    t = time.time() - 240
+    attacker = "192.168.10.66"
+    smb_target = "192.168.10.10"
+    rdp_vnc_ssh_target = "192.168.10.15"
+    legit_host = "192.168.10.5"          # Pass-the-Hash: 同じ資格情報を使う別ホスト
+    transfer_victim = "192.168.10.77"    # Lateral Tool Transfer先
+
+    # ① PsExec: ADMIN$へのTreeConnect → PSEXESVCサービス作成
+    pkts.append((t, _ip_tcp(attacker, smb_target, 49500, 445, dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK,
+                            seq=1000, data=_smb2_tree_connect(f"\\\\{smb_target}\\ADMIN$")))); t += 0.2
+    pkts.append((t, _ip_tcp(attacker, smb_target, 49500, 445, dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK,
+                            seq=1200, data=_smb2_create("PSEXESVC")))); t += 5
+
+    # ② WinRM: シェル作成(transfer/Create + windows/shell) → コマンド実行
+    winrm_create = (b"POST /wsman HTTP/1.1\r\nHost: target\r\n"
+                     b"SOAPAction: transfer/Create\r\n\r\n"
+                     b"<w:ResourceURI>windows/shell</w:ResourceURI>")
+    winrm_cmd = (b"POST /wsman HTTP/1.1\r\nHost: target\r\n"
+                 b"SOAPAction: windows/shell/Command\r\n\r\n"
+                 b"<rsp:Command>whoami /all</rsp:Command>")
+    pkts.append((t, _ip_tcp(attacker, rdp_vnc_ssh_target, 49501, 5985,
+                            dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=1000, data=winrm_create))); t += 0.3
+    pkts.append((t, _ip_tcp(attacker, rdp_vnc_ssh_target, 49501, 5985,
+                            dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=1200, data=winrm_cmd))); t += 5
+
+    # ③ RDP: mstshashクッキー付き接続要求
+    pkts.append((t, _ip_tcp(attacker, rdp_vnc_ssh_target, 49502, 3389,
+                            dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=1000,
+                            data=_rdp_connection_request("attacker-ws")))); t += 5
+
+    # ④ VNC: RFBバージョンバナー
+    pkts.append((t, _ip_tcp(attacker, rdp_vnc_ssh_target, 49503, 5900,
+                            dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=1000,
+                            data=b"RFB 003.008\n"))); t += 5
+
+    # ⑤ DCOM/WMI: DCERPC BindでWMIリモート接続(IWbemLevel1Login) UUIDを指定
+    pkts.append((t, _ip_tcp(attacker, rdp_vnc_ssh_target, 49504, 135,
+                            dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=1000,
+                            data=_dcerpc_bind("f309ad18-d1d0-11d2-9998-00a0c9310fea")))); t += 5
+
+    # ⑥ SSH: 内部ホスト間セッション（バナー交換）
+    pkts.append((t, _ip_tcp(attacker, rdp_vnc_ssh_target, 49505, 22,
+                            dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=1000,
+                            data=b"SSH-2.0-OpenSSH_8.9\r\n"))); t += 5
+
+    # ⑦ Pass-the-Hash: 同一NTLM資格情報(CORP\administrator)を2つの送信元IPから使用
+    ntlm_msg = _ntlm_authenticate("CORP", "administrator")
+    pkts.append((t, _ip_tcp(legit_host, smb_target, 49600, 445,
+                            dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=1000, data=ntlm_msg))); t += 3
+    pkts.append((t, _ip_tcp(attacker, smb_target, 49601, 445,
+                            dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=1000, data=ntlm_msg))); t += 5
+
+    # ⑧ Lateral Tool Transfer: SMB以外(内部HTTP)での実行ファイル配布
+    http_resp = (b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n"
+                 + _pe_body())
+    pkts.append((t, _ip_tcp(attacker, transfer_victim, 8000, 51000,
+                            dpkt.tcp.TH_PUSH | dpkt.tcp.TH_ACK, seq=1000, data=http_resp)))
+
+    pkts.sort(key=lambda x: x[0])
+    return _write_pcap(pkts)
+
+
 def _pcap_showcase() -> bytes:
     """
     パケット解析タブの全機能を一度に試せる総合サンプル。
@@ -1103,6 +1267,7 @@ def run_scenario(scenario: str) -> dict:
         "ctf_challenge":   _pcap_ctf_challenge,
         "ips_attack":      _pcap_ips_attack,
         "malware_behavior": _pcap_malware_behavior,
+        "lateral_movement": _pcap_lateral_movement,
     }.get(scenario, _pcap_normal)
 
     try:

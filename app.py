@@ -1734,9 +1734,69 @@ with tab1:
             st.warning(f"{_icon} {a['detail']}")
         st.markdown("---")
 
+    # ── Splunk風 一括ログ LLM 分析（1件ずつではなくまとめて分析） ──
+    if logs:
+        st.markdown("### 📊 ログ一括 AI 分析（Splunk 風）")
+        st.caption(
+            "現在フィルター中のログをまとめてLLMに渡し、全体的な傾向・根本原因・優先対応をサマリーします。"
+            "下の個別ログを1件ずつ解析する代わりに、まずここで全体像をつかむのがおすすめです。"
+        )
+        _batch_llm_ok = (analyzer.check_claude_available() or analyzer.check_gemini_available()
+                         or analyzer.check_groq_available() or analyzer.check_ollama_available())
+        _batch_col1, _batch_col2 = st.columns([3, 1])
+        with _batch_col1:
+            _batch_max = st.slider("分析対象ログ上限", 10, 200, 50, step=10,
+                                   key="batch_llm_limit",
+                                   help="多いほど精度が上がりますが LLM への入力トークンが増えます")
+        with _batch_col2:
+            _batch_btn = st.button("🤖 一括 AI 分析", key="batch_llm_run",
+                                   disabled=not _batch_llm_ok,
+                                   width='stretch', type="primary")
+        if not _batch_llm_ok:
+            st.caption("一括 AI 分析はサイドバーの「🔑 APIキー設定」でいずれかのLLMを設定してから使用してください。")
+
+        if _batch_btn:
+            _batch_logs = logs[:_batch_max]
+            _batch_lines = []
+            for _bl in _batch_logs:
+                _bsev  = _bl.get("severity", "INFO")
+                _bhost = _bl.get("hostname", "") or _bl.get("source_ip", "")
+                _bmsg  = (_bl.get("message", "") or "")[:200]
+                _bts   = (_bl.get("received_at", "") or "")[:19].replace("T", " ")
+                _batch_lines.append(f"[{_bts}] {_bsev} {_bhost}: {_bmsg}")
+            _batch_text = "\n".join(_batch_lines)
+            _batch_ctx = (
+                f"対象期間のログ {len(_batch_logs)} 件:\n\n{_batch_text}\n\n"
+                f"フィルター条件: ベンダー={f_vendor}, 重要度={f_severity}, IP={f_ip or '全て'}"
+            )
+            with st.spinner("LLM が全ログをまとめて分析中..."):
+                _batch_ai_text, _batch_ai_model = analyzer.ask_llm(
+                    "あなたはネットワーク運用の専門家です。"
+                    "提供されたネットワーク機器のsyslogログ一覧を分析し、以下を日本語で回答してください:\n"
+                    "1. 全体的な状況サマリー（2〜3文）\n"
+                    "2. 検出された重大/重要な問題点（箇条書き）\n"
+                    "3. 根本原因の推定\n"
+                    "4. 最優先の対応策\n"
+                    "5. 今後のモニタリングポイント",
+                    _batch_ctx,
+                    st.session_state.get("llm_mode", "auto"),
+                    max_tokens=1500,
+                )
+            st.session_state["_batch_ai"] = (_batch_ai_text, _batch_ai_model, len(_batch_logs))
+
+        _batch_cached = st.session_state.get("_batch_ai")
+        if _batch_cached and _batch_cached[0]:
+            with st.expander(
+                f"🤖 一括分析結果（{_batch_cached[1]}）— {_batch_cached[2]} 件のログを分析",
+                expanded=True
+            ):
+                st.markdown(_batch_cached[0])
+        st.markdown("---")
+
     if not logs:
         st.info("ログがありません。サーバーを起動してネットワーク機器からsyslogを送信するか、テストログを投入してください。")
     else:
+        st.markdown(f"#### 📋 個別ログ一覧（{len(logs)} 件・1件ずつAI解析も可能）")
         for log in logs:
             sev = log.get("severity", "INFO")
             vendor = log.get("vendor", "")
@@ -1829,64 +1889,6 @@ with tab1:
                             st.rerun()
 
                 st.markdown("<hr style='border-color:#e9edf2; margin:8px 0;'>", unsafe_allow_html=True)
-
-    # ── Splunk風 一括ログ LLM 分析 ──────────────────────────────
-    if logs:
-        st.markdown("---")
-        st.markdown("### 📊 ログ一括 AI 分析（Splunk 風）")
-        st.caption(
-            "現在フィルター中のログをまとめてLLMに渡し、全体的な傾向・根本原因・優先対応をサマリーします。"
-        )
-        _batch_llm_ok = (analyzer.check_claude_available() or analyzer.check_gemini_available()
-                         or analyzer.check_groq_available() or analyzer.check_ollama_available())
-        _batch_col1, _batch_col2 = st.columns([3, 1])
-        with _batch_col1:
-            _batch_max = st.slider("分析対象ログ上限", 10, 200, 50, step=10,
-                                   key="batch_llm_limit",
-                                   help="多いほど精度が上がりますが LLM への入力トークンが増えます")
-        with _batch_col2:
-            _batch_btn = st.button("🤖 一括 AI 分析", key="batch_llm_run",
-                                   disabled=not _batch_llm_ok,
-                                   width='stretch', type="primary")
-        if not _batch_llm_ok:
-            st.caption("一括 AI 分析はサイドバーの「🔑 APIキー設定」でいずれかのLLMを設定してから使用してください。")
-
-        if _batch_btn:
-            _batch_logs = logs[:_batch_max]
-            _batch_lines = []
-            for _bl in _batch_logs:
-                _bsev  = _bl.get("severity", "INFO")
-                _bhost = _bl.get("hostname", "") or _bl.get("source_ip", "")
-                _bmsg  = (_bl.get("message", "") or "")[:200]
-                _bts   = (_bl.get("received_at", "") or "")[:19].replace("T", " ")
-                _batch_lines.append(f"[{_bts}] {_bsev} {_bhost}: {_bmsg}")
-            _batch_text = "\n".join(_batch_lines)
-            _batch_ctx = (
-                f"対象期間のログ {len(_batch_logs)} 件:\n\n{_batch_text}\n\n"
-                f"フィルター条件: ベンダー={f_vendor}, 重要度={f_severity}, IP={f_ip or '全て'}"
-            )
-            with st.spinner("LLM が全ログをまとめて分析中..."):
-                _batch_ai_text, _batch_ai_model = analyzer.ask_llm(
-                    "あなたはネットワーク運用の専門家です。"
-                    "提供されたネットワーク機器のsyslogログ一覧を分析し、以下を日本語で回答してください:\n"
-                    "1. 全体的な状況サマリー（2〜3文）\n"
-                    "2. 検出された重大/重要な問題点（箇条書き）\n"
-                    "3. 根本原因の推定\n"
-                    "4. 最優先の対応策\n"
-                    "5. 今後のモニタリングポイント",
-                    _batch_ctx,
-                    st.session_state.get("llm_mode", "auto"),
-                    max_tokens=1500,
-                )
-            st.session_state["_batch_ai"] = (_batch_ai_text, _batch_ai_model, len(_batch_logs))
-
-        _batch_cached = st.session_state.get("_batch_ai")
-        if _batch_cached and _batch_cached[0]:
-            with st.expander(
-                f"🤖 一括分析結果（{_batch_cached[1]}）— {_batch_cached[2]} 件のログを分析",
-                expanded=True
-            ):
-                st.markdown(_batch_cached[0])
 
     # ── データダウンロード ───────────────────────────────────────
     st.markdown("---")
