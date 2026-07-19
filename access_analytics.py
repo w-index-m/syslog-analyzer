@@ -3,9 +3,10 @@
 
 Google Analytics等の外部サービスは使わない。Streamlitはブラウザタブごとに
 サーバー側セッションを持つため、新規セッションの発生を「1訪問」とみなして
-SQLiteに記録する。IPアドレスは保存しない（プライバシー配慮）。User-Agentは
-Streamlitのバージョンによって取得できない場合があるため、取得できた範囲で
-参考情報として保持する。
+SQLiteに記録する。IPアドレス自体は保存しない（プライバシー配慮）。
+アクセス国だけを知りたいので、IPは国名解決のためだけに一時的に使い、
+結果の国名/国コードのみを保存する。User-Agentは Streamlitのバージョンに
+よって取得できない場合があるため、取得できた範囲で参考情報として保持する。
 
 任意でGoogleスプレッドシートへも転記できる（Slack通知と同じ方式:
 st.secrets優先、なければ環境変数からWebhook URLを取得）。スプレッドシート側に
@@ -41,7 +42,7 @@ def get_sheet_webhook_url() -> str:
     return os.environ.get("ACCESS_LOG_SHEET_WEBHOOK_URL", "")
 
 
-def post_to_sheet(session_id: str, visited_at: str, user_agent: str) -> None:
+def post_to_sheet(session_id: str, visited_at: str, user_agent: str, country: str = "") -> None:
     """
     スプレッドシートへ1件転記する（ベストエフォート）。
     Webhook未設定・通信失敗のいずれでもアプリの動作は止めない。
@@ -52,11 +53,34 @@ def post_to_sheet(session_id: str, visited_at: str, user_agent: str) -> None:
     try:
         requests.post(
             url,
-            json={"session_id": session_id, "visited_at": visited_at, "user_agent": user_agent},
+            json={"session_id": session_id, "visited_at": visited_at,
+                  "user_agent": user_agent, "country": country},
             timeout=3,
         )
     except requests.RequestException:
         pass
+
+
+def resolve_country(ip_address: str) -> str:
+    """
+    IPアドレスから国名を解決する（ベストエフォート）。
+    IPアドレス自体はこの関数の外に一切渡さず・保存しない。プライベート/不明な
+    アドレスや解決失敗時は空文字を返す。
+    """
+    if not ip_address or ip_address in ("127.0.0.1", "localhost", "::1"):
+        return ""
+    try:
+        resp = requests.get(
+            f"http://ip-api.com/json/{ip_address}",
+            params={"fields": "status,country"},
+            timeout=3,
+        )
+        data = resp.json()
+        if data.get("status") == "success":
+            return data.get("country", "") or ""
+    except Exception:
+        pass
+    return ""
 
 
 def _init_table():
@@ -66,25 +90,30 @@ def _init_table():
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id  TEXT NOT NULL,
                 visited_at  TEXT NOT NULL,
-                user_agent  TEXT
+                user_agent  TEXT,
+                country     TEXT
             )
         """)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(access_log)").fetchall()]
+        if "country" not in cols:
+            conn.execute("ALTER TABLE access_log ADD COLUMN country TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_access_visited ON access_log(visited_at)")
         conn.commit()
 
 
-def record_visit(session_id: str, user_agent: str = ""):
+def record_visit(session_id: str, user_agent: str = "", ip_address: str = ""):
     """新規ブラウザセッション1回につき1回だけ呼ぶ想定（app.py側でsession_stateにより1回化）。"""
     _init_table()
     visited_at = _now_jst().strftime("%Y-%m-%dT%H:%M:%S+09:00")
     ua = (user_agent or "")[:300]
+    country = resolve_country(ip_address)
     with sqlite3.connect(DB_PATH, check_same_thread=False) as conn:
         conn.execute(
-            "INSERT INTO access_log (session_id, visited_at, user_agent) VALUES (?,?,?)",
-            (session_id, visited_at, ua),
+            "INSERT INTO access_log (session_id, visited_at, user_agent, country) VALUES (?,?,?,?)",
+            (session_id, visited_at, ua, country),
         )
         conn.commit()
-    post_to_sheet(session_id, visited_at, ua)
+    post_to_sheet(session_id, visited_at, ua, country)
 
 
 def simplify_user_agent(ua: str) -> str:
@@ -133,6 +162,12 @@ def get_stats(days: int = 30) -> dict:
                GROUP BY user_agent ORDER BY c DESC LIMIT 10""",
             (since,),
         ).fetchall()
+        top_countries = conn.execute(
+            """SELECT COALESCE(NULLIF(country, ''), '(不明)') AS country, COUNT(*) c
+               FROM access_log WHERE visited_at >= ?
+               GROUP BY country ORDER BY c DESC LIMIT 20""",
+            (since,),
+        ).fetchall()
     return {
         "total_all_time":  total_all,
         "unique_all_time": unique_all,
@@ -140,4 +175,5 @@ def get_stats(days: int = 30) -> dict:
         "unique_recent":   unique_recent,
         "daily":           [dict(r) for r in daily],
         "top_user_agents": [dict(r) for r in top_ua],
+        "top_countries":   [dict(r) for r in top_countries],
     }

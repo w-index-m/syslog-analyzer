@@ -438,8 +438,13 @@ if not st.session_state.get("_visit_recorded"):
             _ua = st.context.headers.get("User-Agent", "")
         except Exception:
             pass
+        _visit_ip = ""
+        try:
+            _visit_ip = st.context.ip_address or ""
+        except Exception:
+            pass
         threading.Thread(
-            target=_acc_an.record_visit, args=(_session_id, _ua), daemon=True,
+            target=_acc_an.record_visit, args=(_session_id, _ua, _visit_ip), daemon=True,
         ).start()
     except Exception:
         pass
@@ -1026,18 +1031,32 @@ with st.sidebar:
             else:
                 st.caption("まだ訪問データがありません")
 
-            if _acc_stats["top_user_agents"]:
-                _acc_ua_rows = [
-                    {"クライアント": _acc_view.simplify_user_agent(r["user_agent"]),
-                     "件数": r["c"]}
-                    for r in _acc_stats["top_user_agents"]
-                ]
-                _acc_ua_df = pd.DataFrame(_acc_ua_rows).groupby("クライアント", as_index=False).sum()
-                st.dataframe(_acc_ua_df.sort_values("件数", ascending=False),
-                            width='stretch', hide_index=True)
+            _acc_col_ua, _acc_col_country = st.columns(2)
+            with _acc_col_ua:
+                st.markdown("**クライアント内訳**")
+                if _acc_stats["top_user_agents"]:
+                    _acc_ua_rows = [
+                        {"クライアント": _acc_view.simplify_user_agent(r["user_agent"]),
+                         "件数": r["c"]}
+                        for r in _acc_stats["top_user_agents"]
+                    ]
+                    _acc_ua_df = pd.DataFrame(_acc_ua_rows).groupby("クライアント", as_index=False).sum()
+                    st.dataframe(_acc_ua_df.sort_values("件数", ascending=False),
+                                width='stretch', hide_index=True)
+                else:
+                    st.caption("データなし")
+            with _acc_col_country:
+                st.markdown("**国別内訳**")
+                if _acc_stats["top_countries"]:
+                    _acc_cty_df = pd.DataFrame(_acc_stats["top_countries"]).rename(
+                        columns={"country": "国", "c": "件数"})
+                    st.dataframe(_acc_cty_df, width='stretch', hide_index=True)
+                else:
+                    st.caption("データなし")
 
             st.caption(
-                "外部サービス(GA等)は使わず、自前でセッション発生を記録（IPアドレスは保存しません）。"
+                "外部サービス(GA等)は使わず、自前でセッション発生を記録。"
+                "IPアドレス自体は保存せず、国名解決のためだけに一時利用します。"
                 + ("スプレッドシートへの転記: 有効" if _acc_view.get_sheet_webhook_url()
                    else "スプレッドシートへの転記: 未設定（ACCESS_LOG_SHEET_WEBHOOK_URLを設定すると有効になります）")
             )
