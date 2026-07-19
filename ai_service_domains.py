@@ -23,6 +23,15 @@ AI_SERVICE_SNI_SUFFIXES = {
     "x.ai":                     "xAI (Grok)",
     "copilot.microsoft.com":    "Microsoft Copilot",
     "huggingface.co":           "Hugging Face",
+    "moonshot.ai":              "Moonshot AI (Kimi)",
+    "moonshot.cn":              "Moonshot AI (Kimi, 中国)",
+    "kimi.ai":                  "Kimi (Moonshot AI)",
+    "kimi.com":                 "Kimi (Moonshot AI)",
+    "deepseek.com":             "DeepSeek",
+    "minimax.io":               "MiniMax",
+    "minimaxi.com":             "MiniMax (中国)",
+    "dashscope.aliyuncs.com":   "Alibaba Cloud (Qwen/通義千問)",
+    "dashscope-intl.aliyuncs.com": "Alibaba Cloud (Qwen/通義千問, 海外)",
 }
 
 # セッション継続時間がこれを超えたら「長時間接続（張りっぱなしの可能性）」とみなす
