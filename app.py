@@ -425,6 +425,26 @@ st.markdown("""
 db.init_db()
 
 # ─────────────────────────────────────────
+# アクセス解析（新規セッション発生を1訪問として記録。ページ描画はブロックしない）
+# ─────────────────────────────────────────
+if not st.session_state.get("_visit_recorded"):
+    st.session_state["_visit_recorded"] = True
+    try:
+        import uuid as _uuid_visit
+        import access_analytics as _acc_an
+        _session_id = str(_uuid_visit.uuid4())
+        _ua = ""
+        try:
+            _ua = st.context.headers.get("User-Agent", "")
+        except Exception:
+            pass
+        threading.Thread(
+            target=_acc_an.record_visit, args=(_session_id, _ua), daemon=True,
+        ).start()
+    except Exception:
+        pass
+
+# ─────────────────────────────────────────
 # Session State 初期化
 # ─────────────────────────────────────────
 if "server_started" not in st.session_state:
@@ -986,6 +1006,44 @@ with st.sidebar:
         st.success("クリアしました")
 
     st.markdown("---")
+
+    # ─── アクセス解析（サイト運営者向け） ─────────────────
+    with st.expander("📊 アクセス解析（訪問者数）", expanded=False):
+        try:
+            import access_analytics as _acc_view
+            _acc_days = st.slider("集計期間(日)", 7, 90, 30, key="acc_an_days")
+            _acc_stats = _acc_view.get_stats(days=_acc_days)
+            _acc_c1, _acc_c2 = st.columns(2)
+            _acc_c1.metric("累計訪問数", f"{_acc_stats['total_all_time']:,}")
+            _acc_c2.metric("累計ユニーク訪問者", f"{_acc_stats['unique_all_time']:,}")
+            _acc_c3, _acc_c4 = st.columns(2)
+            _acc_c3.metric(f"直近{_acc_days}日 訪問数", f"{_acc_stats['total_recent']:,}")
+            _acc_c4.metric(f"直近{_acc_days}日 ユニーク", f"{_acc_stats['unique_recent']:,}")
+
+            if _acc_stats["daily"]:
+                _acc_df = pd.DataFrame(_acc_stats["daily"]).set_index("day")
+                st.line_chart(_acc_df[["visits", "unique_sessions"]])
+            else:
+                st.caption("まだ訪問データがありません")
+
+            if _acc_stats["top_user_agents"]:
+                _acc_ua_rows = [
+                    {"クライアント": _acc_view.simplify_user_agent(r["user_agent"]),
+                     "件数": r["c"]}
+                    for r in _acc_stats["top_user_agents"]
+                ]
+                _acc_ua_df = pd.DataFrame(_acc_ua_rows).groupby("クライアント", as_index=False).sum()
+                st.dataframe(_acc_ua_df.sort_values("件数", ascending=False),
+                            width='stretch', hide_index=True)
+
+            st.caption(
+                "外部サービス(GA等)は使わず、自前でセッション発生を記録（IPアドレスは保存しません）。"
+                + ("スプレッドシートへの転記: 有効" if _acc_view.get_sheet_webhook_url()
+                   else "スプレッドシートへの転記: 未設定（ACCESS_LOG_SHEET_WEBHOOK_URLを設定すると有効になります）")
+            )
+        except Exception as _acc_err:
+            st.caption(f"アクセス解析の表示に失敗しました: {_acc_err}")
+
     st.caption("v1.0 | Cisco/NX-OS/Si-R/IPCOM/SR-S/F5 BIG-IP/PaloAlto/APRESIA/RHEL/Windows対応")
 
 # ─────────────────────────────────────────
