@@ -15,12 +15,19 @@ ACCESS_LOG_SHEET_WEBHOOK_URL として設定するだけで動く。未設定な
 """
 import os
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
 
 DB_PATH = Path(os.environ.get("DB_PATH", str(Path(__file__).parent / "syslog.db")))
+
+JST = timezone(timedelta(hours=9))
+
+
+def _now_jst() -> datetime:
+    """サーバーのタイムゾーン(Streamlit Cloud等はUTC)に依らず、常にJSTの現在時刻を返す。"""
+    return datetime.now(JST)
 
 
 def get_sheet_webhook_url() -> str:
@@ -69,7 +76,7 @@ def _init_table():
 def record_visit(session_id: str, user_agent: str = ""):
     """新規ブラウザセッション1回につき1回だけ呼ぶ想定（app.py側でsession_stateにより1回化）。"""
     _init_table()
-    visited_at = datetime.now().isoformat()
+    visited_at = _now_jst().strftime("%Y-%m-%dT%H:%M:%S+09:00")
     ua = (user_agent or "")[:300]
     with sqlite3.connect(DB_PATH, check_same_thread=False) as conn:
         conn.execute(
@@ -101,7 +108,7 @@ def simplify_user_agent(ua: str) -> str:
 def get_stats(days: int = 30) -> dict:
     """概要統計: 総訪問数・ユニークセッション数・日別推移・UA内訳を返す。"""
     _init_table()
-    since = (datetime.now() - timedelta(days=days)).isoformat()
+    since = (_now_jst() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S+09:00")
     with sqlite3.connect(DB_PATH, check_same_thread=False) as conn:
         conn.row_factory = sqlite3.Row
         total_all = conn.execute("SELECT COUNT(*) c FROM access_log").fetchone()["c"]
