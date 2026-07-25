@@ -1811,6 +1811,32 @@ with tab1:
             st.warning(f"{_icon} {a['detail']}")
         st.markdown("---")
 
+    # ── 🎯 検知した攻撃サマリー（FortiGate/Palo Alto等のUTM/IPSログから） ──
+    import threat_log_summary as _tls
+    _atk_hours = st.slider("集計期間(時間)", 1, 168, 24, key="atk_summary_hours")
+    _atk_summary = _tls.get_attack_summary(hours=_atk_hours)
+    if _atk_summary["total"] > 0:
+        st.markdown(f"### 🎯 検知した攻撃サマリー（直近{_atk_hours}時間・{_atk_summary['total']}件）")
+        st.caption(
+            "FortiGate/Palo Alto等のファイアウォール・UTM/IPSログのtagsを集計し、"
+            "どんな攻撃が何件・遮断できているかをまとめて表示します。"
+            "「未遮断」は検知したがブロックできていない（要確認）件数です。"
+        )
+        if _atk_summary["unresolved_total"] > 0:
+            st.warning(f"⚠️ 未遮断（要確認）の検知が {_atk_summary['unresolved_total']} 件あります")
+        _atk_rows = [
+            {
+                "攻撃カテゴリ": t["category"],
+                "検知件数": t["count"],
+                "遮断済み": t["blocked"],
+                "未遮断": t["unresolved"],
+                "主な送信元": ", ".join(f"{s['ip']}({s['count']})" for s in t["top_sources"]),
+            }
+            for t in _atk_summary["by_type"]
+        ]
+        st.dataframe(pd.DataFrame(_atk_rows), width='stretch', hide_index=True)
+        st.markdown("---")
+
     # ── Splunk風 一括ログ LLM 分析（1件ずつではなくまとめて分析） ──
     if logs:
         st.markdown("### 📊 ログ一括 AI 分析（Splunk 風）")

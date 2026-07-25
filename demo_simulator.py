@@ -38,6 +38,7 @@ SCENARIOS = {
     "cisco_ios":     "🖥️ Cisco IOS（CPU高騰・メモリ枯渇）",
     "f5_bigip":      "🅵 F5 BIG-IP（プール障害・HA切替）",
     "paloalto":      "🛡️ Palo Alto（脅威検知・HAダウン）",
+    "fortigate":     "🧱 FortiGate（IPS攻撃検知・ウイルス・DoS・HAダウン）",
     "sir":           "📡 富士通 Si-R（回線断・エラーコード）",
     "session_id_demo": "🔑 セッションID使い回し（乗っ取り疑い）",
     "ctf_challenge": "🚩 CTF練習問題（パケットフォレンジック）",
@@ -68,11 +69,13 @@ CATALYST_SW = "192.168.1.1"
 BIGIP1      = "192.168.1.20"
 PA_FW01     = "192.168.1.30"
 SIR_G210    = "192.168.1.3"
+FGT_FW01    = "192.168.1.40"
 HOSTNAMES.update({
     CATALYST_SW: "catalyst01",
     BIGIP1:      "bigip1",
     PA_FW01:     "PA-FW01",
     SIR_G210:    "SiR-G210",
+    FGT_FW01:    "FGT-Edge01",
 })
 
 # ═══════════════════════════════════════════════════════════════════
@@ -103,6 +106,21 @@ def _paloalto_raw(device_ip: str, logtype: str, fields: str) -> str:
     ts = datetime.now().strftime("%b %d %H:%M:%S")
     log_ts = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
     return f"<14>{ts} {hn} 1,{log_ts},001801000001,{logtype},{fields}"
+
+
+_FGT_LEVEL_PRI = {"emergency": 0, "alert": 1, "critical": 2, "error": 3,
+                  "warning": 4, "notice": 5, "information": 6, "debug": 7}
+
+
+def _fortigate_raw(device_ip: str, log_type: str, subtype: str, level: str, kv_extra: str = "") -> str:
+    """FortiGate形式: <PRI>date=... time=... devname="..." type="..." subtype="..." level="..." k=v..."""
+    hn = HOSTNAMES.get(device_ip, device_ip)
+    now = datetime.now()
+    pri = 128 + _FGT_LEVEL_PRI.get(level, 5)   # facility local0(16)*8 + severity
+    subtype_kv = f'subtype="{subtype}" ' if subtype else ""
+    return (f'<{pri}>date={now.strftime("%Y-%m-%d")} time={now.strftime("%H:%M:%S")} '
+            f'devname="{hn}" devid="{hn}ID0001" logid="0000000001" type="{log_type}" '
+            f'{subtype_kv}level="{level}" vd="root" {kv_extra}')
 
 
 def _sir_raw(device_ip: str, pri: int, process: str, message: str) -> str:
@@ -421,6 +439,28 @@ def _syslogs_paloalto() -> list[tuple[str, str]]:
         "0,0,,,,admin,commit,committed,succeeded")))
     events.append((PA_FW01, _paloalto_raw(PA_FW01, "SYSTEM",
         "general,0,,,,,,,medium,Threat Prevention license expired")))
+    return events
+
+
+def _syslogs_fortigate() -> list[tuple[str, str]]:
+    """FortiGate: IPS攻撃検知(遮断/未遮断)・ウイルス検知・DoS異常・HAダウン・通常トラフィック。"""
+    events = []
+    events.append((FGT_FW01, _fortigate_raw(FGT_FW01, "utm", "ips", "alert",
+        'srcip=203.0.113.99 srcport=51234 dstip=192.168.1.20 dstport=445 action="blocked" '
+        'attack="MS.SMB.Server.SMBv1.Remote.Code.Execution" '
+        'msg="Exploit detected: EternalBlue-like SMB exploit attempt"')))
+    events.append((FGT_FW01, _fortigate_raw(FGT_FW01, "utm", "virus", "warning",
+        'srcip=192.168.10.15 dstip=203.0.113.10 action="blocked" virus="EICAR_TEST_FILE" '
+        'msg="Virus detected in HTTP download"')))
+    events.append((FGT_FW01, _fortigate_raw(FGT_FW01, "utm", "ips", "alert",
+        'srcip=203.0.113.77 srcport=44321 dstip=192.168.1.21 dstport=3389 action="passthrough" '
+        'attack="RDP.BlueKeep.Vulnerability" msg="Exploit detected but not blocked (monitor mode)"')))
+    events.append((FGT_FW01, _fortigate_raw(FGT_FW01, "anomaly", "", "critical",
+        'srcip=203.0.113.200 dstip=192.168.1.1 msg="DoS attack detected: tcp_syn_flood, count=15000"')))
+    events.append((FGT_FW01, _fortigate_raw(FGT_FW01, "event", "ha", "critical",
+        'msg="HA member down: FGT-Edge02 failover triggered"')))
+    events.append((FGT_FW01, _fortigate_raw(FGT_FW01, "traffic", "forward", "notice",
+        'srcip=192.168.10.5 dstip=93.184.216.34 dstport=443 action="accept" service="HTTPS" msg="allowed"')))
     return events
 
 
@@ -1216,6 +1256,7 @@ def run_scenario(scenario: str) -> dict:
         "cisco_ios":      _syslogs_cisco_ios,
         "f5_bigip":       _syslogs_f5_bigip,
         "paloalto":       _syslogs_paloalto,
+        "fortigate":      _syslogs_fortigate,
         "sir":            _syslogs_sir,
     }.get(scenario, _syslogs_normal)
 
@@ -1241,6 +1282,7 @@ def run_scenario(scenario: str) -> dict:
         "cisco_ios":      _netflow_normal,
         "f5_bigip":       _netflow_normal,
         "paloalto":       _netflow_normal,
+        "fortigate":      _netflow_normal,
         "sir":            _netflow_normal,
     }.get(scenario, _netflow_normal)
 
@@ -1262,6 +1304,7 @@ def run_scenario(scenario: str) -> dict:
         "cisco_ios":      _pcap_normal,
         "f5_bigip":       _pcap_normal,
         "paloalto":       _pcap_normal,
+        "fortigate":      _pcap_normal,
         "sir":            _pcap_normal,
         "session_id_demo": _pcap_session_id_demo,
         "ctf_challenge":   _pcap_ctf_challenge,
