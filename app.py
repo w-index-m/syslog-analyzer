@@ -3686,6 +3686,7 @@ with tab4:
                             full_cfg.get("routing_summary", ""),
                             db._extract_fortigate_block(_cfg_raw, "system admin"),
                             db._extract_fortigate_block(_cfg_raw, "firewall policy"),
+                            db._extract_fortigate_block(_cfg_raw, "firewall ssl-ssh-profile"),
                             db._extract_fortigate_block(_cfg_raw, "vpn ipsec phase1-interface"),
                         ])) or _cfg_raw[:8000]
                     else:
@@ -3695,6 +3696,17 @@ with tab4:
                         ])) or _cfg_raw[:8000]
                     _review_ctx = _review_ctx[:10000]
 
+                    _ssl_note = (
+                        "5. SSLインスペクション設定: firewall ssl-ssh-profileブロックがあれば、"
+                        "どのプロトコル(https/ftps/imaps/pop3s/smtps/ssh)を検査対象にしているか、"
+                        "証明書検証失敗時(expired/revoked/untrusted-server-cert)の挙動(allow/block)を"
+                        "確認してください。SSLインスペクション自体には個別のログON/OFF項目は無く、"
+                        "それを適用しているfirewall policy側のlogtraffic設定(all/utm/disable)で"
+                        "ログに出るかどうかが決まる点に注意し、対象policyのlogtrafficが"
+                        "disableになっていないか（disableだとSSLインスペクションの検知結果がログに"
+                        "残らない）を明示的に指摘してください。\n"
+                        if _cfg_vendor == "FortiGate" else ""
+                    )
                     with st.spinner("LLMがコンフィグをレビュー中..."):
                         _cfg_review_text, _cfg_review_model = analyzer.ask_llm(
                             f"あなたはネットワーク/セキュリティの専門家です。"
@@ -3704,6 +3716,7 @@ with tab4:
                             "2. ベストプラクティスからの逸脱\n"
                             "3. 冗長化/可用性の懸念\n"
                             "4. 推奨される具体的な対応（優先度: 重大/中/軽微を付けて）\n"
+                            f"{_ssl_note}"
                             "抜粋のみで全体が見えない場合はその旨も述べてください。",
                             _review_ctx,
                             st.session_state.get("llm_mode", "auto"),
