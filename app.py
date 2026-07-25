@@ -3605,7 +3605,7 @@ with tab4:
         with c3:
             cfg_vendor = st.selectbox("ベンダー", [
                 "Cisco IOS/IOS-XE", "Cisco NX-OS", "富士通 Si-R",
-                "富士通 IPCOM", "富士通 SR-S",
+                "富士通 IPCOM", "富士通 SR-S", "FortiGate",
                 "APRESIA", "RHEL/Linux", "Windows", "その他"
             ])
 
@@ -3666,6 +3666,58 @@ with tab4:
                 if full_cfg.get("notes"):
                     st.markdown(f"**📝 補足メモ:** {full_cfg['notes']}")
                 st.caption(f"登録日時: {cfg.get('uploaded_at','')[:19]}")
+
+                # ── 🤖 AI設定レビュー ──
+                st.markdown("---")
+                _cfg_ai_ok = (analyzer.check_claude_available() or analyzer.check_gemini_available()
+                             or analyzer.check_groq_available() or analyzer.check_ollama_available())
+                _cfg_review_btn = st.button(
+                    "🤖 AI設定レビュー実行", key=f"cfg_review_{cfg['ip']}",
+                    disabled=not _cfg_ai_ok, type="primary")
+                if not _cfg_ai_ok:
+                    st.caption("AI設定レビューはサイドバーの「🔑 APIキー設定」でいずれかのLLMを設定してから使用してください。")
+
+                if _cfg_review_btn:
+                    _cfg_vendor = full_cfg.get("vendor", "")
+                    _cfg_raw = full_cfg.get("config_text", "") or ""
+                    if _cfg_vendor == "FortiGate":
+                        _review_ctx = "\n\n".join(filter(None, [
+                            full_cfg.get("interfaces_summary", ""),
+                            full_cfg.get("routing_summary", ""),
+                            db._extract_fortigate_block(_cfg_raw, "system admin"),
+                            db._extract_fortigate_block(_cfg_raw, "firewall policy"),
+                            db._extract_fortigate_block(_cfg_raw, "vpn ipsec phase1-interface"),
+                        ])) or _cfg_raw[:8000]
+                    else:
+                        _review_ctx = "\n\n".join(filter(None, [
+                            full_cfg.get("interfaces_summary", ""),
+                            full_cfg.get("routing_summary", ""),
+                        ])) or _cfg_raw[:8000]
+                    _review_ctx = _review_ctx[:10000]
+
+                    with st.spinner("LLMがコンフィグをレビュー中..."):
+                        _cfg_review_text, _cfg_review_model = analyzer.ask_llm(
+                            f"あなたはネットワーク/セキュリティの専門家です。"
+                            f"{_cfg_vendor or '機器'}のコンフィグ抜粋を読み、以下の観点で日本語でレビュー"
+                            "してください:\n"
+                            "1. セキュリティ上の懸念点（管理アクセス制限・不要サービス・緩すぎるルール等）\n"
+                            "2. ベストプラクティスからの逸脱\n"
+                            "3. 冗長化/可用性の懸念\n"
+                            "4. 推奨される具体的な対応（優先度: 重大/中/軽微を付けて）\n"
+                            "抜粋のみで全体が見えない場合はその旨も述べてください。",
+                            _review_ctx,
+                            st.session_state.get("llm_mode", "auto"),
+                            max_tokens=1500,
+                        )
+                    st.session_state[f"_cfg_review_{cfg['ip']}"] = (_cfg_review_text, _cfg_review_model)
+
+                _cfg_review_cached = st.session_state.get(f"_cfg_review_{cfg['ip']}")
+                if _cfg_review_cached and _cfg_review_cached[0]:
+                    with st.expander(f"🤖 AIレビュー結果（{_cfg_review_cached[1]}）", expanded=True):
+                        st.markdown(_cfg_review_cached[0])
+                elif _cfg_review_cached:
+                    st.error(analyzer.LAST_LLM_ERROR or "レビューを取得できませんでした。")
+
                 if st.button("🗑️ このコンフィグを削除", key=f"del_cfg_{cfg['ip']}"):
                     db.delete_device_config(cfg["ip"])
                     st.success("削除しました")

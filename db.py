@@ -205,8 +205,16 @@ def clear_logs():
 # デバイスコンフィグ管理
 # ─────────────────────────────────────────
 def save_device_config(ip, config_text, hostname="", vendor="", notes=""):
-    interfaces_summary = _extract_interfaces(config_text)
-    routing_summary = _extract_routing(config_text)
+    if vendor == "FortiGate":
+        interfaces_summary = _extract_fortigate_block(config_text, "system interface")
+        routing_summary = "\n\n".join(filter(None, [
+            _extract_fortigate_block(config_text, "router static"),
+            _extract_fortigate_block(config_text, "router ospf"),
+            _extract_fortigate_block(config_text, "router bgp"),
+        ]))
+    else:
+        interfaces_summary = _extract_interfaces(config_text)
+        routing_summary = _extract_routing(config_text)
     with get_conn() as conn:
         conn.execute("""
             INSERT INTO device_configs (ip, hostname, vendor, config_text, interfaces_summary, routing_summary, uploaded_at, notes)
@@ -237,6 +245,22 @@ def delete_device_config(ip: str):
     with get_conn() as conn:
         conn.execute("DELETE FROM device_configs WHERE ip=?", (ip,))
         conn.commit()
+
+def _extract_fortigate_block(config_text: str, section: str, max_chars: int = 6000) -> str:
+    """
+    FortiGateのconfig <section> ... end ブロックを抽出する（簡易）。
+    FortiGateはCisco IOSと違い、config/edit/set/next/end のブロック構文なので
+    _extract_interfaces/_extract_routing（Cisco想定の正規表現）では拾えない。
+    """
+    pattern = re.compile(
+        rf"^config\s+{re.escape(section)}\s*$.*?^end\s*$",
+        re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    m = pattern.search(config_text)
+    if not m:
+        return ""
+    return m.group(0)[:max_chars]
+
 
 def _extract_interfaces(config_text: str) -> str:
     """コンフィグからインターフェース部分の概要を抽出（簡易）"""
