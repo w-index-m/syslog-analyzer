@@ -477,6 +477,93 @@ if "snmp_trap_port" not in st.session_state:
 if "last_log_count" not in st.session_state:
     st.session_state.last_log_count = 0
 
+# ── show logging 出力を一括取り込み ──────────────────────────
+# サイドバー内(show logging貼り付け)から使われるため、サイドバー本体より前に定義する。
+import re as _re_ingest
+
+# 先頭のシーケンス番号（例 "000123: "）を除去
+_SHOW_LOG_SEQ_RE = _re_ingest.compile(r"^\s*\d{1,6}:\s+")
+
+# ノイズ行（show logging のステータス/バナー/プロンプト/コマンドエコー）→ 取り込まない
+_SHOW_LOG_NOISE_RE = _re_ingest.compile(
+    r"^(?:"
+    r".*[#>]\s*(?:sh(?:ow)?)\s+logg|"                 # コマンドエコー "Switch#show logging"
+    r"\s*\S+[#>]\s*$|"                                 # プロンプトのみ "Switch#"
+    r"\s*(?:syslog logging|console logging|monitor logging|buffer logging|"
+    r"exception logging|count and timestamp|persistent logging|trap logging|"
+    r"file logging|logging source-interface|logging to|logging exception|"
+    r"logging message counter|logging for|log buffer\s*\(|origin-id|esm:|"
+    r"no active filter|no inactive filter|active filter modules|"
+    r"filtering disabled|no (?:in)?active message discriminator|"
+    r"message discriminator|copyright \(c\)|compiled |cisco ios software|"
+    r"technical support:|system image file|rom:\s|bootldr:|"
+    r"\s*members?\s|\d+ messages? (?:logged|dropped|rate-limited))"
+    r")", _re_ingest.IGNORECASE)
+
+# 実ログ行らしさの判定（ホワイトリスト）
+_MNEMONIC_RE = _re_ingest.compile(r"%[A-Za-z0-9_]+-\d+-[A-Za-z0-9_]+")
+_TS_CISCO_RE = _re_ingest.compile(r"^\*?\s*\w{3}\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2}")
+_TS_ISO_RE   = _re_ingest.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}[ T]\d{1,2}:\d{2}")
+_PRI_RE      = _re_ingest.compile(r"^<\d{1,3}>")
+# 富士通 show logging syslog 形式（date host machine : process: ...）
+_FJ_PROC_RE  = _re_ingest.compile(r"\b[a-z][\w\-]*:\s")
+# FortiGate CLI(execute log display等)の生ログ形式（PRIヘッダ無しで date=/time= から始まる）
+_FGT_KV_RE   = _re_ingest.compile(r"^date=\d{4}-\d{2}-\d{2}\s+time=\d{2}:\d{2}:\d{2}")
+
+
+def _looks_like_log(line: str) -> bool:
+    """実際のログ行（イベント）らしいか。ステータス/バナー行を除外する。"""
+    if _MNEMONIC_RE.search(line):      # Cisco %FAC-N-MNEM
+        return True
+    if _PRI_RE.match(line):            # syslog PRI <NNN>
+        return True
+    if _TS_CISCO_RE.match(line):       # "Jul  4 00:54:39" / "*Mar 1 00:00:18"
+        return True
+    if _TS_ISO_RE.match(line):         # "2026/07/03 10:00:00"（富士通等）
+        return True
+    if _FGT_KV_RE.match(line):         # "date=2026-07-04 time=10:00:00 devname=..."（FortiGate）
+        return True
+    return False
+
+
+def _ingest_show_logging(text: str, source_ip: str) -> dict:
+    """
+    `show logging` / `show logging syslog` の貼り付け出力を1行ずつ解析し DB 取り込み。
+    ステータス行・バナー・プロンプト・コマンドエコーは自動除外し、実ログ行のみ取り込む。
+    戻り値: {"total", "skipped", "by_vendor"}
+    """
+    total = 0
+    skipped = 0
+    by_vendor: dict[str, int] = {}
+    ids: list = []
+    for raw_line in (text or "").splitlines():
+        line = raw_line.rstrip()
+        if not line.strip():
+            continue
+        # 先頭シーケンス番号を除去
+        line = _SHOW_LOG_SEQ_RE.sub("", line).strip()
+        if not line:
+            continue
+        # ノイズ行は除外
+        if _SHOW_LOG_NOISE_RE.search(line):
+            skipped += 1
+            continue
+        # 実ログ行に見えないものは除外（未分類ゴミの取り込み防止）
+        if not _looks_like_log(line):
+            skipped += 1
+            continue
+        try:
+            parsed = parse_syslog(line, source_ip)
+            _new_id = db.insert_log(source_ip, line, parsed)
+            if _new_id:
+                ids.append(_new_id)
+            v = parsed.get("vendor", "不明")
+            by_vendor[v] = by_vendor.get(v, 0) + 1
+            total += 1
+        except Exception:
+            skipped += 1
+    return {"total": total, "skipped": skipped, "by_vendor": by_vendor, "ids": ids}
+
 # ─────────────────────────────────────────
 # サイドバー
 # ─────────────────────────────────────────
@@ -1231,88 +1318,6 @@ def _get_config_context(ip: str) -> str:
     if cfg.get("notes"):
         parts.append("【補足メモ】\n" + cfg["notes"])
     return "\n\n".join(parts)
-
-# ── show logging 出力を一括取り込み ──────────────────────────
-import re as _re_ingest
-
-# 先頭のシーケンス番号（例 "000123: "）を除去
-_SHOW_LOG_SEQ_RE = _re_ingest.compile(r"^\s*\d{1,6}:\s+")
-
-# ノイズ行（show logging のステータス/バナー/プロンプト/コマンドエコー）→ 取り込まない
-_SHOW_LOG_NOISE_RE = _re_ingest.compile(
-    r"^(?:"
-    r".*[#>]\s*(?:sh(?:ow)?)\s+logg|"                 # コマンドエコー "Switch#show logging"
-    r"\s*\S+[#>]\s*$|"                                 # プロンプトのみ "Switch#"
-    r"\s*(?:syslog logging|console logging|monitor logging|buffer logging|"
-    r"exception logging|count and timestamp|persistent logging|trap logging|"
-    r"file logging|logging source-interface|logging to|logging exception|"
-    r"logging message counter|logging for|log buffer\s*\(|origin-id|esm:|"
-    r"no active filter|no inactive filter|active filter modules|"
-    r"filtering disabled|no (?:in)?active message discriminator|"
-    r"message discriminator|copyright \(c\)|compiled |cisco ios software|"
-    r"technical support:|system image file|rom:\s|bootldr:|"
-    r"\s*members?\s|\d+ messages? (?:logged|dropped|rate-limited))"
-    r")", _re_ingest.IGNORECASE)
-
-# 実ログ行らしさの判定（ホワイトリスト）
-_MNEMONIC_RE = _re_ingest.compile(r"%[A-Za-z0-9_]+-\d+-[A-Za-z0-9_]+")
-_TS_CISCO_RE = _re_ingest.compile(r"^\*?\s*\w{3}\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2}")
-_TS_ISO_RE   = _re_ingest.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}[ T]\d{1,2}:\d{2}")
-_PRI_RE      = _re_ingest.compile(r"^<\d{1,3}>")
-# 富士通 show logging syslog 形式（date host machine : process: ...）
-_FJ_PROC_RE  = _re_ingest.compile(r"\b[a-z][\w\-]*:\s")
-
-
-def _looks_like_log(line: str) -> bool:
-    """実際のログ行（イベント）らしいか。ステータス/バナー行を除外する。"""
-    if _MNEMONIC_RE.search(line):      # Cisco %FAC-N-MNEM
-        return True
-    if _PRI_RE.match(line):            # syslog PRI <NNN>
-        return True
-    if _TS_CISCO_RE.match(line):       # "Jul  4 00:54:39" / "*Mar 1 00:00:18"
-        return True
-    if _TS_ISO_RE.match(line):         # "2026/07/03 10:00:00"（富士通等）
-        return True
-    return False
-
-
-def _ingest_show_logging(text: str, source_ip: str) -> dict:
-    """
-    `show logging` / `show logging syslog` の貼り付け出力を1行ずつ解析し DB 取り込み。
-    ステータス行・バナー・プロンプト・コマンドエコーは自動除外し、実ログ行のみ取り込む。
-    戻り値: {"total", "skipped", "by_vendor"}
-    """
-    total = 0
-    skipped = 0
-    by_vendor: dict[str, int] = {}
-    ids: list = []
-    for raw_line in (text or "").splitlines():
-        line = raw_line.rstrip()
-        if not line.strip():
-            continue
-        # 先頭シーケンス番号を除去
-        line = _SHOW_LOG_SEQ_RE.sub("", line).strip()
-        if not line:
-            continue
-        # ノイズ行は除外
-        if _SHOW_LOG_NOISE_RE.search(line):
-            skipped += 1
-            continue
-        # 実ログ行に見えないものは除外（未分類ゴミの取り込み防止）
-        if not _looks_like_log(line):
-            skipped += 1
-            continue
-        try:
-            parsed = parse_syslog(line, source_ip)
-            _new_id = db.insert_log(source_ip, line, parsed)
-            if _new_id:
-                ids.append(_new_id)
-            v = parsed.get("vendor", "不明")
-            by_vendor[v] = by_vendor.get(v, 0) + 1
-            total += 1
-        except Exception:
-            skipped += 1
-    return {"total": total, "skipped": skipped, "by_vendor": by_vendor, "ids": ids}
 
 
 # ── show logging の LLM 詳細解析（config / interface status 相関対応） ──
