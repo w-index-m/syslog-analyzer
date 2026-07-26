@@ -4570,6 +4570,61 @@ _DANGEROUS_EXT_RE = __import__("re").compile(
     r"(?i)\.(exe|scr|pif|com|bat|cmd|js|jse|vbs|vbe|wsf|wsh|hta|jar|ps1|lnk|"
     r"dll|cpl|msi|reg|docm|xlsm|pptm|iso|img|ace)$")
 
+# ── メールヘッダ(件名/From/Reply-To)からのフィッシング/なりすまし兆候検査 ──
+_URGENCY_KEYWORDS_RE = __import__("re").compile(
+    r"(?i)(至急|緊急|本日中|即対応|要確認|パスワード変更|アカウント停止|凍結|"
+    r"urgent|immediate action|verify your account|account.{0,10}suspend|"
+    r"action required|invoice|payment (?:overdue|required)|請求書|支払い期限|未払い)")
+
+_FREEMAIL_DOMAINS = {
+    "gmail.com", "yahoo.com", "yahoo.co.jp", "outlook.com", "hotmail.com",
+    "icloud.com", "aol.com", "mail.ru", "proton.me", "protonmail.com",
+}
+
+_BRAND_DISPLAY_KEYWORDS_RE = __import__("re").compile(
+    r"(?i)(support|admin|security|it\s*department|helpdesk|情報システム|"
+    r"サポート|管理者|セキュリティ|人事部|経理部)")
+
+
+def _extract_email_domain(addr: str) -> str:
+    m = re.search(r"@([\w\.-]+)", addr or "")
+    return m.group(1).lower() if m else ""
+
+
+def _check_email_headers(msg) -> list:
+    """メールヘッダ(件名/From/Reply-To)からフィッシング/なりすましの兆候を検査する。"""
+    import email.utils as _eutils
+    verdicts = []
+    subject = str(msg.get("Subject", ""))
+    from_hdr = str(msg.get("From", ""))
+    reply_to_hdr = str(msg.get("Reply-To", ""))
+
+    if _URGENCY_KEYWORDS_RE.search(subject):
+        verdicts.append({"severity": "medium", "type": "件名の緊急性訴求",
+                         "detail": f"件名に緊急性を煽る語句を検出（フィッシングでよく使われる手口）: "
+                                   f"{subject[:80]}"})
+
+    display_name, from_addr = _eutils.parseaddr(from_hdr)
+    _, reply_addr = _eutils.parseaddr(reply_to_hdr)
+    from_domain = _extract_email_domain(from_addr)
+    reply_domain = _extract_email_domain(reply_addr)
+
+    if reply_domain and from_domain and reply_domain != from_domain:
+        verdicts.append({"severity": "high", "type": "From/Reply-To不一致",
+                         "detail": f"送信元(From: {from_domain})と返信先(Reply-To: {reply_domain})の"
+                                   "ドメインが異なります — なりすまし/フィッシングの可能性"})
+
+    if from_domain and _SUSPICIOUS_TLD_RE.search(from_domain):
+        verdicts.append({"severity": "medium", "type": "不審なTLD",
+                         "detail": f"送信元ドメインが悪用されやすいTLDです: {from_domain}"})
+
+    if (display_name and _BRAND_DISPLAY_KEYWORDS_RE.search(display_name)
+            and from_domain in _FREEMAIL_DOMAINS):
+        verdicts.append({"severity": "high", "type": "表示名なりすまし疑い",
+                         "detail": f"表示名「{display_name}」は組織/部署を装っていますが、"
+                                   f"送信元は個人向け無料メールドメイン({from_domain})です"})
+    return verdicts
+
 
 def _extract_rfc822_messages(blob: bytes) -> list:
     """メールストリームから RFC822 メッセージ本体（ヘッダ+MIME）を抽出する。"""
@@ -4648,6 +4703,8 @@ def scan_email_attachments(data: bytes = b"", streams: list = None) -> list:
             except Exception:
                 continue
             subject = str(msg.get("Subject", ""))[:120]
+            header_verdicts = _check_email_headers(msg)
+            attachment_found = False
             for part in msg.walk():
                 if part.is_multipart():
                     continue
@@ -4655,13 +4712,14 @@ def scan_email_attachments(data: bytes = b"", streams: list = None) -> list:
                 cdisp = part.get_content_disposition()
                 if not fname and cdisp != "attachment":
                     continue
+                attachment_found = True
                 try:
                     payload = part.get_payload(decode=True) or b""
                 except Exception:
                     payload = b""
                 if not payload:
                     continue
-                verdicts = _check_attachment(fname or "(名前なし)", payload)
+                verdicts = _check_attachment(fname or "(名前なし)", payload) + header_verdicts
                 if verdicts:
                     _worst = min(verdicts, key=lambda v: {"critical":0,"high":1,"medium":2,"low":3}.get(v["severity"],9))
                     results.append({
@@ -4670,6 +4728,15 @@ def scan_email_attachments(data: bytes = b"", streams: list = None) -> list:
                         "dst_port": s["dst_port"], "severity": _worst["severity"],
                         "verdicts": verdicts, "data": payload,
                     })
+            # 添付が無くても、件名/ヘッダーだけでフィッシング兆候があれば報告する
+            if not attachment_found and header_verdicts:
+                _worst = min(header_verdicts, key=lambda v: {"critical":0,"high":1,"medium":2,"low":3}.get(v["severity"],9))
+                results.append({
+                    "filename": "(添付なし)", "subject": subject,
+                    "size": 0, "src": s["src"], "dst": s["dst"],
+                    "dst_port": s["dst_port"], "severity": _worst["severity"],
+                    "verdicts": header_verdicts, "data": b"",
+                })
     results.sort(key=lambda x: {"critical":0,"high":1,"medium":2,"low":3}.get(x["severity"],9))
     return results
 
