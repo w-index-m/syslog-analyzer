@@ -6044,12 +6044,19 @@ with tab_pcap:
                 if _tls_sessions:
                     st.markdown("**TLS セッション一覧（SNI付き）**")
                     df_tls = pd.DataFrame(_tls_sessions)
-                    _tls_cols = ["timestamp", "client", "server", "server_port", "sni", "tls_version"]
+                    if "note" not in df_tls.columns:
+                        df_tls["note"] = ""
+                    df_tls["note"] = df_tls["note"].fillna("")
+                    _tls_cols = ["timestamp", "client", "server", "server_port", "sni", "tls_version", "note"]
                     df_tls = df_tls[[c for c in _tls_cols if c in df_tls.columns]].rename(columns={
                         "timestamp": "時刻", "client": "クライアントIP", "server": "サーバーIP",
                         "server_port": "Port", "sni": "接続先ホスト名(SNI)", "tls_version": "TLSバージョン",
+                        "note": "備考",
                     })
                     st.dataframe(df_tls, width='stretch', hide_index=True)
+                    if (df_tls["備考"] != "").any():
+                        st.caption("⚠️ の行は標準的なTLSポート以外での通信です。プロキシ経由や、"
+                                   "ファイアウォールのポート制限を回避するためのポート偽装の可能性があります。")
                 if _tls_alerts:
                     st.markdown("**⚠️ TLS Alert 一覧**")
                     df_ta = pd.DataFrame(_tls_alerts)

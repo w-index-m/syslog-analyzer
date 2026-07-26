@@ -2298,6 +2298,32 @@ def analyze_pcap(data: bytes) -> dict:
                             if ch and ch.get("sni"):
                                 _hs["sni"] = ch["sni"]
 
+                    elif data_len > 0:
+                        # ── 非標準ポートのTLS検知（プロキシ経由/ポート偽装等） ──
+                        # _parse_tls_client_hello は先頭バイトで即座に非TLSを弾くため、
+                        # 全パケットに対して試みても軽量。443等の固定ポート以外で
+                        # プロキシがTLSを中継していたり、C2がポートを偽装していても
+                        # ClientHelloの中身(SNI)を拾える。
+                        try:
+                            _ch_np = _parse_tls_client_hello(bytes(tcp.data) if tcp.data else b"")
+                        except Exception:
+                            _ch_np = None
+                        if _ch_np:
+                            _sni_np = _ch_np.get("sni") or ""
+                            if _sni_np:
+                                tls_unique_sites.add(_sni_np)
+                                _record_domain(_sni_np, src, "TLS-SNI")
+                            result["tls_sessions"].append({
+                                "timestamp":   _ts_str(ts),
+                                "client":      src,
+                                "server":      dst,
+                                "server_port": dport,
+                                "sni":         _sni_np,
+                                "tls_version": _ch_np.get("tls_version", ""),
+                                "note":        "⚠️非標準ポート（プロキシ経由/ポート偽装の可能性）",
+                            })
+                            result["tls_summary"]["sessions"] += 1
+
                     # ── プロトコル不明時: ID/session キーワード検索 ──
                     # HTTPレスポンス/TLS(暗号化)以外の平文ペイロードが対象。
                     if data_len > 0 and not (sport in TLS_PORTS or dport in TLS_PORTS):
