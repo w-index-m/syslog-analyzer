@@ -4626,6 +4626,98 @@ def _check_email_headers(msg) -> list:
     return verdicts
 
 
+# ── メール本文中のリンク先URLの詐欺/フィッシング兆候検査 ──
+_URL_IN_BODY_RE = re.compile(r"https?://[^\s\"'<>\)]+", re.IGNORECASE)
+_URL_SHORTENERS = {
+    "bit.ly", "tinyurl.com", "t.co", "goo.gl", "is.gd", "ow.ly", "buff.ly",
+    "rebrand.ly", "cutt.ly", "shorturl.at", "rb.gy", "lnkd.in",
+}
+# フィッシングで偽装されやすい主要ブランド（大文字小文字区別なしでホスト名に含まれるか判定）
+_IMPERSONATED_BRANDS = (
+    "paypal", "amazon", "apple", "microsoft", "google", "facebook",
+    "instagram", "netflix", "chase", "wellsfargo", "dhl", "fedex", "ups",
+    "docusign", "office365", "outlook", "icloud", "rakuten", "mizuho",
+    "smbc", "jcb", "yahoo",
+)
+
+
+def _root_domain(hostname: str) -> str:
+    parts = (hostname or "").split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else (hostname or "")
+
+
+def _check_link_url(url: str) -> list:
+    """メール本文等に含まれるリンク先URLの詐欺/フィッシング兆候を検査する。"""
+    verdicts = []
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return verdicts
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return verdicts
+
+    if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", host):
+        verdicts.append({"severity": "high", "type": "IPアドレス直リンク",
+                         "detail": f"ドメイン名でなくIPアドレスへの直接リンクです: {url[:100]}"})
+
+    if host in _URL_SHORTENERS:
+        verdicts.append({"severity": "medium", "type": "URL短縮サービス",
+                         "detail": f"URL短縮サービス経由のリンクです（実際の遷移先が隠されています）: {host}"})
+
+    if "xn--" in host:
+        verdicts.append({"severity": "high", "type": "Punycode/同形異義字ドメイン",
+                         "detail": f"Punycodeエンコードされたドメイン（見た目が似た別文字を使った"
+                                   f"なりすましドメインの可能性）: {host}"})
+
+    netloc = url.split("://", 1)[-1].split("/")[0]
+    if "@" in netloc:
+        verdicts.append({"severity": "high", "type": "URL内@トリック",
+                         "detail": f"URLに@記号が含まれています（見た目上のドメインと実際の遷移先が"
+                                   f"異なる古典的な偽装手口の可能性）: {url[:100]}"})
+
+    root = _root_domain(host)
+    for brand in _IMPERSONATED_BRANDS:
+        if brand in host and brand not in root:
+            verdicts.append({"severity": "critical", "type": "ブランドなりすまし疑い",
+                             "detail": f"「{brand}」を含みますが実際のドメインは{root}です"
+                                       f"（なりすましフィッシングの可能性）: {host}"})
+            break
+
+    if _SUSPICIOUS_TLD_RE.search(host):
+        verdicts.append({"severity": "medium", "type": "不審なTLD",
+                         "detail": f"リンク先が悪用されやすいTLDです: {host}"})
+
+    if _is_dga_like(host):
+        verdicts.append({"severity": "medium", "type": "DGAらしきドメイン",
+                         "detail": f"リンク先が高エントロピーなランダムドメインです: {host}"})
+
+    return verdicts
+
+
+def _extract_body_urls(msg) -> list:
+    """メールのtext/plain・text/htmlパートからURLを抽出する（重複除去済み）。"""
+    urls = []
+    seen = set()
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        ctype = part.get_content_type()
+        if ctype not in ("text/plain", "text/html"):
+            continue
+        try:
+            body = part.get_payload(decode=True) or b""
+            text = body.decode(part.get_content_charset() or "utf-8", errors="ignore")
+        except Exception:
+            continue
+        for m in _URL_IN_BODY_RE.finditer(text):
+            u = m.group(0).rstrip(".,;:!?")
+            if u not in seen:
+                seen.add(u)
+                urls.append(u)
+    return urls
+
+
 def _extract_rfc822_messages(blob: bytes) -> list:
     """メールストリームから RFC822 メッセージ本体（ヘッダ+MIME）を抽出する。"""
     msgs = []
@@ -4704,6 +4796,8 @@ def scan_email_attachments(data: bytes = b"", streams: list = None) -> list:
                 continue
             subject = str(msg.get("Subject", ""))[:120]
             header_verdicts = _check_email_headers(msg)
+            for _url in _extract_body_urls(msg)[:20]:   # 1通あたり最大20件まで検査
+                header_verdicts += _check_link_url(_url)
             attachment_found = False
             for part in msg.walk():
                 if part.is_multipart():
