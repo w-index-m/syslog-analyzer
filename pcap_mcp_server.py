@@ -2,9 +2,11 @@
 Wireshark/pcap解析 MCPサーバー
 
 このリポジトリのpcap_analyzer.py（ICMP redirect・TCP異常・DNS/DHCP/TLS/IPsec/
-OSPF・ワーム横展開/ビーコニング等の振る舞い検知・脅威インテリジェンス・
-生成AIサービス宛通信検知など）をMCPツールとして公開し、Claude Desktop等の
-MCPクライアントから、ローカルのpcapファイルを直接指定して解析できるようにする。
+OSPF・横展開(PsExec/WinRM/RDP/VNC/DCOM/SSH/Pass-the-Hash/Lateral Tool Transfer)/
+ビーコニング等の振る舞い検知・脅威インテリジェンス・GeoIP/ASN・クラウド判定・
+生成AIサービス宛通信検知・メールのフィッシング/ランサムウェア配布検知など）を
+MCPツールとして公開し、Claude Desktop等のMCPクライアントから、ローカルのpcap
+ファイルを直接指定して解析できるようにする。
 
 セットアップ:
     pip install mcp
@@ -55,7 +57,7 @@ _TRIM_FIELDS = [
     "tls_handshakes", "dhcp_issues", "dns_issues", "syslog_packets",
     "unknown_proto_hints", "session_id_correlations", "voip_streams",
     "icmp_redirects", "rip_packets", "arp_anomalies", "quic_sessions",
-    "industrial_alerts",
+    "industrial_alerts", "lateral_movement_techniques", "asn_hosts",
 ]
 
 
@@ -63,15 +65,19 @@ _TRIM_FIELDS = [
 def analyze_pcap(file_path: str, max_items_per_category: int = 20) -> str:
     """
     pcap/pcapngファイルを総合解析する（ICMP redirect・TCP異常・ポートスキャン/DDoS・
-    ワーム横展開/ビーコニング等の振る舞い検知・DNS/DHCP/TLS/IPsec/OSPF・
-    脅威インテリジェンス照合・GeoIP・生成AIサービス宛通信検知など）。
+    横展開(PsExec/WinRM/RDP/VNC/DCOM/SSH/Pass-the-Hash/Lateral Tool Transfer)/
+    ビーコニング等の振る舞い検知・DNS/DHCP/TLS/IPsec/OSPF・脅威インテリジェンス照合・
+    GeoIP/ASN・クラウド判定・生成AIサービス宛通信検知など）。
 
     「このpcapにウイルス/マルウェアが入っていそうか」「不審な通信はないか」
-    「侵害の痕跡(IoC)はあるか」といった曖昧な質問にもこのツールで答えられる:
-    ワーム横展開(worm_propagation)・C2ビーコニング(beaconing)・既知の悪性
-    IP/ドメイン照合(threat_intel_hits)・データ持ち出し(data_exfil)・
-    不審な持ち出し先アクセス(suspicious_destinations)・ホストリスクスコア
+    「侵害の痕跡(IoC)はあるか」「ランサムウェアの兆候はあるか」といった曖昧な
+    質問にもこのツールで答えられる: 横展開8手口(lateral_movement_techniques)・
+    C2ビーコニング(beaconing)・既知の悪性IP/ドメイン照合(threat_intel_hits)・
+    データ持ち出し(data_exfil)・不審な持ち出し先アクセス(suspicious_destinations)・
+    監視対象国/クラウド事業者(geo_alerts/asn_hosts)・ホストリスクスコア
     (host_risk)・シグネチャ型IPS検知(ips_alerts)を全て含む。
+    メール本文中の添付ファイル/ヘッダー/リンク先のフィッシング検知は含まれない
+    ため、必要なら scan_pcap_email_phishing を別途呼ぶこと。
 
     Args:
         file_path: ローカルのpcap/pcapng/zip/gzファイルへの絶対パス
@@ -92,6 +98,39 @@ def analyze_pcap(file_path: str, max_items_per_category: int = 20) -> str:
             trimmed[field] = _trim_list(trimmed[field], max_items_per_category)
 
     return json.dumps(trimmed, ensure_ascii=False, default=str)
+
+
+@mcp.tool()
+def scan_pcap_email_phishing(file_path: str, max_matches: int = 20) -> str:
+    """
+    pcap内のメール通信(SMTP/POP3/IMAP)から、フィッシング/ランサムウェア配布
+    メールの兆候を検知する。以下3方向を検査する:
+      - 添付ファイルの中身（EICAR/実行ファイル(PE/ELF)/危険な拡張子/
+        Officeマクロ/シグネチャ一致）
+      - ヘッダー/件名（緊急性を煽る語句、From/Reply-Toのドメイン不一致、
+        送信元の不審なTLD、表示名なりすまし）
+      - 本文中のリンク先URL（IPアドレス直リンク、URL短縮サービス、
+        Punycode/同形異義字ドメイン、URL内の@トリック、ブランドなりすまし、
+        不審なTLD、DGAらしきドメイン）
+
+    添付が無いリンク型フィッシングも検知対象（添付の有無に関わらず判定する）。
+    analyze_pcap には含まれないため、メールの内容を確認したい場合はこちらを呼ぶこと。
+
+    Args:
+        file_path: ローカルのpcap/pcapng/zip/gzファイルへの絶対パス
+        max_matches: 返す最大件数
+    """
+    try:
+        data = _load_pcap_bytes(file_path)
+        results = pcap_analyzer.scan_email_attachments(data=data)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+    # 添付の生バイト列はMCPクライアントへ返す必要が無い（サイズ肥大化・無意味な
+    # バイト列表示を避けるため除外し、サイズ等のメタ情報のみ残す）
+    cleaned = [{k: v for k, v in r.items() if k != "data"} for r in results]
+    return json.dumps({"total": len(cleaned), "shown": cleaned[:max_matches]},
+                       ensure_ascii=False, default=str)
 
 
 @mcp.tool()
