@@ -1,10 +1,23 @@
-# 🛰️ Syslog AI アナライザー
+# 🛰️ Syslog AI アナライザー（NetScore AI）
+
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-Live%20Demo-FF4B4B?logo=streamlit&logoColor=white)](https://netscore-ai.streamlit.app/)
+[![IPS Signatures](https://img.shields.io/badge/IPS%20Signatures-1600%2B-informational)](ips_signatures.json)
 
 ネットワークの **監視・ログ解析・パケット解析** を、AI（LLM）による日本語診断つきで行えるオールインワンツールです。
+FortiGate/Palo Alto/CiscoなどのUTM/IPSログから侵入検知・マルウェア・DoSを自動サマリー、pcapからは横展開(Lateral Movement)8手口・C2ビーコニング・フィッシングメール・非標準ポートTLSまで検知します。
 実機がなくても「デモシミュレーター」で全機能を試せます。
+
+### 🌐 今すぐブラウザで試す
+
+**👉 https://netscore-ai.streamlit.app/**（インストール不要・登録不要）
+
+> クラウド版はデモシミュレーター・pcap/ログのアップロード解析が中心です（実機からのsyslog/SNMP受信はローカル起動が必要）。ローカルで動かして自分のネットワークを監視したい場合は、下記の[インストール手順](#インストール手順)へ。
 
 > 📘 **使い方の詳細は [docs/使い方ガイド.md](docs/使い方ガイド.md) を参照してください。**
 > 各タブの操作、パケット解析・CTF機能、Slack通知、AIエンジンの選び方などをまとめています。
+
+役に立ったら ⭐ **Star** をいただけると嬉しいです。
 
 ## できること（概要）
 
