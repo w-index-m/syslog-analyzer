@@ -1,5 +1,7 @@
 # 🛰️ Syslog AI アナライザー（NetScore AI）
 
+🌐 [English README is here](README.en.md) / 日本語（このページ）
+
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-Live%20Demo-FF4B4B?logo=streamlit&logoColor=white)](https://netscore-ai.streamlit.app/)
 [![IPS Signatures](https://img.shields.io/badge/IPS%20Signatures-1600%2B-informational)](ips_signatures.json)
