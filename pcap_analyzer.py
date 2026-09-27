@@ -1009,6 +1009,176 @@ def _compute_ja3s(payload: bytes) -> dict | None:
         return None
 
 
+# JA4のTLSバージョンコード（FoxIO仕様: https://github.com/FoxIO-LLC/ja4）
+_JA4_VERSION_CODES = {
+    0x0304: "13", 0x0303: "12", 0x0302: "11", 0x0301: "10", 0x0300: "s3",
+    0x0002: "s2", 0x0100: "10",  # 一部実装のSSL2.0互換値
+}
+_JA4_SNI_EXT = 0x0000
+_JA4_ALPN_EXT = 0x0010
+_JA4_SIGALG_EXT = 0x000d
+
+
+def _ja4_alpn_code(alpn_first: str) -> str:
+    """ALPNの最初の値から先頭・末尾文字を取り出す（非英数字はhex表記）。"""
+    if not alpn_first:
+        return "00"
+    first, last = alpn_first[0], alpn_first[-1]
+    out = ""
+    for ch in (first, last):
+        out += ch if ch.isalnum() and ch.isascii() else format(ord(ch) & 0xff, "02x")
+    return out[:2] if len(out) >= 2 else (out + "0")[:2]
+
+
+def _compute_ja4(payload: bytes) -> dict | None:
+    """
+    TLS ClientHello から JA4 フィンガープリントを計算する（FoxIO, 2023年発表）。
+    JA3と異なりGREASE値除外に加え、暗号スイート/拡張を数値ソートしてから
+    SHA256（先頭12桁）でハッシュ化するため、クライアント実装ごとの拡張順の
+    ランダム化（Chrome等）に影響されにくく、より安定した識別に使える。
+    形式: (t|q)(version)(d|i)(cipher数2桁)(拡張数2桁)(alpn2文字)_(cipher hash12桁)_(拡張+署名アルゴリズム hash12桁)
+    """
+    try:
+        if len(payload) < 6 or payload[0] != 22: return None
+        hs_data = payload[5:]
+        if not hs_data or hs_data[0] != 1: return None  # ClientHello
+        offset = 4
+        if offset + 2 > len(hs_data): return None
+        legacy_version = int.from_bytes(hs_data[offset:offset + 2], "big")
+        offset += 2 + 32
+        if offset >= len(hs_data): return None
+        sid_len = hs_data[offset]; offset += 1 + sid_len
+        if offset + 2 > len(hs_data): return None
+        cs_len = int.from_bytes(hs_data[offset:offset + 2], "big"); offset += 2
+        cs_bytes = hs_data[offset:offset + cs_len]; offset += cs_len
+        ciphers = [v for i in range(0, len(cs_bytes) - 1, 2)
+                   if (v := int.from_bytes(cs_bytes[i:i + 2], "big")) not in _GREASE_VALUES]
+        if offset + 1 > len(hs_data): return None
+        cm_len = hs_data[offset]; offset += 1 + cm_len
+
+        has_sni = False
+        alpn_first = ""
+        sig_algs: list = []
+        ext_types_all: list = []      # GREASE除外・件数カウント用（SNI/ALPNも含む）
+        ext_types_for_hash: list = [] # SNI/ALPN除外・ハッシュ用
+        negotiated_version = legacy_version
+        if offset + 2 <= len(hs_data):
+            ext_total = int.from_bytes(hs_data[offset:offset + 2], "big"); offset += 2
+            ext_end = offset + ext_total
+            while offset + 4 <= ext_end and offset + 4 <= len(hs_data):
+                ext_type = int.from_bytes(hs_data[offset:offset + 2], "big")
+                ext_len  = int.from_bytes(hs_data[offset + 2:offset + 4], "big")
+                body_off = offset + 4
+                if ext_type not in _GREASE_VALUES:
+                    ext_types_all.append(ext_type)
+                    if ext_type not in (_JA4_SNI_EXT, _JA4_ALPN_EXT):
+                        ext_types_for_hash.append(ext_type)
+                if ext_type == _JA4_SNI_EXT:
+                    has_sni = True
+                elif ext_type == _JA4_ALPN_EXT and body_off + 2 <= len(hs_data):
+                    alpn_list_len = int.from_bytes(hs_data[body_off:body_off + 2], "big")
+                    p = body_off + 2
+                    if p + 1 <= len(hs_data):
+                        proto_len = hs_data[p]
+                        proto = hs_data[p + 1:p + 1 + proto_len]
+                        alpn_first = proto.decode("ascii", errors="replace")
+                elif ext_type == _JA4_SIGALG_EXT and body_off + 2 <= len(hs_data):
+                    sa_len = int.from_bytes(hs_data[body_off:body_off + 2], "big")
+                    sa_bytes = hs_data[body_off + 2:body_off + 2 + sa_len]
+                    sig_algs = [int.from_bytes(sa_bytes[i:i + 2], "big")
+                                for i in range(0, len(sa_bytes) - 1, 2)]
+                elif ext_type == 43:  # supported_versions（TLS1.3では実バージョンはこちら）
+                    sv_len = hs_data[body_off] if body_off < len(hs_data) else 0
+                    sv_bytes = hs_data[body_off + 1:body_off + 1 + sv_len]
+                    versions = [int.from_bytes(sv_bytes[i:i + 2], "big")
+                                for i in range(0, len(sv_bytes) - 1, 2)
+                                if int.from_bytes(sv_bytes[i:i + 2], "big") not in _GREASE_VALUES]
+                    if versions:
+                        negotiated_version = max(versions)
+                offset = body_off + ext_len
+
+        proto = "t"  # TCP上のTLS（QUIC/DTLSは別経路のため本ツールでは対象外）
+        ver_code = _JA4_VERSION_CODES.get(negotiated_version, "00")
+        sni_code = "d" if has_sni else "i"
+        cipher_count = min(len(ciphers), 99)
+        ext_count = min(len(ext_types_all), 99)
+        alpn_code = _ja4_alpn_code(alpn_first)
+        section_a = f"{proto}{ver_code}{sni_code}{cipher_count:02d}{ext_count:02d}{alpn_code}"
+
+        cipher_hex_sorted = sorted(f"{c:04x}" for c in ciphers)
+        cipher_hash = (hashlib.sha256(",".join(cipher_hex_sorted).encode()).hexdigest()[:12]
+                       if cipher_hex_sorted else "000000000000")
+
+        ext_hex_sorted = sorted(f"{e:04x}" for e in ext_types_for_hash)
+        sigalg_hex = ",".join(f"{s:04x}" for s in sig_algs)  # 出現順のまま（未ソート）
+        ext_combined = ",".join(ext_hex_sorted) + "_" + sigalg_hex
+        ext_hash = (hashlib.sha256(ext_combined.encode()).hexdigest()[:12]
+                    if (ext_hex_sorted or sig_algs) else "000000000000")
+
+        ja4 = f"{section_a}_{cipher_hash}_{ext_hash}"
+        return {"ja4": ja4}
+    except Exception:
+        return None
+
+
+def _compute_ja4s(payload: bytes) -> dict | None:
+    """
+    TLS ServerHello から JA4S フィンガープリントを計算する（FoxIO, JA4+ suite）。
+    サーバー実装（アプライアンス/マルウェアC2フレームワーク等のTLSスタック）の
+    識別に使う。JA4Sは拡張の順序をソートしない（サーバー実装ごとの出力順の
+    違い自体がフィンガープリントの一部となるため）。
+    形式: (t|q)(version)(拡張数2桁)(alpn2文字)_(cipher 4桁hex)_(拡張 hash12桁)
+    """
+    try:
+        if len(payload) < 6 or payload[0] != 22: return None
+        hs_data = payload[5:]
+        if not hs_data or hs_data[0] != 2: return None  # ServerHello
+        offset = 4
+        if offset + 2 > len(hs_data): return None
+        server_version = int.from_bytes(hs_data[offset:offset + 2], "big")
+        offset += 2 + 32
+        if offset >= len(hs_data): return None
+        sid_len = hs_data[offset]; offset += 1 + sid_len
+        if offset + 2 > len(hs_data): return None
+        cipher_suite = int.from_bytes(hs_data[offset:offset + 2], "big"); offset += 2
+        offset += 1  # compression_method
+
+        alpn_first = ""
+        ext_types: list = []
+        negotiated_version = server_version
+        if offset + 2 <= len(hs_data):
+            ext_total = int.from_bytes(hs_data[offset:offset + 2], "big"); offset += 2
+            ext_end = offset + ext_total
+            while offset + 4 <= ext_end and offset + 4 <= len(hs_data):
+                ext_type = int.from_bytes(hs_data[offset:offset + 2], "big")
+                ext_len  = int.from_bytes(hs_data[offset + 2:offset + 4], "big")
+                body_off = offset + 4
+                if ext_type not in _GREASE_VALUES:
+                    ext_types.append(ext_type)
+                if ext_type == _JA4_ALPN_EXT and body_off + 2 <= len(hs_data):
+                    p = body_off + 2
+                    if p + 1 <= len(hs_data):
+                        proto_len = hs_data[p]
+                        proto = hs_data[p + 1:p + 1 + proto_len]
+                        alpn_first = proto.decode("ascii", errors="replace")
+                elif ext_type == 43 and ext_len == 2 and body_off + 2 <= len(hs_data):
+                    negotiated_version = int.from_bytes(hs_data[body_off:body_off + 2], "big")
+                offset = body_off + ext_len
+
+        proto = "t"
+        ver_code = _JA4_VERSION_CODES.get(negotiated_version, "00")
+        ext_count = min(len(ext_types), 99)
+        alpn_code = _ja4_alpn_code(alpn_first)
+        section_a = f"{proto}{ver_code}{ext_count:02d}{alpn_code}"
+        cipher_hex = f"{cipher_suite:04x}"
+        ext_hex = ",".join(f"{e:04x}" for e in ext_types)  # 出現順のまま（サーバーはソートしない）
+        ext_hash = (hashlib.sha256(ext_hex.encode()).hexdigest()[:12]
+                    if ext_types else "000000000000")
+        return {"ja4s": f"{section_a}_{cipher_hex}_{ext_hash}"}
+    except Exception:
+        return None
+
+
 def _parse_tls_certificate(payload: bytes) -> bytes | None:
     """TLS Certificateメッセージから最初(leaf)証明書のDERバイト列を取り出す。"""
     try:
@@ -2257,7 +2427,8 @@ def analyze_pcap(data: bytes) -> dict:
                                 "server_ccs": False, "client_ccs": False, "app_data": False,
                                 "fatal_alert": False, "alert_desc": "", "version": "", "ts": _ts_str(ts),
                                 "cipher_suite": None, "cert_der": None,
-                                "ja3": None, "ja3_str": "", "ja3s": None, "ja3s_str": ""})
+                                "ja3": None, "ja3_str": "", "ja3s": None, "ja3s_str": "",
+                                "ja4": None, "ja4s": None})
                             _to_server = dport in TLS_PORTS   # クライアント→サーバ方向か
                             for _ct, _ht, _rv, _rec in _iter_tls_records(payload_b):
                                 if _ct == 22 and _ht == 1:
@@ -2266,6 +2437,10 @@ def analyze_pcap(data: bytes) -> dict:
                                         _j3 = _compute_ja3(_rec)
                                         if _j3:
                                             _hs["ja3"], _hs["ja3_str"] = _j3["ja3"], _j3["ja3_str"]
+                                    if _hs["ja4"] is None:
+                                        _j4 = _compute_ja4(_rec)
+                                        if _j4:
+                                            _hs["ja4"] = _j4["ja4"]
                                 elif _ct == 22 and _ht == 2:
                                     _hs["server_hello"] = True
                                     if _rv in TLS_VERSIONS:
@@ -2277,6 +2452,10 @@ def analyze_pcap(data: bytes) -> dict:
                                         _j3s = _compute_ja3s(_rec)
                                         if _j3s:
                                             _hs["ja3s"], _hs["ja3s_str"] = _j3s["ja3s"], _j3s["ja3s_str"]
+                                    if _hs["ja4s"] is None:
+                                        _j4s = _compute_ja4s(_rec)
+                                        if _j4s:
+                                            _hs["ja4s"] = _j4s["ja4s"]
                                 elif _ct == 22 and _ht == 11:
                                     _hs["cert"] = True
                                     if _hs["cert_der"] is None:
@@ -3517,6 +3696,7 @@ def analyze_pcap(data: bytes) -> dict:
             "app_data": _h["app_data"],
             "weak_cipher": _weak_cs, "cert_issues": _cert_check["issues"] if _cert_check else [],
             "ja3": _h.get("ja3") or "", "ja3s": _h.get("ja3s") or "",
+            "ja4": _h.get("ja4") or "", "ja4s": _h.get("ja4s") or "",
         })
 
     # ── JA3使い回し検知: 同一クライアントフィンガープリントで複数の異なる宛先へ接続 ──
@@ -4599,6 +4779,23 @@ _DANGEROUS_EXT_RE = __import__("re").compile(
     r"(?i)\.(exe|scr|pif|com|bat|cmd|js|jse|vbs|vbe|wsf|wsh|hta|jar|ps1|lnk|"
     r"dll|cpl|msi|reg|docm|xlsm|pptm|iso|img|ace)$")
 
+# ── ランサムウェア身代金要求ノート/暗号化済みファイル名の兆候 ──
+# 家族ごとに拡張子・ノートファイル名はカスタマイズされる（例: Qilinは被害者ごとの
+# company_idを拡張子に使う）ため固定文字列の網羅は困難。代わりに、現行ファミリー
+# （LockBit/Qilin/Akira/DragonForce/INC等）に共通する命名の型で検知する。
+_RANSOM_NOTE_NAME_RE = __import__("re").compile(
+    r"(?i)((readme[-_]?recover|how[-_]?to[-_]?(decrypt|restore|recover)|"
+    r"decrypt[-_]?instructions?|restore[-_]?my[-_]?files?|recover[-_]?files?|"
+    r"ransom[-_]?note|unlock[-_]?instructions?).*|"
+    r"[^.]+\.readme)\.(txt|html?|hta)$")
+# 元の拡張子の後ろにランサムウェア特有の（被害者/攻撃ごとにランダムな）文字列が
+# 付与された二重拡張子パターン（例: invoice.docx.QTduEqZI6Q）。
+# 日付/バージョン番号のような純数字サフィックス（正規のバックアップ命名慣習に
+# よくある）は誤検知を避けるため対象外とし、英字を含むものだけを対象にする。
+_ENCRYPTED_FILE_SUFFIX_RE = __import__("re").compile(
+    r"(?i)\.(?:docx?|xlsx?|pptx?|pdf|jpe?g|png|gif|zip|rar|7z|sql|csv|bak|"
+    r"mdb|accdb|vmdk|vhdx?)\.(?=[a-z0-9]{4,12}$)[a-z0-9]*[a-z][a-z0-9]*$")
+
 # ── メールヘッダ(件名/From/Reply-To)からのフィッシング/なりすまし兆候検査 ──
 _URGENCY_KEYWORDS_RE = __import__("re").compile(
     r"(?i)(至急|緊急|本日中|即対応|要確認|パスワード変更|アカウント停止|凍結|"
@@ -4787,6 +4984,13 @@ def _check_attachment(filename: str, payload: bytes) -> list:
     if _DANGEROUS_EXT_RE.search(filename or ""):
         verdicts.append({"severity": "high", "type": "危険な拡張子",
                          "detail": f"危険な拡張子の添付ファイル: {filename}"})
+    if _RANSOM_NOTE_NAME_RE.search(filename or ""):
+        verdicts.append({"severity": "critical", "type": "ランサムノート疑い",
+                         "detail": f"ランサムウェア身代金要求ノートに典型的なファイル名: {filename}"})
+    if _ENCRYPTED_FILE_SUFFIX_RE.search(filename or ""):
+        verdicts.append({"severity": "high", "type": "暗号化済みファイル名疑い",
+                         "detail": f"ランサムウェアによる暗号化後のファイル名パターン"
+                                   f"（元拡張子+ランダム文字列）の可能性: {filename}"})
     if b"vbaProject.bin" in payload or b"ActiveMime" in payload[:200]:
         verdicts.append({"severity": "high", "type": "マクロ",
                          "detail": "Officeマクロ(VBA)を含む添付ファイルの可能性"})

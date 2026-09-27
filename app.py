@@ -3692,6 +3692,26 @@ with tab4:
                     st.markdown(f"**📝 補足メモ:** {full_cfg['notes']}")
                 st.caption(f"登録日時: {cfg.get('uploaded_at','')[:19]}")
 
+                # ── 既知の侵害パターン照合（静的チェック・AI不要） ──
+                if full_cfg.get("vendor") == "FortiGate":
+                    import re as _re_cfgcheck
+                    from parsers.fortigate import _SUSPICIOUS_ADMIN_NAMES
+                    _admin_block = db._extract_fortigate_block(
+                        full_cfg.get("config_text", "") or "", "system admin")
+                    _admin_names_found = set(_re_cfgcheck.findall(
+                        r'edit\s+"([^"]+)"', _admin_block, _re_cfgcheck.IGNORECASE))
+                    _suspicious_hits = sorted(n.lower() for n in _admin_names_found
+                                              if n.lower() in _SUSPICIOUS_ADMIN_NAMES)
+                    if _suspicious_hits:
+                        st.error(
+                            f"⚠️ 汎用的な名前（{', '.join(_suspicious_hits)}）のローカル管理者アカウントを"
+                            "検出しました。2025年12月以降、FortiCloud SSOの認証バイパス "
+                            "(CVE-2025-59718 / CVE-2025-59719 / CVE-2026-24858) を悪用した侵害後に、"
+                            "攻撃者がこの種の名前で永続化用アカウントを作成する事例が報告されています。"
+                            "心当たりのないアカウントであれば直ちに無効化し、侵害有無を調査してください。"
+                            "（アカウント名だけでは断定できないため、正規に運用しているアカウントなら無視して構いません）"
+                        )
+
                 # ── 🤖 AI設定レビュー ──
                 st.markdown("---")
                 _cfg_ai_ok = (analyzer.check_claude_available() or analyzer.check_gemini_available()
@@ -6117,6 +6137,7 @@ with tab_pcap:
                         "クライアント": h["client"], "サーバー": f"{h['server']}:{h['server_port']}",
                         "SNI": h.get("sni", ""), "TLS": h.get("version", ""),
                         "JA3": h.get("ja3", "") or "", "JA3S": h.get("ja3s", "") or "",
+                        "JA4": h.get("ja4", "") or "", "JA4S": h.get("ja4s", "") or "",
                         "弱い暗号スイート": h.get("weak_cipher") or "",
                         "証明書の問題": " / ".join(h.get("cert_issues") or []),
                         "理由": h["reason"],
@@ -6129,6 +6150,12 @@ with tab_pcap:
                                "[abuse.ch SSLBL](https://sslbl.abuse.ch/ja3-fingerprints/)等の"
                                "公開データベースで手動照合してください（本ツールに既知不正リストは"
                                "内蔵していません）。")
+                    st.caption("**JA4/JA4S**（[FoxIO仕様](https://github.com/FoxIO-LLC/ja4)、"
+                               "2023年発表のJA3後継）: 暗号スイート/拡張を数値ソートしてから"
+                               "SHA256でハッシュ化するため、Chrome等が行う拡張順のランダム化に"
+                               "影響されにくく、JA3より安定した識別ができます。"
+                               "[ja4db.com](https://ja4db.com/)等でマルウェアファミリー/"
+                               "クライアントの既知フィンガープリントと照合できます。")
                     if _tls_hs_sum.get("weak_cipher"):
                         st.warning("⚠️ 前方秘匿性のない鍵交換・RC4・DES・NULL暗号など、"
                                    "脆弱な暗号スイートでの接続を検出しました。"

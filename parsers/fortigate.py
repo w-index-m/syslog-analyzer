@@ -21,6 +21,12 @@ FGT_LEVEL_SEVERITY = {
 
 FGT_HOST_KEYWORDS = ["fgt", "fortigate", "fortinet"]
 
+# CVE-2025-59718/CVE-2025-59719/CVE-2026-24858（FortiCloud SSOの認証バイパス、
+# 2025年12月以降actively exploited）の侵害後、攻撃者がこれらの名前でローカル管理者
+# アカウントを作成/使用する事例が報告されている。アカウント名自体は汎用的で単独では
+# 決め手にならないため「要確認」レベルの補助的シグナルとして扱う。
+_SUSPICIOUS_ADMIN_NAMES = {"support", "secadmin", "audit", "backup", "itadmin"}
+
 # syslog ヘッダを剥がすための正規表現（PRI + 任意のタイムスタンプ/ホスト名）
 FGT_HEADER_RE = re.compile(
     r"(?:<(\d+)>)?"
@@ -126,6 +132,11 @@ def parse(raw: str, source_ip: str) -> dict | None:
             tags.append("認証/User")
             if "fail" in body.lower() or "denied" in body.lower():
                 tags += ["認証失敗", "セキュリティ"]
+        _admin_user = (kv.get("user") or kv.get("admin") or "").strip('"').lower()
+        if subtype in ("system", "user", "vpn") and _admin_user in _SUSPICIOUS_ADMIN_NAMES:
+            tags += ["セキュリティ", "要確認",
+                     f"不審な管理者アカウント名:{_admin_user}",
+                     "CVE-2025-59718/CVE-2025-59719/CVE-2026-24858(FortiCloud SSO侵害)の疑い"]
 
     elif log_type == "anomaly":
         tags += ["異常検知(DoS)", "セキュリティ"]

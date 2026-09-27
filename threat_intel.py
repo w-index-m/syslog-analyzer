@@ -12,6 +12,8 @@ threat_intel/downloaded_*.txt に保存できる（ネットワーク到達時�
 対応フィード（fetch_feeds）:
   - Feodo Tracker (abuse.ch): 既知ボットネットC2のIP
   - URLhaus (abuse.ch): 既知マルウェア配布URLのホスト
+  - ThreatFox (abuse.ch): 既知マルウェアIOCのドメイン（hosts形式、認証キー不要）
+  - CINS Army List (CINS Score): 実際の攻撃を観測した悪性IP（コミュニティ実績のあるスコアリング済みリスト）
 """
 import os
 import re
@@ -19,23 +21,29 @@ from pathlib import Path
 
 _DIR = Path(__file__).parent / "threat_intel"
 
-# fetch_feeds() が取得する無料フィード（abuse.ch）
+# fetch_feeds() が取得する無料フィード（認証キー不要のもののみ）
 _FEEDS = {
     "feodo_c2_ip": "https://feodotracker.abuse.ch/downloads/ipblocklist.txt",
     "urlhaus_host": "https://urlhaus.abuse.ch/downloads/text_online/",
+    "threatfox_domains": "https://threatfox.abuse.ch/downloads/hostfile/",
+    "cins_army_ip": "https://cinsscore.com/list/ci-badguys.txt",
 }
 
 _IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 
 def _parse_line(line: str):
-    """1行から IP または ドメインを取り出す（コメント/空行/URLにも対応）。"""
+    """1行から IP または ドメインを取り出す（コメント/空行/URL/hosts形式にも対応）。"""
     line = line.strip()
     if not line or line.startswith("#"):
         return None
     # URLhaus等はURL形式のこともあるためホスト部を抽出
     if "://" in line:
         line = line.split("://", 1)[1]
+    # ThreatFoxのhostfile等、"0.0.0.0 bad.example.com" のようなhosts形式は
+    # 末尾トークン（実際のドメイン）を取り出す
+    if line.split() and len(line.split()) > 1:
+        line = line.split()[-1]
     line = line.split("/", 1)[0].split(":", 1)[0].strip().lower()
     return line or None
 

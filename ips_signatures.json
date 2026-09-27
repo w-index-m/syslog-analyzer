@@ -1,6 +1,6 @@
 {
   "_comment": "IPSシグネチャ定義。GitHubで一元管理し、全デプロイがここから読み込む。patternはPython re のバイト列パターン（latin-1）。binary=trueは印字可能判定をスキップ。cve/description/recommended_action/reference は検知時の対応判断用メタデータ（任意）。",
-  "version": "2026.07.08.3",
+  "version": "2026.09.27.1",
   "signatures": [
     {
       "id": "WEB-SQLI-1",
@@ -372,6 +372,30 @@
       "description": "AIアシスタントに自己複製・拡散を指示する文言（AIワームの自律拡散の手口）。",
       "recommended_action": "メールAIアシスタントの自動送信を停止し、感染範囲を調査。",
       "reference": "https://www.wired.com/story/here-come-the-ai-worms/",
+      "source": "builtin"
+    },
+    {
+      "id": "MAL-RANSOMNOTE-1",
+      "category": "ランサムウェア身代金要求メッセージ",
+      "severity": "critical",
+      "binary": false,
+      "pattern": "(?is)(?=.*(files?\\s+(have|has)\\s+been\\s+encrypted|encrypted\\s+all\\s+your\\s+files|your\\s+(network|data)\\s+(has|have)\\s+been\\s+encrypted))(?=.*(decrypt|recovery\\s+key|recover\\s+your\\s+files))(?=.*(\\.onion|tor\\s+browser|tor\\s+project|negotiat))",
+      "cve": "",
+      "description": "「ファイルが暗号化された」「復号したければTor経由で交渉」という現行ランサムウェア（LockBit/Qilin/Akira/DragonForce等）に共通する身代金要求メッセージの定型文。ファミリー固有の拡張子/ノートファイル名は攻撃ごとに変化するため、内容ベースで検知する。",
+      "recommended_action": "該当ホストをネットワークから隔離し、暗号化範囲・侵入経路（RDP/VPN/フィッシング等）を調査。バックアップからの復旧を優先し、身代金は支払わない。",
+      "reference": "https://www.cisa.gov/stopransomware",
+      "source": "builtin"
+    },
+    {
+      "id": "CVE-CITRIXBLEED2",
+      "category": "Citrix Bleed 2 / NetScaler認証バイパス (CVE-2025-5777)",
+      "severity": "critical",
+      "binary": false,
+      "pattern": "(?i)POST\\s+/p/u/doAuthentication\\.do",
+      "cve": "CVE-2025-5777",
+      "description": "Citrix NetScaler ADC/Gatewayのメモリリーク脆弱性(Citrix Bleed 2)を悪用したセッションハイジャック/認証バイパスが疑われるログイン要求。2025年に複数のランサムウェアグループが初期侵入経路として悪用。",
+      "recommended_action": "NetScaler機器の緊急パッチ適用、全アクティブセッションの失効、侵害有無（不審な管理者アカウント等）の調査。",
+      "reference": "https://www.cve.org/CVERecord?id=CVE-2025-5777",
       "source": "builtin"
     }
   ],
