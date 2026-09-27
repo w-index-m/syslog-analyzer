@@ -2998,16 +2998,19 @@ def analyze_pcap(data: bytes) -> dict:
             _key = (e["src"], e["dst"])
             _entry = _icmp_pair_hits.setdefault(_key, {
                 "src": e["src"], "dst": e["dst"], "packet_count": 0,
-                "findings": [], "sample": ""})
+                "findings": [], "sample": "", "_seen_texts": set()})
             _entry["packet_count"] += 1
             if not _entry["sample"]:
                 _entry["sample"] = e["payload"][:80].decode("utf-8", errors="replace")
             for _h in _hits:
-                if _h["text"] not in [f.get("text") for f in _entry["findings"]]:
+                if _h["text"] not in _entry["_seen_texts"]:
+                    _entry["_seen_texts"].add(_h["text"])
                     _entry["findings"].append(_h)
-            if _ml.get("flag") and _ml["flag"] not in [f.get("text") for f in _entry["findings"]]:
+            if _ml.get("flag") and _ml["flag"] not in _entry["_seen_texts"]:
+                _entry["_seen_texts"].add(_ml["flag"])
                 _entry["findings"].append({"type": "flag_pattern", "text": _ml["flag"], "decoded": ""})
     for _entry in _icmp_pair_hits.values():
+        _entry.pop("_seen_texts", None)
         _entry["detail"] = (f"{_entry['src']} → {_entry['dst']} のICMP echoペイロードに"
                             f"flag/エンコードデータを検出（{_entry['packet_count']}パケット）"
                             "— ICMPトンネリング/データ持ち出しの可能性")

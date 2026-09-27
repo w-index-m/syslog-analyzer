@@ -103,6 +103,27 @@ def _apply_saved_settings_once():
     if s.get("llm_mode"):
         st.session_state["llm_mode"] = s["llm_mode"]
 
+@st.cache_data(ttl=15, show_spinner=False)
+def _cached_attack_summary(hours: float) -> dict:
+    """攻撃サマリー集計は全タブ描画時に毎回SQL全文検索(LIKE '%...%')が走るため、
+    操作のたびに再実行されないよう短時間キャッシュする。"""
+    import threat_log_summary as _tls
+    return _tls.get_attack_summary(hours=hours)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_access_stats(days: int) -> dict:
+    """サイドバーは全ページで常に描画されるため、無関係な操作のたびに
+    アクセス解析の集計SQLが再実行されないよう短時間キャッシュする。"""
+    import access_analytics as _acc_view
+    return _acc_view.get_stats(days=days)
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def _cached_telemetry_summary() -> dict:
+    return db.get_telemetry_summary()
+
+
 def _is_cloud_mode() -> bool:
     """
     Streamlit Community Cloud 等のクラウド公開環境かを判定する。
@@ -1104,7 +1125,7 @@ with st.sidebar:
         try:
             import access_analytics as _acc_view
             _acc_days = st.slider("集計期間(日)", 7, 90, 30, key="acc_an_days")
-            _acc_stats = _acc_view.get_stats(days=_acc_days)
+            _acc_stats = _cached_access_stats(_acc_days)
             _acc_c1, _acc_c2 = st.columns(2)
             _acc_c1.metric("累計訪問数", f"{_acc_stats['total_all_time']:,}")
             _acc_c2.metric("累計ユニーク訪問者", f"{_acc_stats['unique_all_time']:,}")
@@ -1817,9 +1838,8 @@ with tab1:
         st.markdown("---")
 
     # ── 🎯 検知した攻撃サマリー（FortiGate/Palo Alto等のUTM/IPSログから） ──
-    import threat_log_summary as _tls
     _atk_hours = st.slider("集計期間(時間)", 1, 168, 24, key="atk_summary_hours")
-    _atk_summary = _tls.get_attack_summary(hours=_atk_hours)
+    _atk_summary = _cached_attack_summary(_atk_hours)
     if _atk_summary["total"] > 0:
         st.markdown(f"### 🎯 検知した攻撃サマリー（直近{_atk_hours}時間・{_atk_summary['total']}件）")
         st.caption(
@@ -2868,7 +2888,7 @@ with tab2:
     st.markdown("## 📊 テレメトリダッシュボード")
     st.caption("テレメトリ = 機器から継続的に収集される観測データ。単発ログではなく「傾向・増減・分布」を見ることで異常を早期検知します。")
 
-    summary = db.get_telemetry_summary()
+    summary = _cached_telemetry_summary()
 
     # KPIカード
     col1, col2, col3, col4 = st.columns(4)
