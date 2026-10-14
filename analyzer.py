@@ -6,6 +6,7 @@ import requests
 
 import dlp
 import ai_workload_monitor
+import prompt_leak_guard
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 OLLAMA_BASE_URL   = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
@@ -17,6 +18,7 @@ GROQ_MODEL        = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 LAST_LLM_ERROR = ""  # 直近のLLM呼び出し失敗理由（UI表示用）
 LAST_DLP_FINDINGS: list = []  # 直近のLLM送信でマスクしたDLP検出内訳（UI表示用）
+LAST_PROMPT_LEAK_FINDINGS: list = []  # 直近のLLM応答でマスクしたシステムプロンプト漏洩内訳（UI表示用）
 
 
 def _dlp_redact(text: str) -> str:
@@ -29,15 +31,26 @@ def _dlp_redact(text: str) -> str:
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
-def _clean_llm_json_text(text: str) -> str:
+def _clean_llm_json_text(text: str, system_prompt: str | None = None) -> str:
     """
     LLM応答からJSON抽出前の前処理を行う。
     DeepSeek-R1系モデルは応答の先頭に<think>...</think>という推論ブロックを
     付けることがあり、素の```json```除去だけではjson.loads()が失敗するため、
     まずこのブロックを除去してからコードフェンスを剥がす。
+
+    system_prompt を渡した場合、システムプロンプト漏洩の出力フィルタ
+    （prompt_leak_guard）も適用する。悪意あるsyslog/pcap内の文字列による
+    プロンプトインジェクションで、応答にシステムプロンプトがそのまま
+    含まれてしまうケースへの対策。
     """
     text = _THINK_BLOCK_RE.sub("", text or "").strip()
-    return text.replace("```json", "").replace("```", "").strip()
+    text = text.replace("```json", "").replace("```", "").strip()
+    if system_prompt:
+        text, findings = prompt_leak_guard.scan_and_redact(system_prompt, text)
+        if findings:
+            globals()["LAST_PROMPT_LEAK_FINDINGS"] = findings
+            print(f"[prompt_leak_guard] システムプロンプト漏洩の疑いを検出・マスクしました: {findings}")
+    return text
 
 # プロバイダの既定優先順位（auto時、および明示モード失敗時のフォールバック順）
 _PROVIDER_ORDER = ("claude", "gemini", "groq", "ollama")
@@ -138,7 +151,7 @@ def analyze_with_claude(parsed: dict, raw: str, config_context: str = "") -> tup
         data = resp.json()
         text = data["content"][0]["text"].strip()
         # JSON整形
-        text = _clean_llm_json_text(text)
+        text = _clean_llm_json_text(text, SYSTEM_PROMPT)
         return text, "claude-sonnet-4-6"
     except Exception as e:
         _note_llm_error("Claude", exc=e)
@@ -163,7 +176,7 @@ def analyze_with_ollama(parsed: dict, raw: str, config_context: str = "") -> tup
         )
         resp.raise_for_status()
         text = resp.json()["message"]["content"].strip()
-        text = _clean_llm_json_text(text)
+        text = _clean_llm_json_text(text, SYSTEM_PROMPT)
         return text, f"ollama/{OLLAMA_MODEL}"
     except Exception as e:
         print(f"[Ollama error] {e}")
@@ -344,7 +357,7 @@ def _call_gemini_raw(system: str, user: str, max_tokens: int = 800) -> tuple[str
             print(f"[Gemini error] HTTP {resp.status_code}: {resp.text[:200]}")
             return "", ""
         text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-        return _clean_llm_json_text(text), f"gemini/{GEMINI_MODEL}"
+        return _clean_llm_json_text(text, system), f"gemini/{GEMINI_MODEL}"
     except Exception as e:
         _note_llm_error("Gemini", exc=e)
         print(f"[Gemini error] {e}")
@@ -373,7 +386,7 @@ def _call_groq_raw(system: str, user: str, max_tokens: int = 800) -> tuple[str, 
             print(f"[Groq error] HTTP {resp.status_code}: {resp.text[:200]}")
             return "", ""
         text = resp.json()["choices"][0]["message"]["content"].strip()
-        return _clean_llm_json_text(text), f"groq/{GROQ_MODEL}"
+        return _clean_llm_json_text(text, system), f"groq/{GROQ_MODEL}"
     except Exception as e:
         _note_llm_error("Groq", exc=e)
         print(f"[Groq error] {e}")
@@ -419,7 +432,12 @@ def ask_llm(system: str, user: str, mode: str = "auto", max_tokens: int = 1000) 
             if not resp.ok:
                 _note_llm_error("Claude", resp=resp)
                 return "", ""
-            return resp.json()["content"][0]["text"].strip(), "claude-sonnet-4-6"
+            text = resp.json()["content"][0]["text"].strip()
+            text, _leak_findings = prompt_leak_guard.scan_and_redact(system, text)
+            if _leak_findings:
+                globals()["LAST_PROMPT_LEAK_FINDINGS"] = _leak_findings
+                print(f"[prompt_leak_guard] システムプロンプト漏洩の疑いを検出・マスクしました: {_leak_findings}")
+            return text, "claude-sonnet-4-6"
         except Exception as e:
             _note_llm_error("Claude", exc=e)
             print(f"[ask_llm:Claude] {e}"); return "", ""
@@ -445,7 +463,12 @@ def ask_llm(system: str, user: str, mode: str = "auto", max_tokens: int = 1000) 
             if not resp.ok:
                 _note_llm_error("Ollama", resp=resp)
                 return "", ""
-            return resp.json()["message"]["content"].strip(), f"ollama/{OLLAMA_MODEL}"
+            text = resp.json()["message"]["content"].strip()
+            text, _leak_findings = prompt_leak_guard.scan_and_redact(system, text)
+            if _leak_findings:
+                globals()["LAST_PROMPT_LEAK_FINDINGS"] = _leak_findings
+                print(f"[prompt_leak_guard] システムプロンプト漏洩の疑いを検出・マスクしました: {_leak_findings}")
+            return text, f"ollama/{OLLAMA_MODEL}"
         except Exception as e:
             globals()["LAST_LLM_ERROR"] = f"Ollama接続エラー: {e}"
             print(f"[ask_llm:Ollama] {e}"); return "", ""
@@ -605,7 +628,7 @@ def judge_with_claude(parsed: dict, raw: str, ai_explanation: str,
         )
         resp.raise_for_status()
         text = resp.json()["content"][0]["text"].strip()
-        text = _clean_llm_json_text(text)
+        text = _clean_llm_json_text(text, JUDGE_SYSTEM_PROMPT)
         result = json.loads(text)
         result["judge_model"] = "claude-sonnet-4-6"
         return result
@@ -633,7 +656,7 @@ def judge_with_ollama(parsed: dict, raw: str, ai_explanation: str,
         )
         resp.raise_for_status()
         text = resp.json()["message"]["content"].strip()
-        text = _clean_llm_json_text(text)
+        text = _clean_llm_json_text(text, JUDGE_SYSTEM_PROMPT)
         result = json.loads(text)
         result["judge_model"] = f"ollama/{OLLAMA_MODEL}"
         return result
@@ -870,7 +893,7 @@ def diagnose_health_with_claude(device_health, recent_logs, config_context=""):
         )
         resp.raise_for_status()
         text = resp.json()["content"][0]["text"].strip()
-        text = _clean_llm_json_text(text)
+        text = _clean_llm_json_text(text, HEALTH_SYSTEM_PROMPT)
         result = json.loads(text)
         result["diagnosis_model"] = "claude-sonnet-4-6"
         return result
@@ -891,7 +914,7 @@ def diagnose_health_with_ollama(device_health, recent_logs, config_context=""):
         )
         resp.raise_for_status()
         text = resp.json()["message"]["content"].strip()
-        text = _clean_llm_json_text(text)
+        text = _clean_llm_json_text(text, HEALTH_SYSTEM_PROMPT)
         result = json.loads(text)
         result["diagnosis_model"] = f"ollama/{OLLAMA_MODEL}"
         return result
@@ -1021,7 +1044,7 @@ def diagnose_icmp_redirect(ip: str, snmp_data: list, redirect_logs: list,
                 timeout=40
             )
             resp.raise_for_status()
-            text = _clean_llm_json_text(resp.json()["content"][0]["text"].strip())
+            text = _clean_llm_json_text(resp.json()["content"][0]["text"].strip(), ICMP_REDIRECT_SYSTEM_PROMPT)
             result = json.loads(text)
             result["diagnosis_model"] = "claude-sonnet-4-6"
             return result
@@ -1040,7 +1063,7 @@ def diagnose_icmp_redirect(ip: str, snmp_data: list, redirect_logs: list,
                 timeout=90
             )
             resp.raise_for_status()
-            text = _clean_llm_json_text(resp.json()["message"]["content"].strip())
+            text = _clean_llm_json_text(resp.json()["message"]["content"].strip(), ICMP_REDIRECT_SYSTEM_PROMPT)
             result = json.loads(text)
             result["diagnosis_model"] = f"ollama/{OLLAMA_MODEL}"
             return result
@@ -1744,7 +1767,7 @@ def diagnose_pcap(pcap_result: dict, mode: str = "auto") -> dict:
                 timeout=45,
             )
             resp.raise_for_status()
-            text = _clean_llm_json_text(resp.json()["content"][0]["text"].strip())
+            text = _clean_llm_json_text(resp.json()["content"][0]["text"].strip(), _PCAP_SYSTEM_PROMPT)
             return _parse(text, "claude-sonnet-4-6")
         except Exception as e:
             print(f"[pcap diag:Claude] {e}")
@@ -1761,7 +1784,7 @@ def diagnose_pcap(pcap_result: dict, mode: str = "auto") -> dict:
                 timeout=120,
             )
             resp.raise_for_status()
-            text = _clean_llm_json_text(resp.json()["message"]["content"].strip())
+            text = _clean_llm_json_text(resp.json()["message"]["content"].strip(), _PCAP_SYSTEM_PROMPT)
             return _parse(text, f"ollama/{OLLAMA_MODEL}")
         except Exception as e:
             print(f"[pcap diag:Ollama] {e}")
@@ -1862,7 +1885,7 @@ def _run_agentic_claude_loop(prompt: str, system_prompt: str, tools: list,
 
             if data.get("stop_reason") != "tool_use":
                 text_blocks = [b["text"] for b in data["content"] if b.get("type") == "text"]
-                text = _clean_llm_json_text("\n".join(text_blocks).strip())
+                text = _clean_llm_json_text("\n".join(text_blocks).strip(), system_prompt)
                 result = json.loads(text)
                 result["tool_calls_made"] = tool_calls_made
                 return result
@@ -2036,7 +2059,7 @@ def diagnose_pcap_with_ollama_model(pcap_result: dict, model_name: str) -> dict 
             timeout=180,
         )
         resp.raise_for_status()
-        text = _clean_llm_json_text(resp.json()["message"]["content"].strip())
+        text = _clean_llm_json_text(resp.json()["message"]["content"].strip(), _PCAP_SYSTEM_PROMPT)
         r = json.loads(text)
         r["diagnosis_model"] = f"ollama/{model_name}"
         return r
