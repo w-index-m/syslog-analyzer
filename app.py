@@ -825,6 +825,14 @@ with st.sidebar:
         )
         st.warning(f"⚠️ 直近のLLM送信で機密情報らしき文字列をマスクしました: {_dlp_detail}")
 
+    _leak_findings = getattr(analyzer, "LAST_PROMPT_LEAK_FINDINGS", [])
+    st.caption("🧯 システムプロンプト漏洩フィルタ: 有効（応答内にシステムプロンプトの一部が"
+               "そのまま含まれていた場合、検知してマスクする）")
+    if _leak_findings:
+        _leak_detail = " / ".join(f"{f['length']}文字一致" for f in _leak_findings)
+        st.warning(f"🚨 直近のLLM応答でシステムプロンプト漏洩の疑いを検知・マスクしました: {_leak_detail}。"
+                   "悪意あるログ/pcap内容によるプロンプトインジェクションの可能性があります。")
+
     import ai_workload_monitor as _aim
     st.caption(f"🛡️ AIワークロード監視: 有効（呼び出しレート制限 "
                f"{_aim.RATE_LIMIT_WINDOW_SEC}秒あたり{_aim.RATE_LIMIT_MAX_CALLS}件まで／"
