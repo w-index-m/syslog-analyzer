@@ -15,6 +15,7 @@ import snmp_poller
 import prtg_view
 import health_engine as he
 import vendor_recommendations as vendor_rec
+import server_zone
 from parsers import parse_syslog
 
 # ─────────────────────────────────────────
@@ -6181,9 +6182,55 @@ with tab_pcap:
 
             # ── 🤖 生成AI/LLMサービス宛通信の検知（SNIベース） ──
             _ai_sessions = res.get("ai_service_sessions", [])
-            if _ai_sessions:
-                st.markdown("---")
-                st.markdown("### 🤖 生成AI/LLMサービス宛通信の検知")
+            _zone_alerts = res.get("ai_service_server_zone_alerts", [])
+            st.markdown("---")
+            st.markdown("### 🤖 生成AI/LLMサービス宛通信の検知")
+
+            with st.expander(
+                    "⚙️ サーバーゾーンの設定（サーバー/DMZ機器からのAI通信を高重大度アラートにする）"):
+                st.caption(
+                    "サーバー・DMZ機器のIPレンジ(CIDR)を登録すると、そこから生成AI/LLM"
+                    "サービスへの通信が発生した場合に、ユーザー端末からの通常利用とは"
+                    "区別して重大度の高いアラートにします。サーバーは通常、人が対話的に"
+                    "AIチャットを使う場所ではないため、通信があれば侵害されたサーバー上の"
+                    "エージェント/マルウェアによる外部LLM API経由のC2通信やデータ持ち出し"
+                    "の可能性があります。"
+                )
+                _zone_rows = server_zone.get_cidrs()
+                if _zone_rows:
+                    st.dataframe(pd.DataFrame(_zone_rows), width='stretch', hide_index=True)
+                _zc1, _zc2 = st.columns([3, 1])
+                _new_cidr = _zc1.text_input("CIDR（例: 10.0.1.0/24）", key="server_zone_new_cidr")
+                _new_label = _zc2.text_input("ラベル（任意）", key="server_zone_new_label")
+                if st.button("登録", key="server_zone_add_btn"):
+                    _ok, _err = server_zone.add_cidr(_new_cidr, _new_label)
+                    if _ok:
+                        st.success(f"{_new_cidr} を登録しました。")
+                        st.rerun()
+                    else:
+                        st.error(_err)
+                for _zr in _zone_rows:
+                    if st.button(f"削除: {_zr['cidr']}", key=f"server_zone_del_{_zr['cidr']}"):
+                        server_zone.remove_cidr(_zr["cidr"])
+                        st.rerun()
+
+            if _zone_alerts:
+                st.error(
+                    f"🚨 サーバーゾーンからの生成AI/LLMサービス宛通信を{len(_zone_alerts)}件"
+                    "検知しました。サーバー機器は通常、人が対話的にAIチャットを使う場所"
+                    "ではないため、侵害の兆候として優先的に確認してください。"
+                )
+                df_zone = pd.DataFrame([{
+                    "サービス": s["service"], "接続先(SNI)": s["sni"],
+                    "サーバーゾーンの送信元": s["client"], "宛先": f"{s['server']}:{s['server_port']}",
+                    "初回検出": s["first_seen"], "最終検出": s["last_seen"],
+                    "継続時間(秒)": s["duration_sec"], "バイト数": s["bytes"],
+                } for s in _zone_alerts])
+                st.dataframe(df_zone, width='stretch', hide_index=True)
+
+            if not _ai_sessions:
+                st.caption("このpcapでは、生成AI/LLMサービス宛の通信は検知されませんでした。")
+            else:
                 st.caption(
                     "TLSのSNI（接続先ホスト名。暗号化されず平文で送られる）を既知の主要"
                     "生成AI/LLMサービスと照合して検知します。**内容（送信したプロンプト等）は"
@@ -6202,6 +6249,7 @@ with tab_pcap:
                     "初回検出": s["first_seen"], "最終検出": s["last_seen"],
                     "継続時間(秒)": s["duration_sec"], "バイト数": s["bytes"],
                     "長時間接続": "⚠️ 張りっぱなしの可能性" if s["long_lived"] else "",
+                    "サーバーゾーン発信": "🚨" if s.get("server_zone_source") else "",
                 } for s in _ai_sessions])
                 st.dataframe(df_ai, width='stretch', hide_index=True)
                 if _ai_long:
@@ -6209,19 +6257,19 @@ with tab_pcap:
                                "AIチャットのタブを開きっぱなし、またはエージェント/常時接続的な"
                                "利用をしている可能性があります。")
 
-                _side_channel = res.get("side_channel_exposure", [])
-                if _side_channel:
-                    st.markdown("**🕵️ Whisper Leak型サイドチャネル露出検知**")
-                    st.caption(
-                        "暗号化されたAIストリーミング応答の**内容は一切読めません**が、"
-                        "トークン単位で逐次送信される特有のパケットサイズ/タイミングパターン"
-                        "（小さな暗号化チャンクが多数・サイズにばらつき）が観測できてしまう"
-                        "ケースを検知します。この構造自体が、会話内容を外部から推測される"
-                        "サイドチャネル攻撃（Whisper Leak, 2025年報告）に理論上さらされている"
-                        "ことを意味します。"
-                    )
-                    for _sc in _side_channel:
-                        st.warning(f"🕵️ {_sc['detail']}")
+            _side_channel = res.get("side_channel_exposure", [])
+            if _side_channel:
+                st.markdown("**🕵️ Whisper Leak型サイドチャネル露出検知**")
+                st.caption(
+                    "暗号化されたAIストリーミング応答の**内容は一切読めません**が、"
+                    "トークン単位で逐次送信される特有のパケットサイズ/タイミングパターン"
+                    "（小さな暗号化チャンクが多数・サイズにばらつき）が観測できてしまう"
+                    "ケースを検知します。この構造自体が、会話内容を外部から推測される"
+                    "サイドチャネル攻撃（Whisper Leak, 2025年報告）に理論上さらされている"
+                    "ことを意味します。"
+                )
+                for _sc in _side_channel:
+                    st.warning(f"🕵️ {_sc['detail']}")
 
             # ── 🦈 llmshark連携（LLMストリーミング性能: TTFT/ITL） ──
             st.markdown("---")
