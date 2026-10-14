@@ -59,6 +59,7 @@ AI解析は **Gemini / Groq（無料枠あり）/ Claude / Ollama（完全ロー
 - **🛡️ IPS/IDS的検査**：シグネチャ型（1600件超）・アノマリ型（ポートスキャン/DDoS/DNSトンネリング）・振る舞い型（横展開8手口＝PsExec/WinRM/RDP/VNC/DCOM/SSH/Pass-the-Hash/Lateral Tool Transfer、C2ビーコニング、データ持ち出し）・脅威インテリジェンス照合をホスト別リスクスコアに集約
 - **📧 メールのフィッシング/ランサムウェア配布検知**：添付ファイル（EICAR/実行ファイル/マクロ/ランサムノート典型ファイル名/暗号化済みファイル名パターン）、ヘッダー（件名の緊急性訴求・From/Reply-To不一致・表示名なりすまし）、本文中のリンク先（ブランドなりすまし・URL短縮・punycode・IP直リンク）を検査
 - **🌐 通信の可視化**：GeoIP（監視対象国）・ASN/クラウド判定・非標準ポートでのTLS通信（プロキシ経由/ポート偽装）検知・JA3/JA3S・[JA4/JA4S](https://github.com/FoxIO-LLC/ja4)（JA3後継のTLSフィンガープリンティング）算出
+- **🚨 サーバーゾーンからの生成AI通信検知**：サーバー/DMZ機器のIPレンジ(CIDR)を登録すると、そこから生成AI/LLMサービスへの通信をユーザー端末からの通常利用と区別し高重大度アラートにする。サーバーは通常、人が対話的にAIチャットを使う場所ではないため、侵害されたサーバー上のエージェント/マルウェアによる外部LLM API経由の通信（C2・データ持ち出し等）の兆候として扱う
 - **🚨 脅威インテリジェンス**：abuse.ch（Feodo Tracker/URLhaus/ThreatFox）・CINS Army Listの既知不正IP/ドメインと通信先を照合
 - 機器コンフィグ登録（インターフェース・ルーティング設定を正常構成として参照）。**FortiGateはAIコンフィグレビュー**（セキュリティ懸念点・SSLインスペクション設定確認等）にも対応
 - **📊 アクセス解析**：公開アプリの訪問者数・国別内訳を自前記録（IPアドレスは保存しない設計、Google Sheets連携オプション）
@@ -273,6 +274,7 @@ syslog-analyzer/
 ├── geoip.py                # GeoIP（監視対象国）判定
 ├── asn.py                  # ASN/クラウド・ISP判定
 ├── ai_service_domains.py   # 生成AIサービスのSNI/ホスト名判定
+├── server_zone.py          # サーバーゾーンCIDR設定（サーバーからのAI通信を高重大度アラート化）
 ├── access_analytics.py     # 公開アプリの訪問者アクセス解析
 ├── access_security.py      # ブルートフォース/不正アクセス検知
 ├── netflow_collector.py    # NetFlow集計

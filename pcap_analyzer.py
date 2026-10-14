@@ -20,6 +20,7 @@ from datetime import datetime
 import dpkt
 
 import ai_service_domains as _ai_svc
+import server_zone as _server_zone
 import worm_target_ports as _worm_ports
 
 # ══════════════════════════════════════════════════════════════════
@@ -1859,6 +1860,7 @@ def analyze_pcap(data: bytes) -> dict:
         "auth_bruteforce": [], "http_rare_methods": [],
         "tls_sessions": [],   "tls_alerts": [],
         "ai_service_sessions": [],
+        "ai_service_server_zone_alerts": [],
         "side_channel_exposure": [],
         "tls_summary": {"sessions": 0, "unique_sites": 0, "fatal_alerts": 0,
                         "deprecated_tls": 0},
@@ -2950,6 +2952,11 @@ def analyze_pcap(data: bytes) -> dict:
     result["tls_summary"]["unique_sites"] = len(tls_unique_sites)
 
     # ── 生成AI/LLMサービス宛通信の検知（SNIベース。内容は見えないので宛先の可視化のみ） ──
+    # クライアントIPが「サーバーゾーン」として登録済みのCIDRに属する場合は、
+    # 人が対話的にAIチャットを使っている通常利用ではなく、サーバー上で動く
+    # 何か（侵害されたエージェント/マルウェア等）による通信の可能性があるため、
+    # 別枠の高重大度アラート(ai_service_server_zone_alerts)にも計上する。
+    _zone_cidrs = [c["cidr"] for c in _server_zone.get_cidrs()]
     for _ck, _info in tls_flow_info.items():
         _sni = _info.get("sni") or ""
         _service = _match_ai_service(_sni)
@@ -2959,7 +2966,8 @@ def analyze_pcap(data: bytes) -> dict:
         _first_ts = _d.get("first_ts", 0)
         _last_ts  = _d.get("last_ts", 0)
         _dur_sec  = round(_last_ts - _first_ts, 1)
-        result["ai_service_sessions"].append({
+        _is_zone  = _server_zone.is_server_zone_ip(_ck[0], _zone_cidrs)
+        _session = {
             "service":     _service,
             "sni":         _sni,
             "client":      _ck[0],
@@ -2971,8 +2979,13 @@ def analyze_pcap(data: bytes) -> dict:
             "bytes":       _d.get("bytes", 0),
             "packets":     _d.get("packets", 0),
             "long_lived":  _dur_sec >= _AI_SESSION_LONGLIVED_SEC,
-        })
+            "server_zone_source": _is_zone,
+        }
+        result["ai_service_sessions"].append(_session)
+        if _is_zone:
+            result["ai_service_server_zone_alerts"].append(_session)
     result["ai_service_sessions"].sort(key=lambda x: x["duration_sec"], reverse=True)
+    result["ai_service_server_zone_alerts"].sort(key=lambda x: x["duration_sec"], reverse=True)
 
     # ── Whisper Leak型サイドチャネル露出検知 ──
     # 暗号化されたAIストリーミング応答は中身を復号できないが、トークン単位で

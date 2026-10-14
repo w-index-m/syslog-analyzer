@@ -59,6 +59,7 @@ Choose your AI analysis engine from **Gemini / Groq (free tier available) / Clau
 - **🛡️ IPS/IDS-style inspection**: signature-based (1,600+ rules), anomaly-based (port scans/DDoS/DNS tunneling), and behavior-based (8 lateral-movement techniques = PsExec/WinRM/RDP/VNC/DCOM/SSH/Pass-the-Hash/Lateral Tool Transfer, C2 beaconing, data exfiltration) detections plus threat-intel matching, all rolled up into a per-host risk score
 - **📧 Email phishing / ransomware-delivery detection**: inspects attachments (EICAR/executables/macros/typical ransom-note filenames/encrypted-file naming patterns), headers (urgency-driven subject lines, From/Reply-To mismatches, display-name spoofing), and body links (brand impersonation, URL shorteners, punycode, raw IP links)
 - **🌐 Traffic visibility**: GeoIP (watchlist countries), ASN/cloud-provider identification, TLS-over-non-standard-port detection (proxy tunneling/port disguising), JA3/JA3S and [JA4/JA4S](https://github.com/FoxIO-LLC/ja4) (JA3's successor) TLS fingerprinting
+- **🚨 Server-zone AI-egress alert**: register your server/DMZ IP ranges (CIDR) and any traffic from them to a known generative-AI/LLM service is flagged as high-severity, separately from ordinary end-user usage — servers are not where a human interactively chats with an AI, so such traffic may indicate a compromised server's agent/malware talking out over an LLM API (C2, exfiltration, etc.)
 - **🚨 Threat intelligence**: matches traffic destinations against known-bad IPs/domains from abuse.ch (Feodo Tracker/URLhaus/ThreatFox) and the CINS Army List
 - Device config registration (interface/routing settings as a baseline reference). **FortiGate also supports AI config review** (security concerns, SSL inspection settings, etc.)
 - **📊 Access analytics**: self-hosted visitor count / country breakdown (no IP addresses stored, optional Google Sheets integration)
@@ -273,6 +274,7 @@ syslog-analyzer/
 ├── geoip.py                # GeoIP (watchlist countries) lookup
 ├── asn.py                  # ASN/cloud/ISP identification
 ├── ai_service_domains.py   # SNI/hostname identification for generative-AI services
+├── server_zone.py          # Server-zone CIDR config (flags AI egress from servers as high severity)
 ├── access_analytics.py     # Visitor analytics for the public app
 ├── access_security.py      # Brute-force / unauthorized-access detection
 ├── netflow_collector.py    # NetFlow aggregation
