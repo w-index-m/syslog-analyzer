@@ -1,0 +1,52 @@
+name: temp-fetch
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: URL to fetch
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch and extract text
+        run: |
+          curl -fsSL -A "Mozilla/5.0" "${{ github.event.inputs.url }}" -o page.html
+          python3 - <<'PY'
+          import re
+          from html.parser import HTMLParser
+
+          class TextExtractor(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.skip = 0
+                  self.parts = []
+
+              def handle_starttag(self, tag, attrs):
+                  if tag in ("script", "style", "noscript"):
+                      self.skip += 1
+
+              def handle_endtag(self, tag):
+                  if tag in ("script", "style", "noscript") and self.skip > 0:
+                      self.skip -= 1
+
+              def handle_data(self, data):
+                  if not self.skip:
+                      t = data.strip()
+                      if t:
+                          self.parts.append(t)
+
+          with open("page.html", encoding="utf-8", errors="ignore") as f:
+              html = f.read()
+
+          p = TextExtractor()
+          p.feed(html)
+          text = "\n".join(p.parts)
+          print("=====PAGE TEXT START=====")
+          print(text[:20000])
+          print("=====PAGE TEXT END=====")
+          PY
