@@ -58,6 +58,7 @@ _TRIM_FIELDS = [
     "unknown_proto_hints", "session_id_correlations", "voip_streams",
     "icmp_redirects", "rip_packets", "arp_anomalies", "quic_sessions",
     "industrial_alerts", "lateral_movement_techniques", "asn_hosts",
+    "vpn_tunnel_detections",
 ]
 
 
@@ -131,6 +132,30 @@ def scan_pcap_email_phishing(file_path: str, max_matches: int = 20) -> str:
     cleaned = [{k: v for k, v in r.items() if k != "data"} for r in results]
     return json.dumps({"total": len(cleaned), "shown": cleaned[:max_matches]},
                        ensure_ascii=False, default=str)
+
+
+@mcp.tool()
+def get_pcap_attack_navigator_layer(file_path: str, layer_name: str = "pcap解析結果") -> str:
+    """
+    pcapの検知結果(横展開・ビーコニング・データ持ち出し・DNS/ICMPトンネリング・
+    ポートスキャン・ワーム拡散・脅威インテリジェンス一致・VPNトンネル検知・
+    IPSシグネチャ等)をMITRE ATT&CK Enterprise Matrixの技術IDにマッピングし、
+    ATT&CK Navigator(https://mitre-attack.github.io/attack-navigator/)にそのまま
+    読み込めるレイヤーJSON(v4.5)を返す。マッピングはベストエフォート。
+
+    Args:
+        file_path: ローカルのpcap/pcapng/zip/gzファイルへの絶対パス
+        layer_name: レイヤーJSON内の表示名
+    """
+    try:
+        data = _load_pcap_bytes(file_path)
+        result = pcap_analyzer.analyze_pcap(data)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+    if result.get("error"):
+        return json.dumps({"error": result["error"]}, ensure_ascii=False)
+    layer = pcap_analyzer.generate_attack_navigator_layer(result, layer_name)
+    return json.dumps(layer, ensure_ascii=False, default=str)
 
 
 @mcp.tool()

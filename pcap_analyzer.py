@@ -7,6 +7,7 @@ import base64
 import binascii
 import gzip
 import hashlib
+import hmac
 import io
 import re
 import struct
@@ -649,6 +650,21 @@ def scan_ips_signatures(payload: bytes) -> list:
     return hits
 
 
+def scan_yara_file(data: bytes) -> list:
+    """
+    バイト列をYARAルールと照合する（yara_rules_engine.py経由）。
+    yara-python未インストール/ルール未コンパイルの環境では常に空リストを返す
+    （他の検査機能には一切影響しない）。
+    """
+    if not data:
+        return []
+    try:
+        import yara_rules_engine as _yre
+        return _yre.scan_yara(data)
+    except Exception:
+        return []
+
+
 # ── VoIP/RTP ────────────────────────────────────────────────────
 RTP_CLOCK_RATES = {
     0: 8000, 8: 8000,   # G.711 u-law / a-law
@@ -1175,6 +1191,152 @@ def _compute_ja4s(payload: bytes) -> dict | None:
         ext_hash = (hashlib.sha256(ext_hex.encode()).hexdigest()[:12]
                     if ext_types else "000000000000")
         return {"ja4s": f"{section_a}_{cipher_hex}_{ext_hash}"}
+    except Exception:
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════
+#  QUIC/HTTP3 Initial パケット復号によるSNI抽出（RFC 9001 §5.2）
+# ══════════════════════════════════════════════════════════════════
+# QUICのInitialパケットは暗号化されているが、その鍵は秘密鍵不要・公開済みの
+# 固定ソルト値とパケット中のDestination Connection IDだけから導出できる
+# （盗聴対策ではなく「サーバーになりすました平文注入」対策のための暗号化のため）。
+# これによりHTTP/3通信でもJA4と同じ要領でSNI/ALPNを取得できる。
+# RFC 9001 Appendix A.2の既知テストベクタで本実装を検証済み。
+_QUIC_INITIAL_SALT_V1 = bytes.fromhex("38762cf7f55934b34d179ae6a4c80cadccbb7f0a")
+_QUIC_INITIAL_SALT_V2 = bytes.fromhex("0dede3def700a6db819381be6e269dcbf9bd2ed9")  # RFC 9369
+
+
+def _hkdf_extract(salt: bytes, ikm: bytes) -> bytes:
+    return hmac.new(salt, ikm, hashlib.sha256).digest()
+
+
+def _hkdf_expand_label(secret: bytes, label: bytes, length: int) -> bytes:
+    full_label = b"tls13 " + label
+    info = struct.pack("!H", length) + bytes([len(full_label)]) + full_label + b"\x00"
+    out, t, counter = b"", b"", 1
+    while len(out) < length:
+        t = hmac.new(secret, t + info + bytes([counter]), hashlib.sha256).digest()
+        out += t
+        counter += 1
+    return out[:length]
+
+
+def _quic_read_varint(buf: bytes, offset: int) -> tuple:
+    first = buf[offset]
+    length = 1 << (first >> 6)
+    val = first & 0x3f
+    for i in range(1, length):
+        val = (val << 8) | buf[offset + i]
+    return val, offset + length
+
+
+def _extract_quic_crypto_frame(plaintext: bytes) -> bytes | None:
+    """復号後のQUIC平文ペイロードからCRYPTOフレーム（TLSハンドシェイクメッセージ）を取り出す。"""
+    offset = 0
+    try:
+        while offset < len(plaintext):
+            ftype = plaintext[offset]
+            if ftype == 0x00:          # PADDING
+                offset += 1
+            elif ftype == 0x01:        # PING
+                offset += 1
+            elif ftype == 0x06:        # CRYPTO
+                offset += 1
+                crypto_offset, offset = _quic_read_varint(plaintext, offset)
+                crypto_len, offset = _quic_read_varint(plaintext, offset)
+                if crypto_offset != 0:
+                    return None  # 先頭フレームがオフセット0でない＝断片化、本実装では非対応
+                return plaintext[offset:offset + crypto_len]
+            else:
+                return None  # ACK等の未対応フレーム（CRYPTOが見つからなければ諦める）
+    except Exception:
+        return None
+    return None
+
+
+def _decrypt_quic_initial_sni(packet_bytes: bytes) -> dict | None:
+    """
+    QUIC Long Header Initialパケット(クライアント→サーバー方向)を復号し、
+    中のTLS ClientHelloからSNI/ALPN/JA4を取得する。鍵は公開ソルトのみから
+    導出可能なため、キャプチャ側の秘密鍵保持は一切不要。
+    """
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    except Exception:
+        return None  # cryptographyが使えない環境ではQUIC SNI抽出のみ無効化（他機能には影響しない）
+
+    try:
+        if len(packet_bytes) < 23 or (packet_bytes[0] & 0x80) == 0:
+            return None  # Long Headerでない
+        if (packet_bytes[0] & 0x30) != 0x00:
+            return None  # Initialパケットでない
+        version = int.from_bytes(packet_bytes[1:5], "big")
+        if version == 1:
+            salt = _QUIC_INITIAL_SALT_V1
+        elif version == 0x6b3343cf:
+            salt = _QUIC_INITIAL_SALT_V2
+        else:
+            return None  # 未知バージョン（鍵導出ソルトが不明）
+
+        dcid_len = packet_bytes[5]
+        dcid = packet_bytes[6:6 + dcid_len]
+        offset = 6 + dcid_len
+        scid_len = packet_bytes[offset]
+        offset += 1 + scid_len
+        token_len, offset = _quic_read_varint(packet_bytes, offset)
+        offset += token_len
+        length_field, offset = _quic_read_varint(packet_bytes, offset)
+        pn_offset = offset
+        if pn_offset + 4 + 16 > len(packet_bytes):
+            return None
+
+        initial_secret = _hkdf_extract(salt, dcid)
+        client_secret = _hkdf_expand_label(initial_secret, b"client in", 32)
+        key = _hkdf_expand_label(client_secret, b"quic key", 16)
+        iv = _hkdf_expand_label(client_secret, b"quic iv", 12)
+        hp = _hkdf_expand_label(client_secret, b"quic hp", 16)
+
+        sample = packet_bytes[pn_offset + 4:pn_offset + 4 + 16]
+        encryptor = Cipher(algorithms.AES(hp), modes.ECB()).encryptor()
+        mask = (encryptor.update(sample) + encryptor.finalize())[:5]
+
+        first_byte = packet_bytes[0] ^ (mask[0] & 0x0f)
+        pn_len = (first_byte & 0x03) + 1
+        pn_bytes = bytes(a ^ b for a, b in
+                          zip(packet_bytes[pn_offset:pn_offset + pn_len], mask[1:1 + pn_len]))
+        packet_number = int.from_bytes(pn_bytes, "big")
+
+        header = bytes([first_byte]) + packet_bytes[1:pn_offset] + pn_bytes
+        payload_start = pn_offset + pn_len
+        payload_end = pn_offset + length_field
+        if payload_end > len(packet_bytes) or payload_start >= payload_end:
+            return None
+        ciphertext = packet_bytes[payload_start:payload_end]
+
+        nonce = bytearray(iv)
+        pn_padded = packet_number.to_bytes(12, "big")
+        for i in range(12):
+            nonce[i] ^= pn_padded[i]
+
+        plaintext = AESGCM(key).decrypt(bytes(nonce), ciphertext, header)
+        crypto_data = _extract_quic_crypto_frame(plaintext)
+        if not crypto_data:
+            return None
+
+        # 既存のTLS ClientHello解析コード(JA3/JA4/SNI抽出)を再利用するため、
+        # QUICの生ハンドシェイクメッセージを疑似TLSレコードでラップする
+        fake_record = b"\x16\x03\x01" + struct.pack("!H", len(crypto_data)) + crypto_data
+        ch = _parse_tls_client_hello(fake_record)
+        if not ch:
+            return None
+        ja4 = _compute_ja4(fake_record)
+        return {
+            "sni": ch.get("sni") or "",
+            "tls_version": ch.get("tls_version", "QUIC/TLS1.3"),
+            "ja4": ja4["ja4"] if ja4 else "",
+        }
     except Exception:
         return None
 
@@ -1864,6 +2026,7 @@ def analyze_pcap(data: bytes) -> dict:
                         "deprecated_tls": 0},
         "tls_handshakes": [], "tls_handshake_summary": {}, "ja3_reuse": [],
         "ipsec": {"ike_sas": [], "esp_flows": [], "summary": {}, "known_issues": []},
+        "vpn_tunnel_detections": [],
         "dhcp_issues": [],
         "dhcp_summary": {},
         "dns_issues": [],
@@ -1956,6 +2119,8 @@ def analyze_pcap(data: bytes) -> dict:
     # IPsec: IKE SA(初期化SPI) -> 状態 / ESP・AHフロー
     ike_sas: dict[str, dict] = {}
     esp_flows: dict[tuple, dict] = {}   # (src,dst) -> {"proto","count"}
+    # 最新の非IPsec系VPN/トンネルプロトコル検知: (proto,src,dst) -> {count, first_ts, detail}
+    vpn_tunnels: dict[tuple, dict] = {}
     # OSPF: router_id -> {area, hello_interval, dead_interval, auth_type, priority, ts}
     ospf_routers: dict[str, dict] = {}
 
@@ -2566,13 +2731,46 @@ def analyze_pcap(data: bytes) -> dict:
                         if len(_qd) >= 5 and (_qd[0] & 0x80):  # Long Header (bit0x80)
                             _ver = struct.unpack("!I", _qd[1:5])[0]
                             _qk = (src, dst)
-                            _qe = quic_conns.setdefault(_qk, {"count": 0, "versions": set(), "initial": False})
+                            _qe = quic_conns.setdefault(_qk, {"count": 0, "versions": set(),
+                                                               "initial": False, "sni_tried": False,
+                                                               "sni": "", "ja4": ""})
                             _qe["count"] += 1
                             if _ver != 0:
                                 _qe["versions"].add(f"0x{_ver:08x}")
                             # Long Header Packet Type: bits 0x30。00=Initial
                             if (_qd[0] & 0x30) == 0x00:
                                 _qe["initial"] = True
+                                # クライアント→サーバー方向のInitialのみSNI抽出を試みる
+                                # （ServerHelloにはSNIが載らないため）。1接続につき1回のみ。
+                                if udp.dport in QUIC_PORTS and not _qe["sni_tried"]:
+                                    _qe["sni_tried"] = True
+                                    _qsni = _decrypt_quic_initial_sni(_qd)
+                                    if _qsni and _qsni.get("sni"):
+                                        _qe["sni"] = _qsni["sni"]
+                                        _qe["ja4"] = _qsni.get("ja4", "")
+                                        tls_unique_sites.add(_qsni["sni"])
+                                        _record_domain(_qsni["sni"], src, "QUIC-SNI")
+
+                    # ── WireGuard/OpenVPN検知（シャドーIT・未承認VPNトンネルの把握） ──
+                    _vd = bytes(udp.data)
+                    if len(_vd) == 148 and _vd[0] == 1 and _vd[1:4] == b"\x00\x00\x00":
+                        _vk = ("WireGuard", src, dst)
+                        _ve = vpn_tunnels.setdefault(_vk, {"count": 0, "first_ts": ts,
+                                                           "msg": "Handshake Initiation"})
+                        _ve["count"] += 1
+                    elif len(_vd) == 92 and _vd[0] == 2 and _vd[1:4] == b"\x00\x00\x00":
+                        _vk = ("WireGuard", src, dst)
+                        _ve = vpn_tunnels.setdefault(_vk, {"count": 0, "first_ts": ts,
+                                                           "msg": "Handshake Response"})
+                        _ve["count"] += 1
+                        _ve["msg"] = "Handshake Response（確立）"
+                    elif (udp.dport == 1194 or udp.sport == 1194) and len(_vd) >= 14:
+                        _ov_op = _vd[0] >> 3
+                        if _ov_op in (7, 8):  # P_CONTROL_HARD_RESET_CLIENT/SERVER_V2
+                            _vk = ("OpenVPN", src, dst)
+                            _ve = vpn_tunnels.setdefault(_vk, {"count": 0, "first_ts": ts,
+                                                               "msg": "TLSハンドシェイク開始"})
+                            _ve["count"] += 1
 
                     # CTF flag{...}/Base64候補の検出（プロトコル種別によらず全UDPペイロード対象）
                     if udp.data:
@@ -3560,6 +3758,7 @@ def analyze_pcap(data: bytes) -> dict:
             "src": src, "dst": dst, "packets": q["count"],
             "versions": ",".join(sorted(q["versions"])) or "(不明)",
             "has_initial": q["initial"],
+            "sni": q.get("sni", ""), "ja4": q.get("ja4", ""),
         })
     result["quic_sessions"].sort(key=lambda x: x["packets"], reverse=True)
 
@@ -3800,6 +3999,14 @@ def analyze_pcap(data: bytes) -> dict:
             "ike_weak_crypto": sum(1 for s in result["ipsec"]["ike_sas"] if s["weak_crypto"]),
             "esp_flows": len(esp_flows),
             "esp_packets": sum(f["count"] for f in esp_flows.values())}
+
+    # ── WireGuard/OpenVPN検知結果 ──
+    for (_proto, _s, _d), _ve in vpn_tunnels.items():
+        result["vpn_tunnel_detections"].append({
+            "protocol": _proto, "src": _s, "dst": _d, "packets": _ve["count"],
+            "timestamp": _ts_str(_ve["first_ts"]), "detail": _ve["msg"],
+        })
+    result["vpn_tunnel_detections"].sort(key=lambda x: x["packets"], reverse=True)
 
     # ── 既知の類似不具合パターン（Junos 21.2R1リリースノート「未解決の問題」より） ──
     # ネットワークポリシーの都合上ここではJuniper公式サイトへ直接アクセスできないが、
@@ -5001,6 +5208,9 @@ def _check_attachment(filename: str, payload: bytes) -> list:
     for sig in scan_ips_signatures(payload):
         verdicts.append({"severity": sig["severity"], "type": f"シグネチャ:{sig['category']}",
                          "detail": f"添付内容がシグネチャに一致: {sig['category']}"})
+    for yh in scan_yara_file(payload):
+        verdicts.append({"severity": yh["severity"], "type": f"YARA:{yh['rule']}",
+                         "detail": yh["description"] or f"YARAルール {yh['rule']} に一致"})
     return verdicts
 
 
@@ -5434,3 +5644,120 @@ def get_session_state_distribution(tcp_streams: list) -> dict:
         else:
             state_dist['接続中（SYN_SENT）'] += 1
     return {k: v for k, v in state_dist.items() if v > 0}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  MITRE ATT&CK Navigator レイヤーJSON出力
+# ══════════════════════════════════════════════════════════════════
+# analyze_pcap()の検知結果をMITRE ATT&CK Enterprise Matrixの技術IDにマッピングし、
+# ATT&CK Navigator（https://mitre-attack.github.io/attack-navigator/）に読み込める
+# レイヤーJSON(v4.5)として出力する。SOC/DFIRで標準的に使われる可視化形式であり、
+# 他ツールへの検知結果の引き継ぎや報告書添付に使える。
+# マッピングはベストエフォート（技術の性質上、複数技術にまたがる検知や、
+# ATT&CKの技術粒度に厳密対応しない検知も含むため、目安として利用すること）。
+
+# 横展開検知(lateral_movement_techniques)の"technique"文字列に含まれるキーワード
+# → (技術ID, 技術名) のマッピング（複数技術にまたがる場合は複数タプル）
+_ATTACK_KEYWORD_MAP = [
+    ("PsExec",              [("T1021.002", "Remote Services: SMB/Windows Admin Shares"),
+                              ("T1569.002", "System Services: Service Execution")]),
+    ("WinRM",               [("T1021.006", "Remote Services: Windows Remote Management")]),
+    ("RDP接続",              [("T1021.001", "Remote Services: Remote Desktop Protocol")]),
+    ("VNC接続",              [("T1021.005", "Remote Services: VNC")]),
+    ("DCERPC",              [("T1021.003", "Remote Services: Distributed Component Object Model")]),
+    ("SSH内部間セッション",    [("T1021.004", "Remote Services: SSH")]),
+    ("Pass-the-Hash",       [("T1550.002", "Use Alternate Authentication Material: Pass the Hash")]),
+    ("Lateral Tool Transfer", [("T1570", "Lateral Tool Transfer")]),
+]
+
+# analyze_pcap()結果のフィールド名 → 技術ID+技術名（当該フィールドに1件以上あれば付与）
+_ATTACK_FIELD_MAP = {
+    "beaconing":              [("T1071", "Application Layer Protocol")],
+    "data_exfil":              [("T1041", "Exfiltration Over C2 Channel")],
+    "dns_tunneling":           [("T1071.004", "Application Layer Protocol: DNS")],
+    "icmp_exfil":              [("T1095", "Non-Application Layer Protocol")],
+    "scan_patterns":           [("T1046", "Network Service Discovery")],
+    "worm_propagation":        [("T1210", "Exploitation of Remote Services"),
+                                 ("T1570", "Lateral Tool Transfer")],
+    "threat_intel_hits":       [("T1071", "Application Layer Protocol")],
+    "suspicious_destinations": [("T1090", "Proxy")],
+    "ja3_reuse":               [("T1071", "Application Layer Protocol")],
+    "vpn_tunnel_detections":   [("T1572", "Protocol Tunneling")],
+}
+
+# IPSシグネチャID(先頭一致) → 技術ID+技術名。より具体的なものを先に判定する。
+_ATTACK_SIGID_PREFIX_MAP = [
+    ("WEB-WEBSHELL",   [("T1505.003", "Server Software Component: Web Shell")]),
+    ("MAL-REVSHELL",   [("T1059", "Command and Scripting Interpreter")]),
+    ("MAL-RANSOMNOTE", [("T1486", "Data Encrypted for Impact")]),
+    ("EXP-",           [("T1210", "Exploitation of Remote Services")]),
+    ("CVE-",           [("T1190", "Exploit Public-Facing Application")]),
+    ("WEB-",           [("T1190", "Exploit Public-Facing Application")]),
+    ("SCAN-TOOL-UA",   [("T1595", "Active Scanning")]),
+]
+
+
+def generate_attack_navigator_layer(result: dict, layer_name: str = "pcap解析結果") -> dict:
+    """
+    analyze_pcap()の結果をMITRE ATT&CK Navigatorレイヤー(v4.5 JSON)に変換する。
+    https://github.com/mitre-attack/attack-navigator にそのまま読み込める。
+    """
+    techniques: dict = {}  # technique_id -> {"name", "count", "comments": set}
+
+    def _add(tid, name, comment=""):
+        e = techniques.setdefault(tid, {"name": name, "count": 0, "comments": set()})
+        e["count"] += 1
+        if comment:
+            e["comments"].add(comment)
+
+    for item in result.get("lateral_movement_techniques", []) or []:
+        tech_text = item.get("technique", "")
+        for keyword, mappings in _ATTACK_KEYWORD_MAP:
+            if keyword in tech_text:
+                for tid, name in mappings:
+                    _add(tid, name, f"{item.get('src','')} → {item.get('dst','')}: {tech_text}")
+                break
+
+    for field, mappings in _ATTACK_FIELD_MAP.items():
+        items = result.get(field) or []
+        if not items:
+            continue
+        for tid, name in mappings:
+            _add(tid, name, f"{field}: {len(items)}件検知")
+
+    for alert in result.get("ips_alerts", []) or []:
+        sig_id = alert.get("sig_id", "") or alert.get("category", "")
+        for prefix, mappings in _ATTACK_SIGID_PREFIX_MAP:
+            if sig_id.startswith(prefix):
+                for tid, name in mappings:
+                    _add(tid, name, alert.get("category", sig_id))
+                break
+
+    layer_techniques = [
+        {
+            "techniqueID": tid,
+            "score": e["count"],
+            "color": "",
+            "comment": " / ".join(sorted(e["comments"]))[:500],
+            "enabled": True,
+            "metadata": [],
+            "showSubtechniques": False,
+        }
+        for tid, e in techniques.items()
+    ]
+
+    return {
+        "name": layer_name,
+        "versions": {"attack": "16", "navigator": "4.9.1", "layer": "4.5"},
+        "domain": "enterprise-attack",
+        "description": f"Syslog AI アナライザーによるpcap解析結果の自動マッピング"
+                        f"（検知技術数: {len(layer_techniques)}）。マッピングはベストエフォートです。",
+        "techniques": layer_techniques,
+        "gradient": {"colors": ["#ffe766", "#ff6666"], "minValue": 0,
+                     "maxValue": max((e["count"] for e in techniques.values()), default=1)},
+        "legendItems": [],
+        "showTacticRowBackground": True,
+        "tacticRowBackground": "#dddddd",
+        "selectTechniquesAcrossTactics": True,
+        "selectSubtechniquesWithParent": False,
+    }

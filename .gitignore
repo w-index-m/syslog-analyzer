@@ -9,3 +9,4 @@ user_settings.json
 # 生成物: Snort/Suricataルールの取り込み結果・ダウンロードした脅威フィード
 ips_signatures_imported.json
 threat_intel/downloaded_*.txt
+yara_rules/imported/

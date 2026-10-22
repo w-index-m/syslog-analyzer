@@ -27,7 +27,7 @@ FortiGate/Palo Alto/CiscoなどのUTM/IPSログから侵入検知・マルウェ
 |------|------|
 | 🩺 状態監視 | SNMPで機器のCPU/メモリ/回線を収集し、信号機表示・グラフ化・閾値アラート（品質ルーブリック / MRTG風 / SNMPモニター） |
 | 📜 ログ解析 | syslog受信・show log貼り付けをAIが日本語診断し、バグ/運用/情報に自動仕分け。FortiGate/Palo Alto等のUTM/IPSログは攻撃カテゴリ別（侵入検知・マルウェア・DoS等）の検知サマリーも自動集計 |
-| 📦 パケット解析 | pcapからTCP問題・スキャン・VoIP品質・ICMPリダイレクト等を検出＋AI診断。IPS/IDS的検査（シグネチャ・アノマリ・振る舞い型）、横展開(PsExec/WinRM/RDP/VNC/DCOM/SSH/Pass-the-Hash/Lateral Tool Transfer)検知、メールのフィッシング検知（添付・ヘッダー・本文リンク先）、非標準ポートでのTLS通信検知、GeoIP/ASN判定。CTF/フォレンジック機能（flag検出・TCPストリーム再構成・ファイル抽出）も対応 |
+| 📦 パケット解析 | pcapからTCP問題・スキャン・VoIP品質・ICMPリダイレクト等を検出＋AI診断。IPS/IDS的検査（シグネチャ・アノマリ・振る舞い型）、横展開(PsExec/WinRM/RDP/VNC/DCOM/SSH/Pass-the-Hash/Lateral Tool Transfer)検知、メールのフィッシング検知（添付・ヘッダー・本文リンク先）、非標準ポートでのTLS通信検知、QUIC/HTTP3のSNI抽出、WireGuard/OpenVPN検知、YARAルールスキャン、GeoIP/ASN判定、MITRE ATT&CK Navigator出力。CTF/フォレンジック機能（flag検出・TCPストリーム再構成・ファイル抽出）も対応 |
 | 🌊 フロー/経路 | NetFlow集計・トポロジー自動検出・応答時間監視 |
 | 🗂️ 機器コンフィグ | インターフェース/ルーティング設定の登録に加え、FortiGateはAIによるコンフィグレビュー（セキュリティ懸念点・SSLインスペクション設定等）にも対応 |
 | 📊 アクセス解析 | 公開アプリの訪問者数・国別内訳を自前で記録（Google Sheets連携オプション付き） |
@@ -58,7 +58,9 @@ AI解析は **Gemini / Groq（無料枠あり）/ Claude / Ollama（完全ロー
 - AI解析結果の品質チェック（LLM-as-a-Judge）
 - **🛡️ IPS/IDS的検査**：シグネチャ型（1600件超）・アノマリ型（ポートスキャン/DDoS/DNSトンネリング）・振る舞い型（横展開8手口＝PsExec/WinRM/RDP/VNC/DCOM/SSH/Pass-the-Hash/Lateral Tool Transfer、C2ビーコニング、データ持ち出し）・脅威インテリジェンス照合をホスト別リスクスコアに集約
 - **📧 メールのフィッシング/ランサムウェア配布検知**：添付ファイル（EICAR/実行ファイル/マクロ/ランサムノート典型ファイル名/暗号化済みファイル名パターン）、ヘッダー（件名の緊急性訴求・From/Reply-To不一致・表示名なりすまし）、本文中のリンク先（ブランドなりすまし・URL短縮・punycode・IP直リンク）を検査
-- **🌐 通信の可視化**：GeoIP（監視対象国）・ASN/クラウド判定・非標準ポートでのTLS通信（プロキシ経由/ポート偽装）検知・JA3/JA3S・[JA4/JA4S](https://github.com/FoxIO-LLC/ja4)（JA3後継のTLSフィンガープリンティング）算出
+- **🌐 通信の可視化**：GeoIP（監視対象国）・ASN/クラウド判定・非標準ポートでのTLS通信（プロキシ経由/ポート偽装）検知・JA3/JA3S・[JA4/JA4S](https://github.com/FoxIO-LLC/ja4)（JA3後継のTLSフィンガープリンティング）算出・QUIC/HTTP3のSNI抽出（RFC 9001準拠のInitial鍵導出）・WireGuard/OpenVPN検知
+- **🧬 YARAルールスキャン**：メール添付・pcapから抽出したファイルをYARAルールと照合（コミュニティ公開ルールの取り込みにも対応）
+- **🗺️ MITRE ATT&CK Navigator出力**：検知結果をATT&CK Enterprise Matrixの技術IDにマッピングし、Navigator用レイヤーJSONとして出力
 - **🚨 脅威インテリジェンス**：abuse.ch（Feodo Tracker/URLhaus/ThreatFox）・CINS Army Listの既知不正IP/ドメインと通信先を照合
 - 機器コンフィグ登録（インターフェース・ルーティング設定を正常構成として参照）。**FortiGateはAIコンフィグレビュー**（セキュリティ懸念点・SSLインスペクション設定確認等）にも対応
 - **📊 アクセス解析**：公開アプリの訪問者数・国別内訳を自前記録（IPアドレスは保存しない設計、Google Sheets連携オプション）

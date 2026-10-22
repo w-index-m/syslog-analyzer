@@ -4921,6 +4921,19 @@ with tab_pcap:
                            "（既知C2/マルウェアIP・ドメイン照合）の各面で検査し、"
                            "最後にホスト別のリスクスコアに束ねます。簡易ヒューリスティックのため参考情報として扱ってください。")
 
+                # ── MITRE ATT&CK Navigatorレイヤー出力 ──
+                _attack_layer = pcap_analyzer.generate_attack_navigator_layer(res, "pcap解析結果")
+                if _attack_layer["techniques"]:
+                    st.download_button(
+                        f"🗺️ MITRE ATT&CK Navigator用レイヤーJSONをダウンロード"
+                        f"（{len(_attack_layer['techniques'])}技術）",
+                        data=json.dumps(_attack_layer, ensure_ascii=False, indent=2),
+                        file_name="attack_navigator_layer.json", mime="application/json",
+                        key="dl_attack_navigator")
+                    st.caption("[ATT&CK Navigator](https://mitre-attack.github.io/attack-navigator/) "
+                               "の「Open Existing Layer → Upload from local」で読み込めます。"
+                               "検知結果からの自動マッピングのため参考情報として扱ってください。")
+
                 # ── 🌐 脅威インテリジェンス一致（最優先・確度高） ──
                 if _ti_hits:
                     st.markdown("**🌐 脅威インテリジェンス一致（既知の悪性IP/ドメイン）**")
@@ -5094,14 +5107,31 @@ with tab_pcap:
                 st.markdown("---")
                 st.markdown("### 🌐 QUIC / HTTP3 セッション")
                 st.caption("UDP/443等で動作するQUIC（HTTP/3）通信を検出しました。"
-                           "暗号化されペイロードは追えませんが、接続先・バージョン・"
-                           "Initialパケットの有無から通信の存在を把握できます。")
+                           "ペイロード自体は暗号化されていますが、Initialパケットの鍵は"
+                           "公開ソルト値のみから導出できるため、接続先SNIとJA4"
+                           "フィンガープリントは秘密鍵なしで取得できます。")
                 _qdf = pd.DataFrame([{
                     "送信元": _q["src"], "宛先": _q["dst"], "パケット数": _q["packets"],
                     "バージョン": _q["versions"],
                     "Initial": "○" if _q["has_initial"] else "",
+                    "SNI": _q.get("sni", ""), "JA4": _q.get("ja4", ""),
                 } for _q in _quic])
                 _show_table_top_n(_qdf, "quic_sessions.csv", "dl_quic_csv")
+
+            # ── 🔒 WireGuard/OpenVPN検知（シャドーIT・未承認VPNの把握） ──
+            _vpn_tunnels = res.get("vpn_tunnel_detections", [])
+            if _vpn_tunnels:
+                st.markdown("---")
+                st.markdown("### 🔒 VPN/トンネリング通信の検知")
+                st.caption("WireGuard（固定長ハンドシェイクパケットで判定・ポート非依存）・"
+                           "OpenVPN（UDP 1194のTLSハンドシェイク開始パターン）を検出しました。"
+                           "会社が許可していない個人VPN利用（シャドーIT）や、"
+                           "ポリシー回避のためのトンネリングの可能性があります。")
+                _vdf = pd.DataFrame([{
+                    "プロトコル": _v["protocol"], "送信元": _v["src"], "宛先": _v["dst"],
+                    "パケット数": _v["packets"], "検知時刻": _v["timestamp"], "内容": _v["detail"],
+                } for _v in _vpn_tunnels])
+                _show_table_top_n(_vdf, "vpn_tunnel_detections.csv", "dl_vpn_csv")
 
             # ── 📡 無線 802.11（Wi-Fi）解析 ──
             _wl = {"is_wireless": False}
@@ -5735,6 +5765,9 @@ with tab_pcap:
                     for _aef in _as_embedded:
                         _tags = [f".{_aef['ext']}（{_aef['size']}バイト）"]
                         _data_for_dl = _aef["data"]
+                        _ayara = pcap_analyzer.scan_yara_file(_aef["data"])
+                        if _ayara:
+                            _tags.append("🛡️YARA一致: " + ", ".join(h["rule"] for h in _ayara))
                         if _aef["ext"] in _img_exts_auto:
                             try:
                                 _aimgf = pcap_analyzer.analyze_image_forensics(_aef["ext"], _aef["data"])
@@ -5866,6 +5899,11 @@ with tab_pcap:
                                 mime="application/octet-stream",
                                 key=f"dl_embedded_{_fi}_{_sel_stream['src']}_{_sel_stream['src_port']}",
                             )
+                            # YARAルールスキャン（コミュニティルール取り込み時も自動適用）
+                            for _yh in pcap_analyzer.scan_yara_file(_ef["data"]):
+                                _yicon = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(_yh["severity"], "⚪")
+                                st.warning(f"{_yicon} **YARA一致: {_yh['rule']}** — "
+                                           f"{_yh['description'] or '詳細情報なし'}")
                             # 画像は末尾追記・ポリグロット・メタデータを深掘り検査
                             if _ef["ext"] in _img_exts:
                                 _imgf = pcap_analyzer.analyze_image_forensics(_ef["ext"], _ef["data"])
