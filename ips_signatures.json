@@ -1,6 +1,6 @@
 {
   "_comment": "IPSシグネチャ定義。GitHubで一元管理し、全デプロイがここから読み込む。patternはPython re のバイト列パターン（latin-1）。binary=trueは印字可能判定をスキップ。cve/description/recommended_action/reference は検知時の対応判断用メタデータ（任意）。",
-  "version": "2026.09.27.1",
+  "version": "2026.10.22.1",
   "signatures": [
     {
       "id": "WEB-SQLI-1",
@@ -103,7 +103,7 @@
       "category": "スキャナー/攻撃ツール",
       "severity": "medium",
       "binary": false,
-      "pattern": "(?i)(sqlmap|nikto|nmap\\s+scripting|masscan|nessus|dirbuster|gobuster|wpscan|acunetix|nuclei|burp\\s*suite|owasp\\s*zap|^zap\\b|w3af|arachni|skipfish|whatweb|feroxbuster|ffuf|wfuzz|hydra|metasploit|nexpose|openvas|qualys)",
+      "pattern": "(?i)(sqlmap|nikto|nmap\\s+scripting|masscan|nessus|dirbuster|gobuster|wpscan|acunetix|nuclei|burp\\s*suite|owasp\\s*zap|^zap\\b|w3af|arachni|skipfish|whatweb|feroxbuster|ffuf|wfuzz|hydra|metasploit|nexpose|openvas|qualys|zgrab)",
       "cve": "",
       "description": "既知の脆弱性スキャナ/攻撃ツール/ペネトレーションテストツールのUser-Agentを検出。",
       "recommended_action": "送信元IPの評価・必要に応じ遮断、対象資産の脆弱性確認。許可されたペネトレーション試験の場合は想定内。",
@@ -396,6 +396,18 @@
       "description": "Citrix NetScaler ADC/Gatewayのメモリリーク脆弱性(Citrix Bleed 2)を悪用したセッションハイジャック/認証バイパスが疑われるログイン要求。2025年に複数のランサムウェアグループが初期侵入経路として悪用。",
       "recommended_action": "NetScaler機器の緊急パッチ適用、全アクティブセッションの失効、侵害有無（不審な管理者アカウント等）の調査。",
       "reference": "https://www.cve.org/CVERecord?id=CVE-2025-5777",
+      "source": "builtin"
+    },
+    {
+      "id": "CVE-PHP2SHELL",
+      "category": "PHP session.upload_progress RCE「php2shell」(CVE-2026-109618/CVE-2026-109619)",
+      "severity": "high",
+      "binary": false,
+      "pattern": "(?is)(?=.*Content-Disposition:\\s*form-data;\\s*name=\"PHP_SESSION_UPLOAD_PROGRESS\")(?=.*Content-Disposition:\\s*form-data;\\s*name=\"PHPSESSID\")",
+      "cve": "CVE-2026-109618",
+      "description": "PHPのsession.upload_progress機能(マルチパートPOSTのPHP_SESSION_UPLOAD_PROGRESSフィールド)を悪用したセッションファイル汚染/UAF攻撃「php2shell」の可能性がある要求。本機能は進捗バー表示用の正規機能でもあるため、PHPSESSIDが同一要求内に（Cookieではなくボディのフィールドとして）同居している場合のみ検知する。未パッチのPHP(8.2.35/8.3.36/8.4.27/8.5.12未満、8.1以前はEOL)が影響を受ける。誤検知の可能性があるため要確認。",
+      "recommended_action": "PHPを修正バージョンへ更新。更新できない場合はsession.upload_progress.enabled=0を設定しワーカー再起動。送信元IPの精査と該当ホストの侵害有無を確認。",
+      "reference": "https://dev.to/syrex1013/php2shell-turning-a-session-upload-progress-uaf-into-unauthenticated-rce-cve-2026-109618--30ab",
       "source": "builtin"
     }
   ],
