@@ -335,6 +335,18 @@ _HTTP_METHODS = {"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CO
 _RARE_HTTP_METHODS = {"TRACE", "TRACK", "PROPFIND", "PROPPATCH", "MKCOL", "COPY", "MOVE",
                        "LOCK", "UNLOCK", "DEBUG", "CONNECT"}
 
+# 脆弱性スキャナ/偵察ツールが好んで直打ちする既知の機密/設定/デバッグ系パス。
+# 個々のアクセスは単発なら誤検知もあり得るため、後段で「件数」または「このパターンとの
+# 一致数」と組み合わせて判定する（Nikto/Nuclei/dirbuster等が実際に試すパスの代表例）。
+_VULN_PROBE_PATH_RE = re.compile(
+    r"(?i)^/(\.env|\.git/|\.git$|\.svn/|\.aws/credentials|\.ssh/|\.htaccess|\.htpasswd|"
+    r"\.DS_Store|wp-login\.php|wp-admin|wp-config\.php(?:\.bak)?|xmlrpc\.php|"
+    r"phpinfo\.php|phpmyadmin|adminer\.php|config\.php(?:\.bak)?|server-status|server-info|"
+    r"actuator(?:/health)?|debug|console|swagger(?:-ui)?|\.well-known/.*\.\./|"
+    r"cgi-bin/|admin/config|backup\.(sql|zip|tar\.gz)|\.idea/|\.vscode/|docker-compose\.ya?ml|"
+    r"id_rsa|credentials\.json|web\.config)"
+)
+
 
 def _extract_http_session_ids(payload: bytes) -> list:
     """
@@ -1997,6 +2009,7 @@ def analyze_pcap(data: bytes) -> dict:
         "tcp_syn_no_synack": [], "tcp_zero_window": [],
         "tcp_receiver_pressure": [], "tcp_path_congestion": [],
         "scan_patterns": [],
+        "vuln_scan_detections": [],
         "ctf_flag_hits": [],
         "dns_tunneling": [],
         "icmp_exfil": [],
@@ -2146,6 +2159,9 @@ def analyze_pcap(data: bytes) -> dict:
         lambda: {"count401": 0, "count403": 0, "first_ts": None, "last_ts": None})
     # HTTPメソッド使用状況: (client, server, server_port) -> {method: count}
     http_methods_seen: dict[tuple, dict] = defaultdict(lambda: defaultdict(int))
+    # 脆弱性スキャン検知用: (client, server, server_port) -> {paths:set, probe_hits:set,
+    #   count:int, status_4xx:int, first_ts, last_ts}
+    http_paths_seen: dict[tuple, dict] = {}
 
     # CTF問題向け flag{...}/Base64候補の検出結果
     ctf_flag_hits: list = []
@@ -2527,6 +2543,25 @@ def analyze_pcap(data: bytes) -> dict:
                                     # リクエスト（Cookie/Authorization/X-Session-Id等）からセッションIDを抽出
                                     _record_http_session_hint(src, dst, sport, dport, bytes(tcp.data), ts)
                                     http_methods_seen[(src, dst, dport)][_method] += 1
+                                    # 脆弱性スキャン検知用: リクエストパスを記録
+                                    try:
+                                        _rl_end = tcp.data.find(b"\r\n", 0, 2048)
+                                        _rl = bytes(tcp.data[:_rl_end if _rl_end != -1 else 2048]
+                                                    ).decode("latin-1", errors="replace")
+                                        _rl_parts = _rl.split(" ")
+                                        if len(_rl_parts) >= 2:
+                                            _path = _rl_parts[1].split("?", 1)[0][:200]
+                                            _hpk = (src, dst, dport)
+                                            _hpe = http_paths_seen.setdefault(_hpk, {
+                                                "paths": set(), "probe_hits": set(), "count": 0,
+                                                "first_ts": ts, "last_ts": ts})
+                                            _hpe["paths"].add(_path)
+                                            _hpe["count"] += 1
+                                            _hpe["last_ts"] = ts
+                                            if _VULN_PROBE_PATH_RE.match(_path):
+                                                _hpe["probe_hits"].add(_path)
+                                    except Exception:
+                                        pass
                         except Exception: pass
 
                     # ── TLS / HTTPS ──────────────────────
@@ -3026,6 +3061,46 @@ def analyze_pcap(data: bytes) -> dict:
                 "detail": f"{dst}:{dp} へ {len(srcs)} 個の異なる送信元IPからSYNが集中し応答なし "
                           "— DDoS(分散SYNフラッド)の可能性",
             })
+
+    # ── 脆弱性スキャン検知(HTTP層) ──
+    # ポートスキャンと異なり、単一ポート(80/443等)に対して多数の異なるパスへアクセス
+    # する挙動（Nikto/Nuclei/dirbuster/wpscan等に共通）で検出する。ツール名・UAに
+    # 依存しないため、SCAN-TOOL-UAシグネチャが拾えないUA偽装時にも有効。
+    # 既知の機密/設定/デバッグパスへの一致数が多いほど確度が高いとみなす。
+    _4xx_count_by_key: dict = {}
+    for e in result["http_errors"]:
+        if e["status_code"] >= 400:
+            _k = (e["client"], e["server"], e["server_port"])
+            _4xx_count_by_key[_k] = _4xx_count_by_key.get(_k, 0) + 1
+    for (client, server, server_port), hpe in http_paths_seen.items():
+        n_paths = len(hpe["paths"])
+        n_probe = len(hpe["probe_hits"])
+        if n_paths < 10 and n_probe < 2:
+            continue
+        n_4xx = _4xx_count_by_key.get((client, server, server_port), 0)
+        duration = max(hpe["last_ts"] - hpe["first_ts"], 0.001)
+        if n_probe >= 4:
+            severity = "critical"
+        elif n_probe >= 2 or n_paths >= 40:
+            severity = "high"
+        else:
+            severity = "medium"
+        _sample_probes = sorted(hpe["probe_hits"])[:8]
+        _detail = (f"{client} → {server}:{server_port} へ{duration:.1f}秒間で"
+                   f"{n_paths}個の異なるパスへアクセス（{hpe['count']}リクエスト中"
+                   f"{n_4xx}件が4xx応答）")
+        if _sample_probes:
+            _detail += f" — 既知の機密/設定パスへの一致: {', '.join(_sample_probes)}"
+        _detail += " — 脆弱性スキャン/ディレクトリ探索の可能性"
+        result["vuln_scan_detections"].append({
+            "src": client, "dst": server, "dst_port": server_port,
+            "severity": severity, "distinct_paths": n_paths, "probe_path_hits": n_probe,
+            "requests": hpe["count"], "status_4xx": n_4xx, "duration_sec": round(duration, 1),
+            "sample_probe_paths": _sample_probes, "detail": _detail,
+        })
+    _vs_sev_order = {"critical": 0, "high": 1, "medium": 2}
+    result["vuln_scan_detections"].sort(
+        key=lambda x: (_vs_sev_order.get(x["severity"], 9), -x["distinct_paths"]))
 
     # TCP ゼロウィンドウ
     for (src, dst, sp, dp), cnt in zero_win_count.items():
@@ -3640,6 +3715,9 @@ def analyze_pcap(data: bytes) -> dict:
     for sp_item in result.get("scan_patterns", []):
         if sp_item["type"] == "port_scan":
             _add_risk(sp_item.get("src"), 20, "ポートスキャン")
+    for vs in result.get("vuln_scan_detections", []):
+        _vs_pts = 30 if vs["severity"] == "critical" else 22 if vs["severity"] == "high" else 15
+        _add_risk(vs["src"], _vs_pts, "脆弱性スキャン")
     for dt in result.get("dns_tunneling", []):
         # DNSトンネリングはクライアント側をリスク計上
         for _c in dns_by_domain.get(dt["domain"], {}).get("clients", []):
@@ -5677,6 +5755,7 @@ _ATTACK_FIELD_MAP = {
     "dns_tunneling":           [("T1071.004", "Application Layer Protocol: DNS")],
     "icmp_exfil":              [("T1095", "Non-Application Layer Protocol")],
     "scan_patterns":           [("T1046", "Network Service Discovery")],
+    "vuln_scan_detections":    [("T1595.002", "Active Scanning: Vulnerability Scanning")],
     "worm_propagation":        [("T1210", "Exploitation of Remote Services"),
                                  ("T1570", "Lateral Tool Transfer")],
     "threat_intel_hits":       [("T1071", "Application Layer Protocol")],

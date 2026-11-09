@@ -4906,7 +4906,7 @@ with tab_pcap:
                                + res.get("suspicious_destinations", []) + res.get("data_exfil", [])
                                + res.get("lateral_movement_techniques", []))
             _anomaly_items = (res.get("scan_patterns", []) + res.get("dns_tunneling", [])
-                              + res.get("icmp_exfil", []))
+                              + res.get("icmp_exfil", []) + res.get("vuln_scan_detections", []))
             _host_risk = res.get("host_risk", [])
             _ti_hits = res.get("threat_intel_hits", [])
             _geo_alerts = res.get("geo_alerts", [])
@@ -5483,6 +5483,14 @@ with tab_pcap:
                         st.error(f"🔴 **ポートスキャンを検出**: {_scan['detail']}")
                     elif _scan["type"] == "ddos_synflood":
                         st.error(f"🔴 **DDoS(分散SYNフラッド)を検出**: {_scan['detail']}")
+                # 脆弱性スキャン検知（HTTP層・ポートスキャンとは別軸の検知）
+                _vs_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡"}
+                for _vs in res.get("vuln_scan_detections", []):
+                    _icon = _vs_icon.get(_vs["severity"], "⚪")
+                    if _vs["severity"] == "critical":
+                        st.error(f"{_icon} **脆弱性スキャンを検出**: {_vs['detail']}")
+                    else:
+                        st.warning(f"{_icon} **脆弱性スキャンの疑い**: {_vs['detail']}")
                 df_tcp = pd.DataFrame(res["tcp_issues"])
                 df_tcp_show = df_tcp[["type", "src", "dst", "src_port", "dst_port", "count", "description"]]
                 df_tcp_show.columns = ["種別", "送信元IP", "宛先IP", "送信元Port", "宛先Port", "回数", "説明"]
@@ -6056,14 +6064,16 @@ with tab_pcap:
             _auth_bf = res.get("auth_bruteforce", [])
             _rare_methods = res.get("http_rare_methods", [])
             _scan_patterns = res.get("scan_patterns", [])
-            if _web_ips or _auth_bf or _rare_methods:
+            _vuln_scans = res.get("vuln_scan_detections", [])
+            if _web_ips or _auth_bf or _rare_methods or _vuln_scans:
                 st.markdown("---")
                 st.markdown("### 🎯 Web診断/ペネトレーション試験アクティビティ")
                 st.caption("OWASP Top 10系の攻撃パターン・既知スキャナ/ペネトレーションテストツール・"
-                           "認証ブルートフォース・WebDAV探索やverb tamperingに使われる珍しいHTTPメソッドを"
-                           "統合表示します。許可されたペネトレーション試験中のキャプチャであれば"
+                           "認証ブルートフォース・WebDAV探索やverb tamperingに使われる珍しいHTTPメソッド・"
+                           "脆弱性スキャン（多数パスへの機械的アクセス）を統合表示します。"
+                           "許可されたペネトレーション試験中のキャプチャであれば"
                            "「想定通りの検知」として扱ってください。")
-                _wc1, _wc2, _wc3, _wc4 = st.columns(4)
+                _wc1, _wc2, _wc3, _wc4, _wc5 = st.columns(5)
                 _wc1.metric("Web攻撃シグネチャ", len(_web_ips))
                 _wc2.metric("認証ブルートフォース", len(_auth_bf),
                             delta="⚠️" if _auth_bf else None)
@@ -6071,6 +6081,8 @@ with tab_pcap:
                             delta="⚠️" if _rare_methods else None)
                 _wc4.metric("ポートスキャン兆候", len(_scan_patterns),
                             delta="⚠️" if _scan_patterns else None)
+                _wc5.metric("脆弱性スキャン兆候", len(_vuln_scans),
+                            delta="⚠️" if _vuln_scans else None)
 
                 if _web_ips:
                     st.markdown("**Web攻撃シグネチャ検出**")
@@ -6101,6 +6113,21 @@ with tab_pcap:
                         "メソッド内訳": ", ".join(f"{m}×{n}" for m, n in r["methods"].items()),
                     } for r in _rare_methods])
                     st.dataframe(df_rm, width='stretch', hide_index=True)
+
+                if _vuln_scans:
+                    st.markdown("**🕵️ 脆弱性スキャン検知（多数パスへの機械的アクセス）**")
+                    st.caption("ポートスキャンとは別軸の検知で、単一ポート(80/443等)に対して短時間に"
+                               "多数の異なるパスへアクセスする挙動（Nikto/Nuclei/dirbuster/wpscan等に"
+                               "共通）を見ています。ツール名・User-Agentに依存しないため、UA偽装時にも"
+                               "有効です。")
+                    df_vs = pd.DataFrame([{
+                        "重大度": v["severity"], "送信元": v["src"], "宛先": f"{v['dst']}:{v['dst_port']}",
+                        "異なるパス数": v["distinct_paths"], "機密パス一致数": v["probe_path_hits"],
+                        "リクエスト数": v["requests"], "4xx数": v["status_4xx"],
+                        "期間(秒)": v["duration_sec"],
+                        "一致パス例": ", ".join(v["sample_probe_paths"][:5]),
+                    } for v in _vuln_scans])
+                    st.dataframe(df_vs, width='stretch', hide_index=True)
 
             # ── TLS / HTTPS 解析 ─────────────────────────
             _tls_sum      = res.get("tls_summary", {})

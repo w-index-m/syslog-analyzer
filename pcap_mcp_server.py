@@ -58,7 +58,7 @@ _TRIM_FIELDS = [
     "unknown_proto_hints", "session_id_correlations", "voip_streams",
     "icmp_redirects", "rip_packets", "arp_anomalies", "quic_sessions",
     "industrial_alerts", "lateral_movement_techniques", "asn_hosts",
-    "vpn_tunnel_detections",
+    "vpn_tunnel_detections", "vuln_scan_detections",
 ]
 
 
