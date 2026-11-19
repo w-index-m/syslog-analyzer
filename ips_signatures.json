@@ -1,6 +1,6 @@
 {
   "_comment": "IPSシグネチャ定義。GitHubで一元管理し、全デプロイがここから読み込む。patternはPython re のバイト列パターン（latin-1）。binary=trueは印字可能判定をスキップ。cve/description/recommended_action/reference は検知時の対応判断用メタデータ（任意）。",
-  "version": "2026.10.22.1",
+  "version": "2026.11.19.1",
   "signatures": [
     {
       "id": "WEB-SQLI-1",
@@ -107,6 +107,18 @@
       "cve": "",
       "description": "既知の脆弱性スキャナ/攻撃ツール/ペネトレーションテストツールのUser-Agentを検出。",
       "recommended_action": "送信元IPの評価・必要に応じ遮断、対象資産の脆弱性確認。許可されたペネトレーション試験の場合は想定内。",
+      "reference": "https://attack.mitre.org/techniques/T1595/",
+      "source": "builtin"
+    },
+    {
+      "id": "SCAN-TOOL-KATANA-UA",
+      "category": "スキャナー/攻撃ツール",
+      "severity": "low",
+      "binary": false,
+      "pattern": "(?i)(?=.*intel\\s*mac\\s*os\\s*x\\s*11_1\\b)(?=.*chrome/87\\.0\\.4280\\.88\\b).*",
+      "cve": "",
+      "description": "ProjectDiscovery Katana（Webクローラー）のハードコード済みデフォルトUser-Agent（Chrome 87偽装）との一致候補。StrixやCairn等AI自律ペンテストエージェントがワーカーに同梱する例がある。ただし本物の非常に古いChrome 87利用者とも完全一致するため弱い兆候として扱い、同一送信元のvuln_scan_detections等の挙動ベース検知と合わせて判断すること（単独では遮断等の判断材料にしない）。",
+      "recommended_action": "単独で確定とせず、同一送信元の多数パスアクセス(vuln_scan_detections)やポートスキャン兆候と合わせて評価する。許可されたペネトレーション試験の場合は想定内。",
       "reference": "https://attack.mitre.org/techniques/T1595/",
       "source": "builtin"
     },

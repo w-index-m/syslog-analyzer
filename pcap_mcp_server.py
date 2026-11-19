@@ -139,9 +139,9 @@ def get_pcap_attack_navigator_layer(file_path: str, layer_name: str = "pcap解�
     """
     pcapの検知結果(横展開・ビーコニング・データ持ち出し・DNS/ICMPトンネリング・
     ポートスキャン・ワーム拡散・脅威インテリジェンス一致・VPNトンネル検知・
-    IPSシグネチャ等)をMITRE ATT&CK Enterprise Matrixの技術IDにマッピングし、
-    ATT&CK Navigator(https://mitre-attack.github.io/attack-navigator/)にそのまま
-    読み込めるレイヤーJSON(v4.5)を返す。マッピングはベストエフォート。
+    IPSシグネチャ・メール添付ファイルのYARA検知等)をMITRE ATT&CK Enterprise Matrixの
+    技術IDにマッピングし、ATT&CK Navigator(https://mitre-attack.github.io/attack-navigator/)
+    にそのまま読み込めるレイヤーJSON(v4.5)を返す。マッピングはベストエフォート。
 
     Args:
         file_path: ローカルのpcap/pcapng/zip/gzファイルへの絶対パス
@@ -154,7 +154,12 @@ def get_pcap_attack_navigator_layer(file_path: str, layer_name: str = "pcap解�
         return json.dumps({"error": str(e)}, ensure_ascii=False)
     if result.get("error"):
         return json.dumps({"error": result["error"]}, ensure_ascii=False)
-    layer = pcap_analyzer.generate_attack_navigator_layer(result, layer_name)
+    try:
+        email_results = pcap_analyzer.scan_email_attachments(data=data)
+    except Exception:
+        email_results = []
+    layer = pcap_analyzer.generate_attack_navigator_layer(
+        result, layer_name, email_scan_results=email_results)
     return json.dumps(layer, ensure_ascii=False, default=str)
 
 

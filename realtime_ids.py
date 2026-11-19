@@ -189,6 +189,8 @@ _FINDING_FIELDS = [
     ("threat_intel_hits",           "IDS-THREATINTEL"),
     ("ips_alerts",                  "IDS-SIGNATURE"),
     ("scan_patterns",               "IDS-SCAN"),
+    ("vuln_scan_detections",        "IDS-VULNSCAN"),
+    ("vpn_tunnel_detections",       "IDS-VPNTUNNEL"),
     ("dns_tunneling",               "IDS-DNSTUNNEL"),
     ("icmp_exfil",                  "IDS-ICMPEXFIL"),
     ("geo_alerts",                  "IDS-GEO"),

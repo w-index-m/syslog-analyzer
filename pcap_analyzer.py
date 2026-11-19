@@ -5775,11 +5775,27 @@ _ATTACK_SIGID_PREFIX_MAP = [
     ("SCAN-TOOL-UA",   [("T1595", "Active Scanning")]),
 ]
 
+# YARAルール名 → 技術ID+技術名。yara_rules/builtin.yar の各ルールに対応（ベストエフォート）。
+# EICAR_Test_String はAV動作確認用の無害な文字列のため技術マッピング対象外。
+_YARA_RULE_ATTACK_MAP = {
+    "Mimikatz_Indicators":          [("T1003", "OS Credential Dumping")],
+    "PowerShell_Obfuscation":       [("T1059.001", "Command and Scripting Interpreter: PowerShell")],
+    "Webshell_PHP_Eval_Chain":      [("T1505.003", "Server Software Component: Web Shell")],
+    "CobaltStrike_Default_NamedPipe": [("T1021.002", "Remote Services: SMB/Windows Admin Shares"),
+                                        ("T1071", "Application Layer Protocol")],
+    "UPX_Packed_Binary":            [("T1027.002", "Obfuscated Files or Information: Software Packing")],
+    "Generic_Reverse_Shell_Snippet": [("T1059", "Command and Scripting Interpreter")],
+}
 
-def generate_attack_navigator_layer(result: dict, layer_name: str = "pcap解析結果") -> dict:
+
+def generate_attack_navigator_layer(result: dict, layer_name: str = "pcap解析結果",
+                                     email_scan_results: list = None) -> dict:
     """
     analyze_pcap()の結果をMITRE ATT&CK Navigatorレイヤー(v4.5 JSON)に変換する。
     https://github.com/mitre-attack/attack-navigator にそのまま読み込める。
+
+    email_scan_results: scan_email_attachments()の戻り値（省略可）。添付ファイルの
+    YARA検知（verdictsの "YARA:<ルール名>"）も技術マッピング対象に含める。
     """
     techniques: dict = {}  # technique_id -> {"name", "count", "comments": set}
 
@@ -5811,6 +5827,18 @@ def generate_attack_navigator_layer(result: dict, layer_name: str = "pcap解析�
                 for tid, name in mappings:
                     _add(tid, name, alert.get("category", sig_id))
                 break
+
+    for mail in (email_scan_results or []):
+        for verdict in mail.get("verdicts", []) or []:
+            vtype = verdict.get("type", "")
+            if not vtype.startswith("YARA:"):
+                continue
+            rule = vtype[len("YARA:"):]
+            mappings = _YARA_RULE_ATTACK_MAP.get(rule)
+            if not mappings:
+                continue
+            for tid, name in mappings:
+                _add(tid, name, f"添付ファイル({mail.get('filename','')}): YARA一致 {rule}")
 
     layer_techniques = [
         {

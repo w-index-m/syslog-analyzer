@@ -4900,6 +4900,44 @@ with tab_pcap:
             except Exception as e:
                 st.warning(f"セキュリティダッシュボードの生成に失敗しました: {e}")
 
+            # メール添付ファイルのYARA検知をMITRE ATT&CK Navigatorにも反映するため、
+            # IPS検査セクションより前に計算しておく（表示自体は後段のメールセクションで行う）。
+            _mail_atts = []
+            try:
+                if hasattr(pcap_analyzer, "scan_email_attachments"):
+                    _mail_atts = pcap_analyzer.scan_email_attachments(streams=streams)
+            except Exception as _mail_err:
+                _mail_atts = []
+                print(f"[app] メール添付チェックをスキップ: {_mail_err}")
+
+            # ── 脆弱性スキャン/ポートスキャン検知のSlack通知 ──
+            # Strix/Cairn等のAI自律ペンテストエージェントが同梱するNmap/Nuclei/ffuf等の
+            # スキャンツールによる偵察は、UA文字列ではなく挙動（多数ポート/多数パスへの
+            # 機械的アクセス）で検知しているため、ツール名を問わず通知できる。
+            # 通知の有効化/Webhook設定は既存のSlack通知設定（サイドバー）を共用する。
+            try:
+                _scan_notify_items = []
+                for _sp in res.get("scan_patterns", []):
+                    if _sp.get("severity") in ("high", "critical"):
+                        _scan_notify_items.append(("port_scan", _sp))
+                for _vs in res.get("vuln_scan_detections", []):
+                    if _vs.get("severity") in ("high", "critical"):
+                        _scan_notify_items.append(("vuln_scan", _vs))
+                for _a in res.get("ips_alerts", []):
+                    if (_a.get("category") == "スキャナー/攻撃ツール"
+                            and _a.get("severity") in ("high", "critical")):
+                        _scan_notify_items.append(("scan_tool_ua", _a))
+                for _kind, _item in _scan_notify_items:
+                    _src = _item.get("src", "?")
+                    notifier.notify_alert(
+                        key=f"pcap-scan:{_kind}:{_src}",
+                        level=_item.get("severity", "medium"),
+                        message=(f"🔍 [pcap解析] スキャン活動を検知: "
+                                 f"{_item.get('detail') or _item.get('matched', '')} "
+                                 f"(種別: {_kind}, 送信元: {_src})"))
+            except Exception as _notify_err:
+                print(f"[app] スキャン検知のSlack通知をスキップ: {_notify_err}")
+
             # ── 🛡️ IPS検査（シグネチャ型 + アノマリ型 + 振る舞い型） ──
             _ips_alerts = res.get("ips_alerts", [])
             _behavior_items = (res.get("worm_propagation", []) + res.get("beaconing", [])
@@ -4922,7 +4960,8 @@ with tab_pcap:
                            "最後にホスト別のリスクスコアに束ねます。簡易ヒューリスティックのため参考情報として扱ってください。")
 
                 # ── MITRE ATT&CK Navigatorレイヤー出力 ──
-                _attack_layer = pcap_analyzer.generate_attack_navigator_layer(res, "pcap解析結果")
+                _attack_layer = pcap_analyzer.generate_attack_navigator_layer(
+                    res, "pcap解析結果", email_scan_results=_mail_atts)
                 if _attack_layer["techniques"]:
                     st.download_button(
                         f"🗺️ MITRE ATT&CK Navigator用レイヤーJSONをダウンロード"
@@ -5165,15 +5204,7 @@ with tab_pcap:
                     st.info(f"🔑 {_ep['detail']}")
 
             # ── 📧 メール添付ファイルのウイルスチェック ──────
-            # 付加機能のため、万一失敗してもページ全体を落とさないよう防御的に呼ぶ
-            # （モジュールのバージョン差異・特殊なMIME等でも安全に無視する）。
-            _mail_atts = []
-            try:
-                if hasattr(pcap_analyzer, "scan_email_attachments"):
-                    _mail_atts = pcap_analyzer.scan_email_attachments(streams=streams)
-            except Exception as _mail_err:
-                _mail_atts = []
-                print(f"[app] メール添付チェックをスキップ: {_mail_err}")
+            # _mail_atts はIPS検査セクションより前で計算済み（Navigatorレイヤーにも利用）。
             if _mail_atts:
                 st.markdown("---")
                 st.markdown("### 📧 メール添付ファイルのウイルスチェック")
